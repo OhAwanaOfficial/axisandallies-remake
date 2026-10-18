@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows"
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (Ninja)",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/linux"
+    },
+    {
+      "name": "windows-sim-only",
+      "inherits": "windows",
+      "displayName": "Windows, sim + simcli + tests only (fast)",
+      "binaryDir": "${sourceDir}/build/windows-sim",
+      "cacheVariables": { "CORPS_BUILD_GDEXT": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "windows-release", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "windows-sim-debug", "configurePreset": "windows-sim-only", "configuration": "Debug" },
+    { "name": "linux-debug", "configurePreset": "linux", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-sim-debug", "configurePreset": "windows-sim-only", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "linux-debug", "configurePreset": "linux", "configuration": "Debug", "output": { "outputOnFailure": true } }
+  ]
+}

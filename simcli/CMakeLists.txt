@@ -1,0 +1,8 @@
+add_executable(simcli main.cpp)
+target_link_libraries(simcli PRIVATE sim)
+
+if(MSVC)
+  target_compile_options(simcli PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(simcli PRIVATE -Wall -Wextra -Wpedantic)
+endif()

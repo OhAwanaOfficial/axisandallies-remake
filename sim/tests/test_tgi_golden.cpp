@@ -1,0 +1,385 @@
+// Golden tests against the player's own install (TGI_FORMAT §11.3). They read the game through
+// config/game_path.cfg and are skipped when it is missing (CI has no game data). They assert
+// hand-picked values and per-file hashes of the resolved output; no game text is committed.
+//
+// CORPS_PRINT_GOLDEN=1 prints the current per-file hashes (to refresh kGoldenHashes after a
+// deliberate resolver change).
+
+#include <doctest/doctest.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+
+#include "core/ascii.hpp"
+#include "data/tgi/resolved_dump.hpp"
+#include "data/tgi/value_parse.hpp"
+#include "tgi_fixture.hpp"
+#include "vfs/path.hpp"
+
+using namespace corps;
+using namespace corps::tgi;
+
+namespace {
+
+std::optional<std::filesystem::path> gameDir() {
+    std::ifstream in(vfs::pathFromUtf8(CORPS_SOURCE_DIR "/config/game_path.cfg"));
+    std::string line;
+    while (in && std::getline(in, line)) {
+        std::string_view t = trimAscii(line);
+        if (t.empty() || t[0] == '#' || t[0] == ';') continue;
+        if (t.size() >= 2 && t.front() == '"' && t.back() == '"') t = t.substr(1, t.size() - 2);
+        const std::filesystem::path p = vfs::pathFromUtf8(t);
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(p / "Data.rwd", ec)) return p;
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+struct Game {
+    vfs::Vfs vfs;
+    std::unique_ptr<TgiDatabase> db;
+};
+
+// Loaded once for all golden tests (the full load is the slow part, especially in Debug).
+Game* game() {
+    static std::unique_ptr<Game> loaded;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (const auto dir = gameDir()) {
+            auto g = std::make_unique<Game>();
+            std::vector<std::string> log;
+            if (vfs::mountGameInstall(g->vfs, *dir, {}, log)) {
+                g->db = loadTgiDatabase(g->vfs);
+                loaded = std::move(g);
+            }
+        }
+    }
+    return loaded.get();
+}
+
+#define REQUIRE_GAME()                                                                      \
+    Game* g = game();                                                                       \
+    if (g == nullptr) {                                                                     \
+        MESSAGE("skipped: no game install (config/game_path.cfg missing or has no Data.rwd)"); \
+        return;                                                                             \
+    }                                                                                       \
+    const TgiDatabase& db = *g->db
+
+Symbol sym(const TgiDatabase& db, std::string_view s) {
+    return db.symbols.find(s);
+}
+
+const Record* rec(const TgiDatabase& db, std::string_view type, std::string_view ids) {
+    const DefIndex::ByIdsEntry* e = db.defs.find(sym(db, type), ids);
+    return e == nullptr ? nullptr : &db.records[e->record];
+}
+
+const ResolvedNode* node(const TgiDatabase& db, const ResolvedNode* n, std::string_view path) {
+    std::size_t start = 0;
+    while (n != nullptr && start < path.size()) {
+        std::size_t slash = path.find('/', start);
+        if (slash == std::string_view::npos) slash = path.size();
+        std::string_view seg = path.substr(start, slash - start);
+        std::size_t nth = 0;
+        if (const std::size_t br = seg.find('['); br != std::string_view::npos) {
+            nth = static_cast<std::size_t>(std::stoul(std::string(seg.substr(br + 1))));
+            seg = seg.substr(0, br);
+        }
+        n = n->child(sym(db, seg), nth);
+        start = slash + 1;
+    }
+    return n;
+}
+
+std::string val(const TgiDatabase& db, const ResolvedNode* n, std::string_view key) {
+    if (n == nullptr) return "<no node>";
+    const ResolvedField* f = n->field(sym(db, key));
+    return (f != nullptr && f->hasValue()) ? std::string(f->text()) : std::string("<none>");
+}
+
+std::size_t diagsIn(const TgiDatabase& db, std::string_view file, DiagCode code) {
+    std::size_t n = 0;
+    for (const auto& d : db.diags.all()) n += (d.code == code && iequals(d.file, file)) ? 1 : 0;
+    return n;
+}
+
+const LoadedFile* loaded(const TgiDatabase& db, std::string_view path) {
+    for (const auto& f : db.files) {
+        if (iequals(f.path, path)) return &f;
+    }
+    return nullptr;
+}
+
+// Canonical dump of everything a file contributes: its records, then the templates it defines.
+std::uint64_t fileHash(const TgiDatabase& db, std::string_view path) {
+    const LoadedFile* lf = loaded(db, path);
+    if (lf == nullptr) return 0;
+    std::string dump;
+    for (const Record& r : db.records) {
+        if (r.file == lf->ast.get()) dump += dumpCanonical(r.tree);
+    }
+    for (std::size_t t = 0; t < db.templates.size(); ++t) {
+        const TemplateDef& d = db.templates.def(static_cast<TemplateId>(t));
+        if (d.file == lf->ast.get()) dump += dumpCanonical(db.resolver->resolveTemplate(static_cast<TemplateId>(t)));
+    }
+    return fnv1a64(dump);
+}
+
+}  // namespace
+
+TEST_CASE("golden: load order (1,860 files, PER/SAU mod from data/)") {
+    REQUIRE_GAME();
+    CHECK(db.files.size() == 1860);
+    std::size_t fromData = 0;
+    for (const auto& f : db.files) fromData += (f.depot == "data/") ? 1 : 0;
+    CHECK(fromData == 219);
+    CHECK(db.order.emptyWildcards.size() == 14);
+    CHECK(db.order.lists.size() == 4);
+    CHECK(db.diags.count(Severity::Error) == 0);
+}
+
+TEST_CASE("golden: diagnostics match TGI_FORMAT §10") {
+    REQUIRE_GAME();
+    CHECK(db.diags.count(DiagCode::HeaderMissingBracket) == 3);
+    CHECK(db.diags.count(DiagCode::HeaderStrayEquals) == 2);
+    CHECK(db.diags.count(DiagCode::EofUnclosedBlock) == 6);
+    CHECK(db.diags.count(DiagCode::LateOpenBrace) == 1);
+    CHECK(db.diags.count(DiagCode::ExtraCloseBrace) == 0);
+    CHECK(db.diags.count(DiagCode::UnterminatedBlockComment) == 0);
+    CHECK(db.diags.count(DiagCode::DoubledQuote) == 1);
+    CHECK(db.diags.count(DiagCode::TemplateRedefined) == 2);
+    CHECK(db.diags.count(DiagCode::UnknownTemplate) == 0);
+    CHECK(db.diags.count(DiagCode::LstMissingFile) == 0);
+    CHECK(db.diags.count(DiagCode::DuplicateIds) == 0);
+    CHECK(db.diags.count(DiagCode::UndeclaredRepeat) == 1);
+}
+
+TEST_CASE("golden: per_tank_medium (M1 acceptance: health 400, AP 65, range 20)") {
+    REQUIRE_GAME();
+    const Record* r = rec(db, "Thing", "per_tank_medium");
+    REQUIRE(r != nullptr);
+    CHECK(std::string(describeChain(db, *r)).find("AAUnitPERVehicleMediumTank") != std::string::npos);
+    const ResolvedNode* t = &r->tree;
+    CHECK(val(db, t, "category") == "UNIT");
+    CHECK(val(db, node(db, t, "BodyComponent"), "health") == "400");
+    CHECK(val(db, node(db, t, "BodyComponent"), "defense") == "6");
+    CHECK(val(db, node(db, t, "MoverComponent"), "speed_max") == "3.5");
+    CHECK(val(db, node(db, t, "MoverComponent"), "turn_radius") == "0.9");
+    const ResolvedNode* def = node(db, t, "PerformerComponent/Ability[0]/AbilityDefinition");
+    REQUIRE(def != nullptr);
+    CHECK(db.originName(def->base) == "AAMediumTankGun");
+    CHECK(val(db, def, "range") == "20");
+    CHECK(val(db, def, "recharge_time") == "6");
+    CHECK(val(db, def, "targets") == "+enemy, -air, -mine, -water");
+    CHECK(val(db, node(db, def, "Effect[0]"), "amount") == "65");
+    CHECK(val(db, node(db, def, "Effect[0]"), "damage_type_ids") == "armor_piercing");
+    CHECK(val(db, node(db, t, "PerformerComponent/Turret[0]"), "yaw_rotation_per_sec_degrees") == "37");
+    const char* props[] = {"vehicle", "tank", "nation_per", "front", "support", "combat_unit"};
+    const ResolvedNode* pc = node(db, t, "PropertiesComponent");
+    REQUIRE(pc != nullptr);
+    REQUIRE(pc->childCount(sym(db, "Property")) == 6);
+    for (std::size_t i = 0; i < 6; ++i) {
+        CHECK(val(db, pc->child(sym(db, "Property"), i), "property_IDS") == props[i]);
+    }
+    // the number parses to the exact Fixed value
+    CHECK(parseFixed(val(db, node(db, t, "MoverComponent"), "speed_max")).value.raw == 15032385536LL);
+}
+
+TEST_CASE("golden: PER infantry and regiment from the user's mod") {
+    REQUIRE_GAME();
+    CHECK(val(db, node(db, &rec(db, "Thing", "per_infantry")->tree, "BodyComponent"), "health") == "200");
+    CHECK(rec(db, "Thing", "per_infantry_amphib") != nullptr);
+    const Record* reg = rec(db, "Thing", "regiment_per_tank_medium");
+    REQUIRE(reg != nullptr);
+    CHECK(val(db, &reg->tree, "category") == "ORGANIZATION");
+    const ResolvedNode* org = node(db, &reg->tree, "OrganizationComponent");
+    REQUIRE(org != nullptr);
+    CHECK(db.originName(org->base) == "AAVehicleOrganizationComponent");
+    CHECK(val(db, org, "layout_IDS") == "regiment_vehicle_light");
+}
+
+TEST_CASE("golden: ger_engineer repair ability is rebased (hammer FX once)") {
+    REQUIRE_GAME();
+    const ResolvedNode* def = node(db, &rec(db, "Thing", "ger_engineer")->tree, "PerformerComponent/Ability[1]/AbilityDefinition");
+    REQUIRE(def != nullptr);
+    CHECK(db.originName(def->base) == "AARepairAction");
+    CHECK(def->childCount(sym(db, "WhenDo")) == 2);
+}
+
+TEST_CASE("golden: usa_carrier late '{' keeps [Size] fields and balances") {
+    REQUIRE_GAME();
+    CHECK(diagsIn(db, "Units/USA/usa_carrier.tgi", DiagCode::LateOpenBrace) == 1);
+    const ResolvedNode* size = node(db, &rec(db, "Thing", "usa_carrier")->tree, "Size");
+    CHECK(val(db, size, "scale_min") == "1.0");
+    CHECK(val(db, size, "blocking_radius") == "11");
+    CHECK(val(db, size, "target_rect_height") == "16");
+}
+
+TEST_CASE("golden: jpn_truck_armor is closed at EOF and still resolves") {
+    REQUIRE_GAME();
+    CHECK(diagsIn(db, "Units/JPN/jpn_truck_armor.tgi", DiagCode::EofUnclosedBlock) == 1);
+    CHECK(val(db, node(db, &rec(db, "Thing", "jpn_truck_armor")->tree, "BodyComponent"), "health") == "500");
+}
+
+TEST_CASE("golden: translate.tgi keeps 182 ordered records under non-nesting comments") {
+    REQUIRE_GAME();
+    std::size_t n = 0;
+    for (const Record& r : db.records) n += iequals(r.typeSpelling, "Translate") ? 1 : 0;
+    CHECK(n == 182);
+    CHECK(db.registry.policy(sym(db, "Translate")) == RecordPolicy::Ordered);
+}
+
+TEST_CASE("golden: template_object schema (types and defaults)") {
+    REQUIRE_GAME();
+    const TemplateId obj = db.templates.lookup(sym(db, "Object"));
+    REQUIRE(obj >= 0);
+    const ResolvedNode& o = db.resolver->resolveTemplate(obj);
+    CHECK(val(db, &o, "category") == "OBJECT");
+    const ResolvedNode* size = o.child(sym(db, "Size"));
+    REQUIRE(size != nullptr);
+    CHECK(size->field(sym(db, "blocking_shape"))->type == TypeWord::String);
+    CHECK(val(db, size, "blocking_shape") == "CIRCLE");
+    const ResolvedNode* view = o.child(sym(db, "View"));
+    REQUIRE(view != nullptr);
+    REQUIRE(view->decl(sym(db, "Aspect")) != nullptr);
+    CHECK(view->decl(sym(db, "Aspect"))->list);
+    CHECK(loaded(db, "Templates/template_object.tgi")->encoding == TextEncoding::Cp1252);
+}
+
+TEST_CASE("golden: SVars singleton merge, SVars_AA overrides 36 vars, 1.0f on fixed vars") {
+    REQUIRE_GAME();
+    REQUIRE(db.defs.singletons.size() >= 1);
+    const DefIndex::Singleton* sv = nullptr;
+    for (const auto& s : db.defs.singletons) {
+        if (s.type == sym(db, "SVars")) sv = &s;
+    }
+    REQUIRE(sv != nullptr);
+    CHECK(sv->records.size() == 2);
+    CHECK(val(db, &sv->merged, "GameTicksPerGameSecond") == "16");
+    CHECK(val(db, &sv->merged, "UnitSupplyEnabled") == "true");  // false in SVars.tgi
+    CHECK(val(db, &sv->merged, "RetreatingTime") == "10");       // 25 in SVars.tgi
+    CHECK(val(db, &sv->merged, "ExperienceFactionGainMultiplier") == "1.0f");
+    CHECK(parseFixed("1.0f").value == Fixed::fromInt(1));
+    CHECK(diagsIn(db, "Game/SVars_AA.tgi", DiagCode::TypeRedeclared) == 0);  // bool vs flag
+}
+
+TEST_CASE("golden: economic_aid effects stack (list append)") {
+    REQUIRE_GAME();
+    const Record* r = rec(db, "AbilityDefinition", "gbr_economic_aid");
+    REQUIRE(r != nullptr);
+    REQUIRE(r->tree.childCount(sym(db, "Effect")) == 2);
+    CHECK(val(db, r->tree.child(sym(db, "Effect"), 0), "hide_from_tooltip") == "true");
+    CHECK(val(db, r->tree.child(sym(db, "Effect"), 0), "object_ids") == "smoke_grenade");
+    CHECK(val(db, r->tree.child(sym(db, "Effect"), 1), "object_ids") == "gbr_economic_aid");
+}
+
+TEST_CASE("golden: header recoveries (stray '=', missing ']')") {
+    REQUIRE_GAME();
+    CHECK(diagsIn(db, "Game/denizen_types.tgi", DiagCode::HeaderStrayEquals) == 2);
+    const Record* bomber = rec(db, "DenizenType", "denizen_type_bomber");
+    REQUIRE(bomber != nullptr);
+    CHECK(db.originName(bomber->tree.base) == "DenizenType");
+    CHECK(diagsIn(db, "Templates/template_ability_special_op_aa.tgi", DiagCode::HeaderMissingBracket) == 2);
+}
+
+TEST_CASE("golden: localisation (BOM, spaced keys, ';' inside quotes)") {
+    REQUIRE_GAME();
+    const LoadedFile* lf = loaded(db, "Localization/strings_data_AA.tgi");
+    REQUIRE(lf != nullptr);
+    CHECK(lf->encoding == TextEncoding::Utf8Bom);
+    const Record* text = nullptr;
+    for (const Record& r : db.records) {
+        if (r.file == lf->ast.get()) text = &r;
+    }
+    REQUIRE(text != nullptr);
+    CHECK(text->tree.fields.size() == 8010);
+    CHECK(text->tree.field(sym(db, "mg_territories_Aleutian Islands_name")) != nullptr);
+    const std::string sub = val(db, &text->tree, "sounds_speech_Subtitle_text_7");
+    CHECK(sub.find("; next thing you know") != std::string::npos);
+}
+
+TEST_CASE("golden: NameList uses the same-named template implicitly") {
+    REQUIRE_GAME();
+    const Record* r = rec(db, "NameList", "namelist_alaska");
+    REQUIRE(r != nullptr);
+    CHECK(r->node->hasParentRef == false);
+    CHECK(db.originName(r->tree.base) == "NameList");
+}
+
+TEST_CASE("golden: sequential redefinition gives each paratrooper regiment its own loadout") {
+    REQUIRE_GAME();
+    const ResolvedNode* a = &rec(db, "Thing", "regiment_rus_paratrooper")->tree;
+    const ResolvedNode* b = &rec(db, "Thing", "regiment_rus_paratrooper_heavy")->tree;
+    CHECK(val(db, node(db, a, "OrganizationComponent/Slot[3]"), "element_ids") == "rus_paratrooper");
+    CHECK(val(db, node(db, b, "OrganizationComponent/Slot[3]"), "element_ids") == "rus_paratrooper_mortar");
+    CHECK(val(db, node(db, a, "EconomyComponent/Cost"), "money") == "150");
+    CHECK(val(db, node(db, b, "EconomyComponent/Cost"), "money") == "200");
+}
+
+TEST_CASE("golden: scorch_marks bare key and decimal comma") {
+    REQUIRE_GAME();
+    const Record* r = rec(db, "VFX", "scorch_mark_small_vfx");
+    REQUIRE(r != nullptr);
+    const ResolvedField* tex = r->tree.field(sym(db, "texture"));
+    REQUIRE(tex != nullptr);
+    CHECK(tex->required);  // declared bare in the template, filled by the instance
+    CHECK(tex->hasValue());
+    CHECK(val(db, &r->tree, "decal_fade_time") == "0,5");  // the resolver keeps raw text
+    CHECK(parseFixed("0,5").decimalComma);
+}
+
+TEST_CASE("golden: template_sai ('//' comment, '{}' bodies) and game_events '|*' keys") {
+    REQUIRE_GAME();
+    CHECK(loaded(db, "Templates/template_sai.tgi") != nullptr);
+    CHECK(db.diags.count(DiagCode::UnparsedLine) == 0);
+    const Record* ev = rec(db, "GameEvent", "building_construction_complete");
+    REQUIRE(ev != nullptr);
+    CHECK(val(db, &ev->tree, "game_message|*") == "#game_events_building_construction_complete_game_message|*");
+}
+
+TEST_CASE("golden: resource_list's CostList is used from other files") {
+    REQUIRE_GAME();
+    const ResolvedNode* cost = node(db, &rec(db, "Thing", "per_tank_medium")->tree, "PerformerComponent/Ability[0]/Cost");
+    REQUIRE(cost != nullptr);
+    CHECK(db.originName(cost->base) == "CostList");
+    CHECK(iequals(db.templates.def(cost->base).file->path, "Game/resource_list.tgi"));
+}
+
+TEST_CASE("golden: per-file resolved hashes (archive files) and determinism") {
+    REQUIRE_GAME();
+    struct Golden {
+        const char* path;
+        std::uint64_t hash;
+    };
+    static const Golden kGoldenHashes[] = {
+#include "golden_hashes.inc"
+    };
+#ifdef _MSC_VER
+    char* env = nullptr;
+    std::size_t envLen = 0;
+    const bool print = _dupenv_s(&env, &envLen, "CORPS_PRINT_GOLDEN") == 0 && env != nullptr;
+    std::free(env);
+#else
+    const bool print = std::getenv("CORPS_PRINT_GOLDEN") != nullptr;
+#endif
+    for (const Golden& gh : kGoldenHashes) {
+        const LoadedFile* lf = loaded(db, gh.path);
+        REQUIRE_MESSAGE(lf != nullptr, std::string(gh.path));
+        const std::uint64_t h = fileHash(db, gh.path);
+        if (print) std::printf("    {\"%s\", 0x%sULL},\n", gh.path, hex64(h).c_str());
+        if (lf->depot != "Data.rwd") continue;  // the user's own data/ may change; values are checked above
+        CHECK_MESSAGE(h == gh.hash, (std::string(gh.path) + " resolved hash is now 0x" + hex64(h)));
+    }
+
+    // A second, independent load gives a byte-identical definition set.
+    vfs::Vfs again;
+    std::vector<std::string> log;
+    REQUIRE(vfs::mountGameInstall(again, *gameDir(), {}, log));
+    const auto db2 = loadTgiDatabase(again);
+    CHECK(fnv1a64(dumpDefinitionSet(*db2)) == fnv1a64(dumpDefinitionSet(db)));
+}

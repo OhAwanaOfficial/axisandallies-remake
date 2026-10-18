@@ -1,0 +1,11 @@
+[configuration]
+
+entry_symbol = "simbridge_init"
+compatibility_minimum = "4.3"
+
+[libraries]
+
+windows.debug.x86_64 = "res://bin/windows/debug/simbridge.dll"
+windows.release.x86_64 = "res://bin/windows/release/simbridge.dll"
+linux.debug.x86_64 = "res://bin/linux/debug/libsimbridge.so"
+linux.release.x86_64 = "res://bin/linux/release/libsimbridge.so"
