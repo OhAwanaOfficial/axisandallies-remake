@@ -79,6 +79,59 @@ Bodies are zlib streams (78 9C); only "MAP" (4 zero bytes) is stored raw.
 * **Determinism:** map data is float32. The M10 importer must convert it to `Fixed` with integer-only code (decode the IEEE bits), never through the FPU inside `sim/`.
 * **Skirmish maps in the box:** 6 under `Maps/` (`(2v2)Berlin/Kursk/Market_Garden/Moscow`, `(3v3)Saint_lo/Stalingrad`). `(1v1)Golden Fields`, `(1v1)BorealForest`, `(1v1)MountianPass` and `(4v4)NorthernFrance`/`Sandstorm` are under `Maps/DeveloperMaps/`. There are 26 campaign maps and 14 trailer maps.
 
+#### 2.1.1 Terrain layers (spike, decoded on all 80 maps)
+`tools/rmp.py` decodes map size, both height layers, terrain type per tile, terrain class, blocking and (in TERRAIN v6) the settlement zones. It writes `map.json` and PNG previews (`height`, `mountain`, `surface`, `terrain`, `class`, `blocking`, `settlement`). `--survey` decodes every map in `Data.rwd`, and all 80 succeed. The format was worked out on `(1v1)Golden Fields` and checked on `(2v2)Kursk` and the campaign maps.
+
+```bash
+python -I tools/rmp.py "<game>/Data.rwd" "Maps/DeveloperMaps/(1v1)Golden Fields.RMP" --out cache/maps/golden_fields
+python -I tools/rmp.py "<game>/Data.rwd" --survey
+```
+
+**Size and coordinates**
+* A map has **N×N tiles** and **(N+1)×(N+1) height vertices**. N is 96, 128, 160, 192, 224 or 256; Golden Fields is 128.
+* A tile is **2 m**, so Golden Fields is 256 m square and the biggest maps are 512 m.
+* Vertex `(x, y)` sits at world `(2x, 2y)`. Every layer is row-major (`index = y·width + x`), and row 0 is world y = 0.
+* Verified with placed objects: their stored positions (`DYNAMIC_THINGS`, e.g. town centres at (210, 74, 2.0) and (50, 200, 2.0)) lie on the interpolated height surface under this mapping, and not under the transposed one.
+
+**`HEIGHT_MAP` and `MOUNTAIN_HEIGHT_MAP`** share one layout:
+```
+u32 version (1), f32 rangeMin (-10), f32 rangeMax (10), f32 default, u32 unknown (1), u32 count = (N+1)^2
+f32 value[count]          row-major vertex grid
+u8  vertexByte[count]     UNKNOWN: values 0..3 in HEIGHT_MAP (about 16% non-zero), all 0 in MOUNTAIN
+(MOUNTAIN_HEIGHT_MAP has one extra trailing byte, 0)
+```
+* `HEIGHT_MAP`'s default is 2.0 (the ground plane, matching `SVars ElevationDefault = 2`). `MOUNTAIN_HEIGHT_MAP`'s default is 0.
+* **Rendered ground = HEIGHT_MAP + MOUNTAIN_HEIGHT_MAP.** The mountain layer is positive under ridges and **negative under water**, so it carves lake and river beds. On Golden Fields the sum runs from −0.88 to 14.75. The objects tested sit where the mountain offset is 0, so the sum itself is inferred from the previews, not measured.
+* The floats need an integer float32→Fixed conversion before the sim sees them (see Determinism above).
+
+**`TERRAIN`**
+```
+u32 version (6 or 7), u32 unknown (1), wstr biome ("chaparral", "temperate_forest", ...)
+u32 nameCount, wstr name[nameCount]     terrain variation IDS table (245 in v6, 410/412 in v7)
+u32 tileCount = N^2, u32 recordSize (6 for v6, 8 for v7)
+v6 record: u16 word (low byte = name index, high byte = class), u16 flags, u16 orient
+v7 record: u16 nameIndex, u16 orient, u16 flags, u16 class
+...then an UNDECODED trailer (99 KB on Golden Fields, up to 363 KB): records with floats and
+small ints, probably transitions / decals / blob data.
+```
+* **Terrain type:** `names[nameIndex]` is a TGI terrain **Variation** IDS (`chaparral_grass01`, `chaparral_mountain02`, `temperate_river01`…). Its parent `[Terrain]` (texture, colour, speed modifier) lives in `Terrain/<biome>/*.tgi`.
+* **Class bits** (one byte per tile):
+  * `0x10` = mountain (`MountainTerrain`, `type = MOUNTAIN`; the TGI notes the code forces its speed to 0.0001)
+  * `0x20` = water (`WaterTerrain`, `water = true`)
+  * `0x01` = map border, the outermost ring of tiles (and `0x21` where that ring is water)
+  * `0x00` = ground
+* **Blocking for land units = mountain | water | border.** Golden Fields has 4,129 blocked tiles of 16,384 (1,589 mountain, 2,276 water, 508 border). Bridges and fords show up as non-water tiles across rivers (Kursk), so they stay passable. This is terrain blocking only: placed objects (`DYNAMIC_THINGS`: forests, buildings, villages) block on top and aren't decoded yet.
+* **Settlement zone (v6):** flags bit `0x04` marks the tiles around village/town centres. On Golden Fields, 96% of the 870 flagged tiles lie within 30 m of one of the two `chaparral_village_town_center` objects. This matches `template_object`'s `needs_space_for_settlement_zone`.
+* **orient** (0–3) is most likely the texture rotation. That's an assumption: it isn't checked against the original renderer.
+
+**Still unknown (stopped here, per the spike's scope):**
+1. **v7 flags:** none of the bits 0x1/0x2/0x4/0x8/0x10 line up with city centres on Kursk (at most 19% within 30 m), so the v7 settlement flag is still unknown. The raw flags are kept in `map.json`.
+2. The per-vertex byte after each height grid (0–3; maybe a smoothing or paint brush id).
+3. The TERRAIN trailer.
+4. The `u32 unknown = 1` fields.
+5. The world-scale constant itself: 2 m per tile is measured from object positions, not read from a header field. `GWORLD` holds `f32 0.0625` (1/16, probably the 16 ticks/s game step), not a size.
+6. Objects, kingdoms, triggers and the other chunks: out of scope for this spike (M10).
+
 ---
 
 ## 3. NIF / KF findings (spike results)
@@ -178,7 +231,7 @@ The sim reads TGI straight from the depots at startup (fast: a few MB of text). 
 
 | Question | How to answer |
 |---|---|
-| ~~Map file extension and format inside `Data.rwd`~~ | **Answered (M1):** `.rmp`, a chunked TGCK v2 container with 20–22 named zlib chunks. See §2.1. The chunk contents are M10 work |
+| ~~Map file extension and format inside `Data.rwd`~~ | **Answered (M1):** `.rmp`, a chunked TGCK v2 container with 20–22 named zlib chunks (§2.1). **Terrain layers decoded (M10 spike, §2.1.1):** size, heights, terrain types, class and blocking. Objects and the remaining chunks are M10 work |
 | ~~Where the shared biped KFs live~~ | **Answered (M1):** `Shared/Animations/Units/<Class>/*.kf` (152 files, 7 classes), bound from the animation-set templates. Unit-specific clips sit next to their models. See §3 |
 | ~~Audio container~~ | **Answered (M1):** `Data.rwd` has 1,007 RIFF WAV, PCM 16-bit **mono 22,050 Hz** (3 at 44.1 kHz under `Audio/Default/`). `Music.rwd` has 34 MP3, MPEG-1 Layer III 128 kbps 44.1 kHz joint stereo, no ID3. `Speech.rwd` has 100 MP3, 128 kbps 44.1 kHz **mono**, 99 with ID3 tags. No proprietary container; copy as is. Archive paths are `Audio/Sounds/…`, `Audio/Music/…`, `Audio/Speech/…`. TGI `files =` values are relative to the record's file (`Audio/*.tgi`, see TGI_FORMAT §9.3) |
 | Terrain textures and transitions | `Terrain/**` in TOC (`index_aa.lst` loads `Terrain/<biome>/*.tgi`) |
