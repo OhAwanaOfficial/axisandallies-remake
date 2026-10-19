@@ -76,7 +76,7 @@ Typical command: 6–20 bytes. Selections of up to 6 regiments go in **one comma
 ## 5. Determinism checking & desync tooling
 
 * After tick T (every 10 ticks), each peer computes `hash = xxh3_64(canonical sim state)` and sends `(T, hash)` to the host on ch0.
-* The canonical state is serialized in a fixed order: entity pools by ascending id, components in a fixed field order, all RNG states, kingdom state, pending queues (pathfinding included).
+* The canonical state is serialized in a fixed order: entity pools by ascending id, components in a fixed field order, all RNG states, kingdom state, and the sim's own pending queues (pathfinding included). **Command bundles for future ticks are not state.** They sit in the session's CommandQueue, peers receive them at different times, and `Sim::step` takes exactly one tick's commands. Implemented in `sim/session/state_io` (format v1).
 * **Hash mismatch:**
   1. The host broadcasts `DesyncDetected(T)`.
   2. Every peer writes `desync_<player>_<T>.state` (full canonical dump) plus the replay so far.
@@ -112,7 +112,7 @@ Then the lobby (host-authoritative state, reliable channel) collects: map/RMC pl
 ## 8. Replays ("Films") & saves
 
 ```
-Replay file (.rpl, zstd-compressed)
+Replay file (.rpl; v1 is uncompressed with a trailing xxh3 integrity hash, zstd later)
   Header  { magic, simVersion, protocolVersion, dataHash, MatchConfig, seed, playerNames }
   Stream  { TickBundle* }             // exactly what the host broadcast
   Hashes  { (tick, hash)* every 10 ticks }   // used to verify playback

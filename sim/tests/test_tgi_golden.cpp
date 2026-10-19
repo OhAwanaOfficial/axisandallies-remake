@@ -14,6 +14,10 @@
 #include <optional>
 
 #include "core/ascii.hpp"
+#include "core/sim.hpp"
+#include "data/def_compiler.hpp"
+#include "session/replay.hpp"
+#include "session/state_io.hpp"
 #include "data/tgi/resolved_dump.hpp"
 #include "data/tgi/value_parse.hpp"
 #include "tgi_fixture.hpp"
@@ -382,4 +386,113 @@ TEST_CASE("golden: per-file resolved hashes (archive files) and determinism") {
     REQUIRE(vfs::mountGameInstall(again, *gameDir(), {}, log));
     const auto db2 = loadTgiDatabase(again);
     CHECK(fnv1a64(dumpDefinitionSet(*db2)) == fnv1a64(dumpDefinitionSet(db)));
+}
+
+// ------------------------------------------------------------------------------------- M3: Def compiler
+
+namespace {
+const DefSet* compiledDefs() {
+    static std::unique_ptr<DefSet> defs;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        if (Game* g = game()) {
+            Diagnostics diags;
+            defs = std::make_unique<DefSet>(compileDefs(*g->db, diags));
+        }
+    }
+    return defs.get();
+}
+}  // namespace
+
+#define REQUIRE_DEFS()                                                                    \
+    const DefSet* defsPtr = compiledDefs();                                               \
+    if (defsPtr == nullptr) {                                                             \
+        MESSAGE("skipped: no game install (config/game_path.cfg missing or has no Data.rwd)"); \
+        return;                                                                           \
+    }                                                                                     \
+    const DefSet& defs = *defsPtr
+
+TEST_CASE("golden defs: per_tank_medium UnitDef (health 400, AP 65, range 20)") {
+    REQUIRE_DEFS();
+    const UnitDef* u = defs.unit("per_tank_medium");
+    REQUIRE(u != nullptr);
+    CHECK(u->category == "UNIT");
+    CHECK(u->health == Fixed::fromInt(400));
+    CHECK(u->defense == Fixed::fromInt(6));
+    CHECK(formatFixed(u->speedMax) == "3.5");
+    REQUIRE(u->abilities.size() == 1);
+    const AbilityDef& ab = defs.abilities[u->abilities[0]];
+    CHECK(ab.range == Fixed::fromInt(20));
+    CHECK(ab.rechargeTime == Fixed::fromInt(6));
+    REQUIRE(ab.effects.size() == 1);
+    CHECK(ab.effects[0].amount == Fixed::fromInt(65));
+    CHECK(ab.effects[0].damageType == "armor_piercing");
+    CHECK(std::find(ab.targets.begin(), ab.targets.end(), "-air") != ab.targets.end());
+    const std::vector<std::string> props = {"vehicle", "tank", "nation_per", "front", "support", "combat_unit"};
+    CHECK(u->properties == props);
+}
+
+TEST_CASE("golden defs: regiment_per_infantry slots resolve to PER units") {
+    REQUIRE_DEFS();
+    const RegimentDef* g = defs.regiment("regiment_per_infantry");
+    REQUIRE(g != nullptr);
+    REQUIRE(g->slots.size() == 6);
+    const char* expect[] = {"per_infantry", "per_infantry", "per_infantry", "per_infantry", "per_infantry_mg", "per_infantry_co"};
+    for (std::size_t i = 0; i < 6; ++i) {
+        REQUIRE(g->slots[i].kind == ElementKind::Unit);
+        CHECK(defs.units[g->slots[i].index].ids == expect[i]);
+    }
+    CHECK(g->cost.money == Fixed::fromInt(50));
+    CHECK(g->upkeep.ammo == Fixed::fromInt(10));
+    CHECK(g->moraleBreakpoint == Fixed::fromInt(20));
+    CHECK(g->layoutIds == "regiment_infantry");
+    CHECK(defs.stats.missingSlotUnits == 0);
+    // HQ regiments hold a TRUCK (packed) or the HQ building (unpacked).
+    const RegimentDef* hq = defs.regiment("regiment_gbr_hq_airborne_unpacked");
+    REQUIRE(hq != nullptr);
+    CHECK(std::any_of(hq->slots.begin(), hq->slots.end(), [](const ElementRef& e) { return e.kind == ElementKind::Building; }));
+}
+
+TEST_CASE("golden defs: buildings, nations, SVars, and the PER/SAU mod") {
+    REQUIRE_DEFS();
+    const BuildingDef* corps = defs.building("per_corps");
+    REQUIRE(corps != nullptr);
+    CHECK(corps->health == Fixed::fromInt(3500));
+    CHECK(std::find(corps->recruits.begin(), corps->recruits.end(), "regiment_per_hq_infantry") != corps->recruits.end());
+    const NationDef* per = defs.nation("nation_per");
+    REQUIRE(per != nullptr);
+    CHECK(per->factions == std::vector<std::string>{"montgomery", "wingate", "mountbatten", "wavell"});
+    CHECK(defs.nation("nation_sau") != nullptr);
+    CHECK(defs.unit("sau_tank_medium") != nullptr);
+    CHECK(defs.svars.getInt("GameTicksPerGameSecond", 0) == 16);           // SVars.tgi
+    CHECK(defs.svars.getFixed("MoraleBreakerBase", Fixed{}) == Fixed::fromInt(3));  // SVars_AA.tgi overrides
+    CHECK(defs.svars.getBool("UnitSupplyEnabled", false));
+    CHECK(defs.units.size() > 400);
+    CHECK(defs.regiments.size() > 200);
+    CHECK(defs.stats.badValues == 0);
+}
+
+TEST_CASE("golden defs: compilation is deterministic (same data hash twice)") {
+    REQUIRE_DEFS();
+    Diagnostics diags;
+    const DefSet again = compileDefs(*game()->db, diags);
+    CHECK(again.dataHash == defs.dataHash);
+    CHECK(serializeDefs(again) == serializeDefs(defs));
+}
+
+TEST_CASE("golden spawn-test: regiment_per_infantry, 100 ticks, stable hash, replay agrees") {
+    REQUIRE_DEFS();
+    Sim sim({1, &defs});
+    sim.step({makeSpawnRegiment(0, 0, 0, "regiment_per_infantry", {Fixed::fromInt(100), Fixed::fromInt(50)}, Angle{})});
+    CHECK(sim.world().registry.aliveCount() == 7);
+    CHECK(sim.world().health.size() == 6);
+    for (std::uint32_t t = 1; t < 100; ++t) sim.step();
+    const std::uint64_t h = stateHash(sim);
+    Replay rep;
+    rep.header.matchSeed = 1;
+    rep.header.tickCount = 100;
+    rep.header.dataHash = defs.dataHash;
+    rep.commands.push_back(makeSpawnRegiment(0, 0, 0, "regiment_per_infantry", {Fixed::fromInt(100), Fixed::fromInt(50)}, Angle{}));
+    CHECK(runReplay(rep, &defs).finalHash == h);
 }

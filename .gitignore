@@ -44,4 +44,6 @@ __pycache__/
 
 # Replays / desync dumps
 *.rpl
+# ...except the synthetic CI fixtures (no game data inside)
+!sim/tests/fixtures/*.rpl
 *.state

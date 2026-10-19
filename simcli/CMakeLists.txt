@@ -1,4 +1,4 @@
-add_executable(simcli main.cpp)
+add_executable(simcli main.cpp sim_commands.cpp)
 target_link_libraries(simcli PRIVATE sim)
 
 if(MSVC)

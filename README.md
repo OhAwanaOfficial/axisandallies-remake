@@ -35,6 +35,15 @@ godot-cpp, and the godot-cpp bindings take several minutes to build.
 The build puts the GDExtension in `godot/bin/`. On a fresh checkout, run `godot --headless --path godot --import`
 once so Godot registers it; `godot --path godot` then shows `SimBridge.hello()`.
 
+## Run the sim headless (M3)
+```bash
+build\windows\simcli\Debug\simcli.exe show-def regiment_per_infantry
+build\windows\simcli\Debug\simcli.exe spawn-test --regiment regiment_per_infantry --ticks 100
+build\windows\simcli\Debug\simcli.exe record --out x.rpl --ticks 600 --commands-per-tick 4
+build\windows\simcli\Debug\simcli.exe determinism-check x.rpl --per-stage
+```
+`spawn-test` compiles the TGI data into typed Defs, spawns a regiment from them, runs 100 ticks and prints the state hash. It's identical in Debug and Release. `determinism-check` replays a film twice (per tick, or per stage with `--per-stage`) and against the hashes stored in the file.
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv

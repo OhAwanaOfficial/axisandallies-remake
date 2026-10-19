@@ -89,10 +89,19 @@ flowchart LR
 * **Template resolver** builds the inheritance chain and applies overrides: scalars replace, `[list]` children append, named children deep-merge, and a child that names its own `template=` rebases. Templates bind in load order. The full grammar, rules and edge cases are in [TGI_FORMAT.md](TGI_FORMAT.md).
 * **Def compiler** turns the resolved node tree into **typed, immutable C++ structs** (`UnitDef`, `RegimentDef`, `BuildingDef`, `AbilityDef`, `ResearchDef`, `NationDef`, `GeneralDef`, `SpecialOpDef`, `RmcDef`, `SVars`, `WorldRules`...). Numbers marked `fixed` become fixed-point at compile time.
 * A **data hash** over the compiled defs is used for multiplayer and replay compatibility checks.
+* **Implemented (M3):** `sim/data/def_compiler` produces `UnitDef` (categories `UNIT` and `TRUCK`), `RegimentDef` (category `ORGANIZATION`), `BuildingDef` (`BUILDING`), `AbilityDef` (top-level, plus every inline `PerformerComponent/Ability` as `<owner>#<n>`), `NationDef` and `SVarsDef`, all with Fixed numbers.
+  * Regiment slots resolve to a unit/truck or a building. An unpacked HQ regiment's slot holds the HQ building itself.
+  * Other categories (doodads, effects, metagame, trailers…) aren't compiled yet; `simcli show-def` prints the category histogram.
+  * `dataHash = xxh3_64(serializeDefs(defs))`.
 * Unknown keys are kept and logged rather than dropped, so we can find what we haven't implemented yet (`--report-unknown`).
 
 ### 4.3 Simulation core (`sim/`)
-**Data-oriented ECS-lite.** `EntityId` is a 32-bit {index, generation} pair. Components are stored struct-of-arrays in dense pools, iterated by **ascending EntityId** (deterministic).
+**Data-oriented ECS-lite** (`sim/ecs`).
+* **`EntityId`** is 32 bits: a 12-bit generation (high) and a 20-bit index (low). Generations start at 1, so 0 is the null id.
+* **Destruction** is deferred to the Cleanup stage. The freed index then goes to the back of a FIFO free list.
+* **Retirement:** a slot whose generation would wrap past 4095 is retired, never reused, so a stale id can't alias a newer entity.
+* **Pools:** each component lives in a sparse-set pool whose dense arrays stay sorted by entity index. A plain walk is therefore always **ascending EntityId** (deterministic).
+* **Current components:** `Transform`, `DefRef`, `Health` and `Member`. More arrive with their systems.
 
 Components mirror the original:
 
@@ -116,7 +125,7 @@ Components mirror the original:
 
 **Fixed tick order (10 Hz, 100 ms per tick).** It never changes at runtime:
 
-1. **Apply commands** scheduled for this tick (sorted by player id, then sequence).
+1. **Apply commands** for this tick, sorted by player id, then sequence, then position in the bundle. `Sim::step(commands)` receives exactly one tick's commands. The **CommandQueue** that holds future commands belongs to the session (replay player, lockstep scheduler), not to the sim. Peers receive future bundles at different times, so future commands must not be part of the hashed state. A command for any other tick is rejected deterministically.
 2. **Economy**: production, upkeep, oil/ammo shortfall → money conversion, limits.
 3. **Construction / pack / unpack / recruit / research** timers.
 4. **Orders → plans**: regiment/group order state machines (move, attack, guard, run, retreat).
@@ -132,10 +141,29 @@ Components mirror the original:
 
 Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are appended to a per-tick buffer that the view drains.
 
-**Math library (`sim/math`).**
-* `Fixed`: Q32.32 stored in `int64` (ample range for map coordinates and products). Use 128-bit intermediates for multiply and divide (`__int128` on GCC/Clang, `_mul128` on MSVC, or a portable helper).
-* `FVec2`, integer `sqrt`, `atan2`/`sin`/`cos` from lookup tables with linear interpolation. Angles are 16-bit binary angles.
-* `Rng`: PCG32, **one stream owned by the sim**, seeded from the match seed. Sub-streams per system are derived deterministically.
+**Math library (`sim/math`, M3).**
+* **`Fixed`:** Q32.32 in `int64`, range ±2³¹, resolution 2⁻³².
+  * Multiply and divide use 128-bit intermediates (`math/int128.hpp`). There's a portable constexpr version; fast paths use `__int128` on GCC/Clang or `_umul128`/`_udiv128` on MSVC x64, and clang-cl divides portably. A test checks the fast and portable paths give identical bits.
+  * **Rounding:** multiply rounds half up; divide rounds to nearest, ties away from zero.
+  * **Overflow:** results **saturate** to min/max. Division by zero gives ±max (0/0 gives 0). There's no signed-overflow undefined behaviour anywhere.
+  * Saturations are counted for diagnostics only; the sim never reads the count.
+  * `1.5_fx` literals are parsed from their characters at compile time, never as a float.
+* **`isqrt64`/`isqrt128`** give the exact floor square root; Fixed `sqrt` is built on them.
+* **`Angle`** is a 16-bit binary angle (65536 = one full turn).
+  * `sin`/`cos` use a 4,097-entry quarter-wave table with linear interpolation (error about 2·10⁻⁸).
+  * `atan2` folds the input into one octant and uses a 4,097-entry arctan table. It inverts sin/cos to within 1 unit for all 65,536 angles.
+  * The tables (`math/trig_tables.inc`) come from `tools/gen_trig_tables.py`, which uses exact decimal arithmetic (no libm). CTest checks the committed tables are current.
+* **`FVec2`:** dot and cross accumulate in 128 bits and round once. `length()` works for every representable vector.
+* **`Rng`** is PCG32 (pcg32_random_r; the reference vector is a test).
+  * **One stream is owned by the sim**, derived from the match seed. Per-system sub-streams are `Rng::derive(matchSeed, streamId)` with fixed `RngStream` ids, so adding a system never shifts another system's draws.
+  * Bounded draws use Lemire's unbiased method.
+* **Cross-platform check:** a fixed checksum over 10k mixed operations must match on every compiler and build type.
+
+**Canonical state, replays and determinism tooling (`sim/session`, M3).**
+* **`saveState`/`loadState`:** one byte layout (format v1) used for the state hash, saves and desync dumps. It holds the header (tick, seed, data hash, RNG), the entity registry, then each component pool by ascending id. **The state hash is `xxh3_64`** of those bytes; xxHash 0.8.2 is vendored in `third_party/`.
+* **Replays (`.rpl`):** header (sim version = git tree hash of `sim/`, data hash, seed), commands, and `(tick, hash)` every 10 ticks, followed by an integrity hash.
+* **`simcli` commands:** `record` / `play` / `determinism-check [--every-tick] [--per-stage]`. The determinism check runs the replay twice from fresh Sims and compares per-tick hashes, and per-stage hashes with `--per-stage`. It also compares against the hashes stored in the file, which may come from another build or OS. A committed synthetic fixture (`sim/tests/fixtures/synthetic_300.rpl`) is replayed on every CI job.
+* **Tick rate:** we run **10 Hz** as specified here and in NETCODE. The original's `SVars` says `GameTicksPerGameSecond = 16`. It's one constant (`kTicksPerSecond`), so it can change before movement (M4) bakes in per-tick numbers.
 * The sim is **2D**: the ground plane (x, y). Height is view-only (terrain heightmap sampling for rendering). Air units carry a layer flag, not a z coordinate.
 
 ### 4.4 Presentation (`godot/`)

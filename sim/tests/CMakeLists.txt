@@ -2,6 +2,8 @@ add_executable(sim_tests
   main.cpp
   test_hello.cpp
   test_vfs.cpp
+  test_math.cpp
+  test_sim.cpp
   test_tgi_parse.cpp
   test_tgi_values.cpp
   test_tgi_lst.cpp

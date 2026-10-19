@@ -16,7 +16,7 @@ A reimplementation of TimeGate's 2004 regiment-based WWII RTS engine. It **reads
    - no Godot headers, no wall clock, no threads, no `rand()`; only the sim `Rng`
    - no iteration over unordered containers; iterate by ascending `EntityId`
    - every state change goes through a **Command** applied at a scheduled tick
-3. Sim changes need tests. From M3 on, also run `simcli determinism-check`.
+3. Sim changes need tests. From M3 on, also run `simcli determinism-check` (e.g. on `sim/tests/fixtures/synthetic_300.rpl`, or on a fresh `simcli record --out x.rpl --spawn regiment_per_infantry`). Use `--per-stage` to find the first diverging system.
 4. The view never mutates sim state. It reads snapshots and events only.
 5. The AI is a host-side controller that emits Commands. It is **not** part of the sim.
 6. When behaviour or design changes, update the matching `docs/*.md` in the same change.

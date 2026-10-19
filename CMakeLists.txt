@@ -28,6 +28,9 @@ if(CORPS_BUILD_TESTS)
   FetchContent_MakeAvailable(doctest)
   unset(CMAKE_POLICY_VERSION_MINIMUM)
   add_subdirectory(sim/tests)
+  # The CLI path of the determinism check, on the committed synthetic replay (no game data needed).
+  add_test(NAME simcli_determinism_check
+    COMMAND simcli determinism-check ${CMAKE_SOURCE_DIR}/sim/tests/fixtures/synthetic_300.rpl --per-stage)
 
   # Determinism guard: no float/double in sim/.
   find_package(Python3 COMPONENTS Interpreter)
@@ -36,6 +39,8 @@ if(CORPS_BUILD_TESTS)
       COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/check_no_float.py ${CMAKE_SOURCE_DIR}/sim)
     add_test(NAME no_float_check_selftest
       COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/check_no_float.py --self-test)
+    add_test(NAME trig_tables_current
+      COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/gen_trig_tables.py --check)
     add_test(NAME tools_python_tests
       COMMAND ${Python3_EXECUTABLE} -I -m unittest discover -s ${CMAKE_SOURCE_DIR}/tools/tests)
   else()

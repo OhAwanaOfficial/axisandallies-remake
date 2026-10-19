@@ -5,6 +5,11 @@
 //   simcli dump-tgi <vfs-path | file> [--game DIR]
 //   simcli dump-defs [--game DIR] [--json] [--explain <IDS> [<field-path>]] [--report-unknown]
 //                    [--strict] [--diags]
+//   simcli show-def IDS                       compiled (typed) Def
+//   simcli spawn-test [--regiment IDS] [--at X,Y] [--ticks N] [--seed S] [--out F.rpl]
+//   simcli record --out F.rpl [--ticks N] [--seed S] [--commands-per-tick K] [--spawn IDS]
+//   simcli play F.rpl
+//   simcli determinism-check F.rpl [--every-tick] [--per-stage]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -14,13 +19,16 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "core/ascii.hpp"
 #include "core/hello.hpp"
+#include "sim_commands.hpp"
 #include "data/tgi/pipeline.hpp"
 #include "data/tgi/resolved_dump.hpp"
 #include "vfs/dir_depot.hpp"
@@ -43,7 +51,13 @@ void usage() {
                  "  simcli load-order [--game DIR]\n"
                  "  simcli dump-tgi <vfs-path|file> [--game DIR]\n"
                  "  simcli dump-defs [--game DIR] [--json] [--explain <IDS> [<field-path>]]\n"
-                 "                   [--report-unknown] [--strict] [--diags]\n");
+                 "                   [--report-unknown] [--strict] [--diags]\n"
+                 "  simcli show-def IDS [--game DIR]\n"
+                 "  simcli spawn-test [--regiment IDS] [--at X,Y] [--facing DEG] [--ticks N] [--seed S] [--out F.rpl]\n"
+                 "  simcli record --out F.rpl [--ticks N] [--seed S] [--command-seed C] [--commands-per-tick K]\n"
+                 "                [--spawn REGIMENT_IDS [--at X,Y]]\n"
+                 "  simcli play F.rpl\n"
+                 "  simcli determinism-check F.rpl [--every-tick] [--per-stage]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -121,7 +135,12 @@ struct Args {
     bool diags = false;
     std::optional<std::string> explainIds;
     std::string explainPath;
+    std::map<std::string, std::string> options;  // other --name [value] options (sim commands)
 };
+
+const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-seed", "commands-per-tick",
+                                             "spawn", "at", "regiment", "facing"};
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
     Args a;
@@ -144,8 +163,15 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             a.explainIds = argv[i];
             if (i + 1 < argc && std::string_view(argv[i + 1]).rfind("--", 0) != 0) a.explainPath = argv[++i];
         } else if (arg.rfind("--", 0) == 0) {
-            std::fprintf(stderr, "unknown option %s\n", argv[i]);
-            return std::nullopt;
+            const std::string name(arg.substr(2));
+            if (kValueOptions.count(name) != 0 && i + 1 < argc) {
+                a.options[name] = argv[++i];
+            } else if (kFlagOptions.count(name) != 0) {
+                a.options[name] = "1";
+            } else {
+                std::fprintf(stderr, "unknown option %s\n", argv[i]);
+                return std::nullopt;
+            }
         } else {
             a.positional.emplace_back(arg);
         }
@@ -298,6 +324,15 @@ int main(int argc, char** argv) {
     if (args->command == "load-order") return cmdLoadOrder(*args, *gameDir);
     if (args->command == "dump-tgi") return cmdDumpTgi(*args, gameDir);
     if (args->command == "dump-defs") return cmdDumpDefs(*args, *gameDir);
+    simcli::SimArgs sa;
+    sa.options = args->options;
+    sa.positional = args->positional;
+    sa.gameDir = gameDir;
+    if (args->command == "record") return simcli::cmdRecord(sa);
+    if (args->command == "play") return simcli::cmdPlay(sa);
+    if (args->command == "determinism-check") return simcli::cmdDeterminismCheck(sa);
+    if (args->command == "spawn-test") return simcli::cmdSpawnTest(sa);
+    if (args->command == "show-def") return simcli::cmdShowDef(sa);
     usage();
     return kExitUsage;
 }
