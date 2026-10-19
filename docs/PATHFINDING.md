@@ -61,7 +61,7 @@ Roads: a per-cell "road" flag gives a speed multiplier and a cost bonus for Whee
 * No caches keyed by pointer. Any path cache is keyed by `(class, startCluster, goalCluster, navVersion)` in a deterministic map.
 
 ### 3.1 Request budget
-* `PathService` keeps a **FIFO queue** ordered by `(requestTick, regimentId)`.
+* `PathService` keeps a **FIFO queue** ordered by `(requestTick, regimentId)` (implemented as `(requestTick, requester EntityId, request id)`; see §9 for how suspension is done).
 * Each tick it spends a fixed **node-expansion budget** (e.g. 20,000 expansions). A search that runs out of budget **suspends** and resumes next tick. Results are applied when the search finishes. That's deterministic because the budget is a count, not a time.
 * While waiting, a regiment starts moving **straight toward the goal**, which looks responsive. Once the path arrives it follows the path. (If the straight line is blocked, it simply waits; the delay is a tick or two.)
 * **Flow fields** (optional optimization, M9): when ≥ 4 regiments of the same class request the same goal cluster in the same tick, compute one integer flow field over the relevant clusters and share it.
@@ -142,3 +142,59 @@ Kept simple and **integer-only**. No floating-point RVO/ORCA.
 * `simcli nav-bench <map>`: random start/goal pairs, reports average and p99 expansions and time.
 * **Golden-path tests:** fixed maps plus queries → hash of the resulting paths must equal a committed value (catches accidental nondeterminism).
 * Determinism test: same replay under Debug and Release builds, and MSVC vs Clang → identical per-tick hashes.
+
+---
+
+## 9. Implementation status (M4 part 1: sim only)
+
+Code: `sim/nav/` (`map_def`, `nav_grid`, `grid_search`, `hpa`, `path_service`, `nav_world`), the Pathfinding stage in `sim/systems/stages.cpp`, tests in `sim/tests/test_nav.cpp`, `simcli nav-bench` in `simcli/nav_bench.cpp`. No movement yet: paths are computed and stored, nothing follows them (part 2).
+
+**Maps (`MapDef`).** Immutable and shared like the DefSet, passed in `SimConfig::map`, identified by `mapHash` (xxh3 of its canonical bytes) in states and replays. One cell = 1 world unit; an original 2-unit tile becomes 2×2 cells. Terrain kinds: Ground, Road, Forest, Beach, Shallow, Water, Mountain, Border. Heights are stored as `Fixed` for the view; the sim never reads them. Sources:
+* `generateTestMap(seed, size)`: border ring, 1–2 oceans (beach → shallow → deep), 3–5 mountain blobs, 6–10 forest blobs, one road row and one road column. Named `gen:SEED:SIZE`, which is enough to rebuild it.
+* `loadRmpJson`: `tools/rmp.py` output (ASSET_PIPELINE §2.1.1). Kind per tile from the class bits (border > mountain > water, "shallow" in the name → Shallow) then name keywords ("trans" → Ground, shore/beach, forest/jungle, road). Original roads are objects, not terrain, so real maps have no Road cells until M10 imports objects.
+
+**Interim cost table** (×16, 0 = blocked; until per-terrain TGI speed modifiers are wired in):
+
+| Kind | Foot | Wheeled | Tracked | Naval | Amphibious |
+|---|---|---|---|---|---|
+| Ground | 16 | 16 | 16 | 0 | 16 |
+| Road | 16 | 12 | 12 | 0 | 16 |
+| Forest | 24 | 48 | 32 | 0 | 24 |
+| Beach | 16 | 20 | 20 | 0 | 16 |
+| Shallow / Water | 0 | 0 | 0 | 16 | 16 |
+| Mountain / Border | 0 | 0 | 0 | 0 | 0 |
+
+**Grid.** 8-way moves, no corner cutting (a diagonal needs both orthogonal neighbours passable; labels use the same rule, so "same label" means reachable). Step cost = (10 | 14) × (cost[from] + cost[to]), int32. Heuristic = octile × 2 × the class's minimum cost (admissible with roads). Building stamps are ref-counted per cell and block every class; each stamp or unstamp marks the touched clusters dirty. Labels also keep a bounding box per component.
+
+**HPA\*.** 16×16 clusters. Along each shared border, a run is a maximal stretch of cell pairs with the **same non-zero crossing cost**: one entrance in the middle of a run shorter than 6, one at each end of longer runs. Splitting runs by cost (rather than by passability only) keeps roads and forest edges as their own entrances. Without it, wheeled paths that should follow a road came out up to 1.5× optimal. Nodes are identified by cell index; intra edges come from bounded Dijkstra runs. `rebuildDirty()` (start of the Pathfinding stage) rebuilds dirty clusters plus their 4 neighbours for every class in ascending order, recomputes labels, and bumps `version`. A test checks that the incremental rebuild equals a from-scratch build.
+
+**Query** (`PathService`, one job at a time, FIFO by (requestTick, requester EntityId, request id)):
+1. A start on a blocked cell moves to the nearest passable cell. A goal in another component moves to the nearest cell with the start's label (status `FoundNearest`). Both use a square-ring spiral ordered by (distance², cell index), clipped to the component's bounding box.
+2. Bounded Dijkstra from start and goal to their clusters' entrances, then A\* on the abstract graph (heap keyed on (f, h, cell)).
+3. **Short-request shortcut:** when start and goal are within 48 cells (Chebyshev), a plain A\* in their bounding box ± 16 cells also runs, and the cheaper result wins (ties go to the local path). HPA\*'s entrance detours cost the most, relative to path length, on short paths.
+4. Refinement: each abstract segment is one cluster-bounded A\* (an inter edge is a single step). **Deviation from §3:** all segments are refined before the result is delivered. Lazy refinement of the next 2–3 segments needs the movement system, so it lands with M4 part 2.
+5. Smoothing: string pulling in a 64-cell look-ahead window. Each waypoint jumps to the farthest cell in the window with line of sight (integer supercover; at an exact corner both side cells must be open). A shortcut may not cross a cell costlier than the costliest cell it replaces.
+
+**Budget** (`kPathBudgetPerTick` = 20,000). **Deviation from §3.1:** a job suspends **between work units**, not mid-search. The units are (endpoint resolution + abstract search + short-request shortcut) and then one refined segment each. A unit that has started runs to completion, and any overrun is carried into the next tick as debt, so spend averages the budget. Every unit costs at least 1. Results do not depend on the budget (tested with budgets 1, 37 and 20,000). A suspended job whose graph `version` changed restarts from scratch.
+
+**Sim integration.**
+* Components: `Footprint` (stamped cell rect) and `Path` (status incl. Pending, move class, request id, cost, smoothed waypoints).
+* Debug commands: `DebugPlaceBlocker` (204, a building stand-in) and `DebugRequestPath` (205). Destroying a footprint entity unstamps it at Cleanup; the rebuild happens in the next tick's Pathfinding stage.
+* Finished paths are written to requesters that are still alive and haven't asked again since.
+* State format v2 stores the graph version, pending dirty clusters and the PathService (queue, suspended job, debt, next id). Loading swaps the stamps for the loaded footprints and rebuilds the touched clusters.
+* Replay format v2 names the map.
+
+**Measured** (Release, MSVC, 500 random queries per class, `nav-bench --optimal`):
+
+| Map | Build | Foot ms/query | Expansions avg / p99 | Cost vs optimal (mean / worst) |
+|---|---|---|---|---|
+| gen:7:256 | 240 ms | 0.28 | 768 / 2,405 | 1.027 / 1.139 (all classes ≤ 1.173) |
+| Golden Fields (256²) | 237 ms | 0.25 | 803 / 1,772 | 1.028 / 1.114 (all classes ≤ 1.163) |
+| Kursk (448², tracked) | 853 ms | 0.43 | 1,160 / 2,283 | 1.034 / 1.165 |
+
+Tests enforce mean ≤ 1.05× and worst ≤ 1.25× on generated maps (`simcli nav-bench --optimal` exits non-zero past the same bounds).
+
+**Open:**
+* At about 3,000 expansions per ms, a full 20,000 budget is about 6–7 ms, over the 3 ms target in §1. Either lower the budget once real request rates are known, or optimise (heap allocations per search, label recompute on every rebuild).
+* The 256² rebuild after a stamp recomputes labels for the whole map.
+* Golden-path hashes and the nav fixture (`sim/tests/fixtures/synthetic_nav_300.rpl`) are recorded with MSVC. The Clang CI legs check them on the next push.

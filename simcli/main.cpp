@@ -8,8 +8,11 @@
 //   simcli show-def IDS                       compiled (typed) Def
 //   simcli spawn-test [--regiment IDS] [--at X,Y] [--ticks N] [--seed S] [--out F.rpl]
 //   simcli record --out F.rpl [--ticks N] [--seed S] [--commands-per-tick K] [--spawn IDS]
-//   simcli play F.rpl
-//   simcli determinism-check F.rpl [--every-tick] [--per-stage]
+//                 [--map F.json | --gen SEED [--size N]]
+//   simcli play F.rpl [--map F.json]
+//   simcli determinism-check F.rpl [--every-tick] [--per-stage] [--map F.json]
+//   simcli nav-bench [--map F.json | --gen SEED [--size N]] [--queries N] [--class C|all] [--seed S]
+//                    [--budget B] [--optimal]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -55,9 +58,11 @@ void usage() {
                  "  simcli show-def IDS [--game DIR]\n"
                  "  simcli spawn-test [--regiment IDS] [--at X,Y] [--facing DEG] [--ticks N] [--seed S] [--out F.rpl]\n"
                  "  simcli record --out F.rpl [--ticks N] [--seed S] [--command-seed C] [--commands-per-tick K]\n"
-                 "                [--spawn REGIMENT_IDS [--at X,Y]]\n"
-                 "  simcli play F.rpl\n"
-                 "  simcli determinism-check F.rpl [--every-tick] [--per-stage]\n");
+                 "                [--spawn REGIMENT_IDS [--at X,Y]] [--map F.json | --gen SEED [--size N]]\n"
+                 "  simcli play F.rpl [--map F.json]\n"
+                 "  simcli determinism-check F.rpl [--every-tick] [--per-stage] [--map F.json]\n"
+                 "  simcli nav-bench [--map F.json | --gen SEED [--size N]] [--queries N] [--class C|all]\n"
+                 "                   [--seed S] [--budget B] [--optimal]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -139,8 +144,9 @@ struct Args {
 };
 
 const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-seed", "commands-per-tick",
-                                             "spawn", "at", "regiment", "facing"};
-const std::set<std::string> kFlagOptions = {"every-tick", "per-stage"};
+                                             "spawn", "at", "regiment", "facing",
+                                             "map", "gen", "size", "queries", "class", "budget"};
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
     Args a;
@@ -333,6 +339,7 @@ int main(int argc, char** argv) {
     if (args->command == "determinism-check") return simcli::cmdDeterminismCheck(sa);
     if (args->command == "spawn-test") return simcli::cmdSpawnTest(sa);
     if (args->command == "show-def") return simcli::cmdShowDef(sa);
+    if (args->command == "nav-bench") return simcli::cmdNavBench(sa);
     usage();
     return kExitUsage;
 }

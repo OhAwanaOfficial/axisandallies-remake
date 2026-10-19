@@ -31,6 +31,12 @@ if(CORPS_BUILD_TESTS)
   # The CLI path of the determinism check, on the committed synthetic replay (no game data needed).
   add_test(NAME simcli_determinism_check
     COMMAND simcli determinism-check ${CMAKE_SOURCE_DIR}/sim/tests/fixtures/synthetic_300.rpl --per-stage)
+  # Same with nav traffic (blockers, path requests) on the generated map the replay names.
+  add_test(NAME simcli_determinism_check_nav
+    COMMAND simcli determinism-check ${CMAKE_SOURCE_DIR}/sim/tests/fixtures/synthetic_nav_300.rpl --per-stage)
+  # HPA* quality bounds on a generated map (exits non-zero past mean 1.05x / worst 1.25x of optimal).
+  add_test(NAME simcli_nav_bench
+    COMMAND simcli nav-bench --gen 4 --size 192 --queries 150 --optimal)
 
   # Determinism guard: no float/double in sim/.
   find_package(Python3 COMPONENTS Interpreter)

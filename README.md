@@ -44,6 +44,16 @@ build\windows\simcli\Debug\simcli.exe determinism-check x.rpl --per-stage
 ```
 `spawn-test` compiles the TGI data into typed Defs, spawns a regiment from them, runs 100 ticks and prints the state hash. It's identical in Debug and Release. `determinism-check` replays a film twice (per tick, or per stage with `--per-stage`) and against the hashes stored in the file.
 
+## Pathfinding bench (M4)
+```bash
+build\windows\simcli\Release\simcli.exe nav-bench --gen 7 --size 256 --queries 500 --optimal
+python -I tools/rmp.py "<game>/Data.rwd" "Maps/DeveloperMaps/(1v1)Golden Fields.RMP" --out cache/maps/golden_fields
+build\windows\simcli\Release\simcli.exe nav-bench --map cache/maps/golden_fields/map.json --optimal
+build\windows\simcli\Release\simcli.exe record --out nav.rpl --gen 7 --size 128 --ticks 300 --commands-per-tick 4
+build\windows\simcli\Release\simcli.exe determinism-check nav.rpl --per-stage
+```
+`nav-bench` runs random start/goal pairs per movement class through the budgeted PathService and reports expansions (avg, p50, p99), time, fallbacks and a hash of every path; `--optimal` also compares each path's cost with a full-grid A* (fails past 1.05x mean / 1.25x worst). `--map` takes `tools/rmp.py` output; `--gen SEED --size N` makes a deterministic test map. Replays recorded on a map regenerate it (`gen:` maps) or need the same `--map` file.
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv

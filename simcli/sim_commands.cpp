@@ -126,6 +126,19 @@ bool dataForReplay(const SimArgs& a, const Replay& rep, std::unique_ptr<GameData
     return true;
 }
 
+// Map for a replay: regenerated for "gen:" specs, else --map F.json; the hash must match.
+bool mapForReplay(const SimArgs& a, const Replay& rep, std::optional<nav::MapDef>& map) {
+    std::optional<nav::MapDef> supplied;
+    if (!mapFromArgs(a, supplied)) return false;
+    std::string err;
+    if (!resolveReplayMap(rep.header, supplied ? &*supplied : nullptr, map, err)) {
+        std::fprintf(stderr, "map: %s\n", err.c_str());
+        return false;
+    }
+    if (map) std::fprintf(stderr, "map: %s (%ux%u cells)\n", map->name.c_str(), map->width, map->height);
+    return true;
+}
+
 }  // namespace
 
 std::string SimArgs::get(const std::string& name, const std::string& fallback) const {
@@ -135,13 +148,16 @@ std::string SimArgs::get(const std::string& name, const std::string& fallback) c
 
 // simcli record --out F.rpl [--ticks N] [--seed S] [--command-seed C] [--commands-per-tick K]
 //                [--spawn REGIMENT_IDS [--at X,Y]]   (with --spawn: uses the game data)
+//                [--map F.json | --gen SEED [--size N]]   (adds blockers and path requests)
 int cmdRecord(const SimArgs& a) {
     const std::string out = a.get("out");
     if (out.empty()) {
         std::fprintf(stderr, "usage: simcli record --out F.rpl [--ticks N] [--seed S] [--command-seed C] "
-                     "[--commands-per-tick K] [--spawn REGIMENT_IDS [--at X,Y]]\n");
+                     "[--commands-per-tick K] [--spawn REGIMENT_IDS [--at X,Y]] [--map F.json | --gen SEED [--size N]]\n");
         return kUsage;
     }
+    std::optional<nav::MapDef> map;
+    if (!mapFromArgs(a, map)) return kFail;
     const auto ticks = static_cast<std::uint32_t>(parseU64(a.get("ticks"), 300));
     const std::uint64_t seed = parseU64(a.get("seed"), 1);
     std::unique_ptr<GameData> game;
@@ -154,7 +170,7 @@ int cmdRecord(const SimArgs& a) {
     }
     const Replay rep = recordSynthetic(seed, parseU64(a.get("command-seed"), seed + 1), ticks,
                                        static_cast<std::uint32_t>(parseU64(a.get("commands-per-tick"), 2)),
-                                       game ? &game->defs : nullptr, extra);
+                                       game ? &game->defs : nullptr, extra, map ? &*map : nullptr);
     if (!writeFile(out, encodeReplay(rep))) {
         std::fprintf(stderr, "cannot write %s\n", out.c_str());
         return kFail;
@@ -175,10 +191,14 @@ int cmdPlay(const SimArgs& a) {
     std::unique_ptr<GameData> game;
     const DefSet* defs = nullptr;
     if (!dataForReplay(a, rep, game, defs)) return kFail;
+    std::optional<nav::MapDef> map;
+    if (!mapForReplay(a, rep, map)) return kFail;
     if (rep.header.simVersion != simVersion()) {
         std::fprintf(stderr, "note: recorded with sim %s, this is sim %s\n", rep.header.simVersion.c_str(), simVersion());
     }
-    const RunResult run = runReplay(rep, defs);
+    RunOptions opt;
+    opt.map = map ? &*map : nullptr;
+    const RunResult run = runReplay(rep, defs, opt);
     const Divergence d = divergenceFromRecorded(rep, run);
     if (d.found) {
         printDivergence("replay vs recording", d);
@@ -202,7 +222,10 @@ int cmdDeterminismCheck(const SimArgs& a) {
     std::unique_ptr<GameData> game;
     const DefSet* defs = nullptr;
     if (!dataForReplay(a, rep, game, defs)) return kFail;
+    std::optional<nav::MapDef> map;
+    if (!mapForReplay(a, rep, map)) return kFail;
     RunOptions opt;
+    opt.map = map ? &*map : nullptr;
     opt.everyTick = a.has("every-tick") || a.has("per-stage");
     opt.perStage = a.has("per-stage");
     const RunResult first = runReplay(rep, defs, opt);
