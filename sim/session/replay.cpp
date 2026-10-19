@@ -24,6 +24,8 @@ std::vector<std::uint8_t> encodeReplay(const Replay& r) {
     w.str(r.header.simVersion);
     w.u16(r.header.protocolVersion);
     w.u64(r.header.dataHash);
+    w.str(r.header.mapSpec);
+    w.u64(r.header.mapHash);
     w.u64(r.header.matchSeed);
     w.u32(r.header.tickCount);
     w.u16(r.header.hashInterval);
@@ -66,6 +68,8 @@ bool decodeReplay(const std::vector<std::uint8_t>& bytes, Replay& out, std::stri
     rep.header.simVersion = r.str();
     rep.header.protocolVersion = r.u16();
     rep.header.dataHash = r.u64();
+    rep.header.mapSpec = r.str();
+    rep.header.mapHash = r.u64();
     rep.header.matchSeed = r.u64();
     rep.header.tickCount = r.u32();
     rep.header.hashInterval = r.u16();
@@ -97,7 +101,7 @@ bool decodeReplay(const std::vector<std::uint8_t>& bytes, Replay& out, std::stri
 
 RunResult runReplay(const Replay& replay, const DefSet* defs, const RunOptions& options) {
     RunResult res;
-    Sim sim({replay.header.matchSeed, defs});
+    Sim sim({replay.header.matchSeed, defs, options.map});
     CommandQueue queue;  // session side: delivers each tick's bundle, like the lockstep scheduler
     for (const Command& c : replay.commands) {
         if (!queue.schedule(c, 0)) ++res.rejectedSchedules;
@@ -121,23 +125,30 @@ RunResult runReplay(const Replay& replay, const DefSet* defs, const RunOptions& 
 }
 
 Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::uint32_t ticks,
-                       std::uint32_t commandsPerTick, const DefSet* defs, const std::vector<Command>& extra) {
+                       std::uint32_t commandsPerTick, const DefSet* defs, const std::vector<Command>& extra,
+                       const nav::MapDef* map) {
     constexpr std::uint32_t kInputDelay = 3;  // NETCODE §2 default
     Replay rep;
     rep.header.simVersion = simVersion();
     rep.header.dataHash = defs != nullptr ? defs->dataHash : 0;
+    rep.header.mapSpec = map != nullptr ? map->name : "";
+    rep.header.mapHash = map != nullptr ? map->mapHash : 0;
     rep.header.matchSeed = matchSeed;
     rep.header.tickCount = ticks;
     rep.header.players = {"P1", "P2"};
 
-    Sim sim({matchSeed, defs});
+    Sim sim({matchSeed, defs, map});
     CommandQueue queue;
     Rng host(commandSeed, 99);  // host-side: never touches sim state
     std::uint16_t seq[2] = {0, 0};
     for (const Command& c : extra) {
         if (queue.schedule(c, 0)) rep.commands.push_back(c);
     }
-    const auto randomPos = [&host]() {
+    const auto randomPos = [&host, map]() {
+        if (map != nullptr) {  // inside the map, off the border ring
+            const auto w = static_cast<std::int32_t>(map->width), h = static_cast<std::int32_t>(map->height);
+            return FVec2{Fixed::fromInt(host.range(1, w - 2)) + host.fixed01(), Fixed::fromInt(host.range(1, h - 2)) + host.fixed01()};
+        }
         return FVec2{Fixed::fromInt(host.range(-200, 200)) + host.fixed01(), Fixed::fromInt(host.range(-200, 200)) + host.fixed01()};
     };
     for (std::uint32_t t = 0; t < ticks; ++t) {
@@ -148,6 +159,33 @@ Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::
             const auto& alive = sim.world().transforms.ids();
             const EntityId target = alive.empty() ? EntityId::make(host.below(64), 1) : alive[host.below(static_cast<std::uint32_t>(alive.size()))];
             Command c;
+            if (map != nullptr) {
+                switch (host.below(12)) {
+                case 0: case 1: case 2:
+                    c = makeDebugSpawn(due, player, s, randomPos(), Angle::fromUnits(host.nextU32()));
+                    break;
+                case 3:
+                    c = makeDebugDestroy(due, player, s, target);
+                    break;
+                case 4: case 5:
+                    c = makeDebugSetTransform(due, player, s, target, randomPos(), Angle::fromUnits(host.nextU32()));
+                    break;
+                case 6: {
+                    const FVec2 pos = randomPos();
+                    c = makeDebugPlaceBlocker(due, player, s, pos, {Fixed::fromInt(host.range(1, 4)), Fixed::fromInt(host.range(1, 4))});
+                    break;
+                }
+                case 7:
+                    c = makeDebugRngDraw(due, player, s, static_cast<std::uint16_t>(host.below(5)));
+                    break;
+                default:
+                    c = makeDebugRequestPath(due, player, s, target, randomPos(),
+                                             static_cast<std::uint8_t>(host.below(static_cast<std::uint32_t>(nav::kMoveClassCount))));
+                    break;
+                }
+                if (queue.schedule(c, t)) rep.commands.push_back(c);
+                continue;
+            }
             switch (host.below(10)) {
             case 0: case 1: case 2: case 3:
                 c = makeDebugSpawn(due, player, s, randomPos(), Angle::fromUnits(host.nextU32()));
@@ -177,6 +215,34 @@ Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::
         return a.seq < b.seq;
     });
     return rep;
+}
+
+bool resolveReplayMap(const ReplayHeader& header, const nav::MapDef* supplied, std::optional<nav::MapDef>& out,
+                      std::string& error) {
+    out.reset();
+    if (header.mapSpec.empty() && header.mapHash == 0) {
+        if (supplied != nullptr) {
+            error = "replay was recorded without a map";
+            return false;
+        }
+        return true;
+    }
+    std::uint64_t seed = 0;
+    std::uint32_t size = 0;
+    if (supplied != nullptr) {
+        out = *supplied;
+    } else if (nav::parseGenSpec(header.mapSpec, seed, size)) {
+        out = nav::generateTestMap(seed, size);
+    } else {
+        error = "replay needs map '" + header.mapSpec + "' (pass it with --map)";
+        return false;
+    }
+    if (out->mapHash != header.mapHash) {
+        error = "map hash differs from the replay's (other map or other generator version)";
+        out.reset();
+        return false;
+    }
+    return true;
 }
 
 Divergence firstDivergence(const RunResult& a, const RunResult& b) {

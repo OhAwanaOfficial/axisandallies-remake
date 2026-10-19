@@ -8,12 +8,18 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "core/command.hpp"
 #include "data/defs.hpp"
 #include "ecs/world.hpp"
 #include "math/rng.hpp"
+
+namespace corps::nav {
+struct MapDef;
+struct NavWorld;
+}  // namespace corps::nav
 
 namespace corps {
 
@@ -49,6 +55,7 @@ struct SimEvent {
 struct SimConfig {
     std::uint64_t matchSeed = 0;
     const DefSet* defs = nullptr;  // shared, immutable; may be null for data-free tests
+    const nav::MapDef* map = nullptr;  // shared, immutable; null = no nav (paths and blockers rejected)
 };
 
 // Per-system RNG stream ids (Rng::derive(matchSeed, id)). Never renumber: replays depend on them.
@@ -57,6 +64,11 @@ enum class RngStream : std::uint64_t { Match = 1 };
 class Sim {
 public:
     explicit Sim(const SimConfig& config);
+    ~Sim();
+    Sim(const Sim&) = delete;
+    Sim& operator=(const Sim&) = delete;
+    Sim(Sim&&) noexcept;
+    Sim& operator=(Sim&&) noexcept;
 
     // Runs tick `tick()` with that tick's commands (any order; they are applied sorted by
     // (player, seq, position)) and advances. Commands for any other tick are rejected
@@ -72,6 +84,11 @@ public:
     const Rng& rng() const noexcept { return rng_; }
     // Events produced by the last step (the view drains these; not part of the state).
     const std::vector<SimEvent>& events() const noexcept { return events_; }
+    // Navigation state for config().map (null without a map).
+    nav::NavWorld* nav() noexcept { return nav_.get(); }
+    const nav::NavWorld* nav() const noexcept { return nav_.get(); }
+    // Nav cell under a world position, clamped to the map. Requires a map.
+    std::uint32_t cellAt(FVec2 position) const;
 
     // Called after every stage of every tick (per-system hashing for determinism checks, test
     // hooks). Not part of the state. Empty by default.
@@ -84,6 +101,8 @@ private:
     void applyCommands(const std::vector<Command>& commands);
     void apply(const Command& c);
     void spawnRegiment(const Command& c, const SpawnRegimentPayload& p);
+    void placeBlocker(const Command& c, const DebugPlaceBlockerPayload& p);
+    void requestPath(const Command& c, const DebugRequestPathPayload& p);
     void cleanup();
 
     SimConfig config_;
@@ -91,6 +110,7 @@ private:
     World world_;
     Rng rng_;
     std::vector<SimEvent> events_;
+    std::unique_ptr<nav::NavWorld> nav_;
 };
 
 }  // namespace corps

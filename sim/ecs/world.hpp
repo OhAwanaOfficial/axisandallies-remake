@@ -4,6 +4,9 @@
 // components (ARCHITECTURE §4.3); they arrive with their systems. Pools are listed in a FIXED
 // order in forEachPool, which is the order of the canonical serializer and of destruction.
 
+#include <functional>
+#include <vector>
+
 #include "ecs/entity.hpp"
 #include "ecs/pool.hpp"
 #include "math/angle.hpp"
@@ -42,12 +45,37 @@ struct Member {
     friend bool operator==(const Member& a, const Member& b) noexcept { return a.organization == b.organization && a.slot == b.slot; }
 };
 
+// Cells a building blocks in the nav grid (inclusive rect, PATHFINDING §2.1). Stamped while the
+// entity is alive; unstamped when it is destroyed.
+struct Footprint {
+    std::int32_t x0 = 0, y0 = 0, x1 = -1, y1 = -1;
+    friend bool operator==(const Footprint& a, const Footprint& b) noexcept {
+        return a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1;
+    }
+};
+
+// Latest path request of an entity and, once the PathService finishes it, the smoothed result.
+struct Path {
+    enum class Status : std::uint8_t { Found = 0, FoundNearest = 1, Unreachable = 2, NoStart = 3, Pending = 4 };
+    Status status = Status::Pending;
+    std::uint8_t moveClass = 0;  // nav::MoveClass
+    std::uint32_t requestId = 0;
+    std::int32_t cost = 0;
+    std::vector<std::uint32_t> waypoints;  // nav cells, start..goal
+    friend bool operator==(const Path& a, const Path& b) noexcept {
+        return a.status == b.status && a.moveClass == b.moveClass && a.requestId == b.requestId && a.cost == b.cost &&
+               a.waypoints == b.waypoints;
+    }
+};
+
 struct World {
     EntityRegistry registry;
     Pool<Transform> transforms;
     Pool<DefRef> defRefs;
     Pool<Health> health;
     Pool<Member> members;
+    Pool<Footprint> footprints;
+    Pool<Path> paths;
 
     // Fixed pool order: serializer sections and component removal follow it.
     template <class F>
@@ -56,10 +84,13 @@ struct World {
         f(defRefs);
         f(health);
         f(members);
+        f(footprints);
+        f(paths);
     }
 
     // Runs the registry's deferred destruction and drops the dead entities' components.
-    std::vector<EntityId> cleanup();
+    // `beforeRemove` sees each dead entity (ascending) while its components still exist.
+    std::vector<EntityId> cleanup(const std::function<void(EntityId)>& beforeRemove = {});
 };
 
 }  // namespace corps

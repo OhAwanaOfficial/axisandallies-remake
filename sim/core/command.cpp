@@ -83,6 +83,19 @@ Command makeDebugRngDraw(std::uint32_t tick, std::uint8_t player, std::uint16_t 
     return c;
 }
 
+Command makeDebugPlaceBlocker(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, FVec2 pos, FVec2 halfExtent) {
+    Command c = base(tick, player, seq, CommandType::DebugPlaceBlocker);
+    c.payload = DebugPlaceBlockerPayload{pos, halfExtent};
+    return c;
+}
+
+Command makeDebugRequestPath(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, FVec2 goal,
+                             std::uint8_t moveClass) {
+    Command c = base(tick, player, seq, CommandType::DebugRequestPath);
+    c.payload = DebugRequestPathPayload{target, goal, moveClass};
+    return c;
+}
+
 void putVarint(std::vector<std::uint8_t>& out, std::uint64_t v) {
     while (v >= 0x80) {
         out.push_back(static_cast<std::uint8_t>(v | 0x80));
@@ -135,6 +148,19 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
     case CommandType::DebugRngDraw:
         putVarint(out, std::get<DebugRngDrawPayload>(c.payload).count);
         break;
+    case CommandType::DebugPlaceBlocker: {
+        const auto& p = std::get<DebugPlaceBlockerPayload>(c.payload);
+        putVec(out, p.position);
+        putVec(out, p.halfExtent);
+        break;
+    }
+    case CommandType::DebugRequestPath: {
+        const auto& p = std::get<DebugRequestPathPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putVec(out, p.goal);
+        putVarint(out, p.moveClass);
+        break;
+    }
     }
 }
 
@@ -181,6 +207,21 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
         if (!getU(in, pos, 0xFFFF, v)) return false;
         out.payload = DebugRngDrawPayload{static_cast<std::uint16_t>(v)};
         return true;
+    case CommandType::DebugPlaceBlocker: {
+        DebugPlaceBlockerPayload p;
+        if (!getVec(in, pos, p.position) || !getVec(in, pos, p.halfExtent)) return false;
+        out.payload = p;
+        return true;
+    }
+    case CommandType::DebugRequestPath: {
+        DebugRequestPathPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getVec(in, pos, p.goal) || !getU(in, pos, 0xFF, v)) return false;
+        p.moveClass = static_cast<std::uint8_t>(v);
+        out.payload = p;
+        return true;
+    }
     }
     return false;  // unknown type
 }

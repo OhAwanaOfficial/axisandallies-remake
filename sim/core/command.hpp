@@ -26,6 +26,8 @@ enum class CommandType : std::uint8_t {
     DebugDestroy = 201,
     DebugSetTransform = 202,
     DebugRngDraw = 203,
+    DebugPlaceBlocker = 204,  // building stand-in: an entity whose footprint blocks the nav grid
+    DebugRequestPath = 205,   // queue a path request from an entity's position to a goal
 };
 
 struct NoPayload {
@@ -63,8 +65,25 @@ struct DebugRngDrawPayload {
     friend bool operator==(const DebugRngDrawPayload& a, const DebugRngDrawPayload& b) noexcept { return a.count == b.count; }
 };
 
+struct DebugPlaceBlockerPayload {
+    FVec2 position;    // centre
+    FVec2 halfExtent;  // blocks every cell the box [position - half, position + half) overlaps
+    friend bool operator==(const DebugPlaceBlockerPayload& a, const DebugPlaceBlockerPayload& b) noexcept {
+        return a.position == b.position && a.halfExtent == b.halfExtent;
+    }
+};
+struct DebugRequestPathPayload {
+    EntityId target;
+    FVec2 goal;
+    std::uint8_t moveClass = 0;  // nav::MoveClass
+    friend bool operator==(const DebugRequestPathPayload& a, const DebugRequestPathPayload& b) noexcept {
+        return a.target == b.target && a.goal == b.goal && a.moveClass == b.moveClass;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
-                                    DebugSetTransformPayload, DebugRngDrawPayload>;
+                                    DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
+                                    DebugRequestPathPayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -85,6 +104,9 @@ Command makeDebugSpawn(std::uint32_t tick, std::uint8_t player, std::uint16_t se
 Command makeDebugDestroy(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target);
 Command makeDebugSetTransform(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, FVec2 pos, Angle facing);
 Command makeDebugRngDraw(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::uint16_t count);
+Command makeDebugPlaceBlocker(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, FVec2 pos, FVec2 halfExtent);
+Command makeDebugRequestPath(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, FVec2 goal,
+                             std::uint8_t moveClass);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

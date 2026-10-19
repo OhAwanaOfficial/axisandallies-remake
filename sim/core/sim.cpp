@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "nav/nav_world.hpp"
 #include "systems/stages.hpp"
 
 namespace corps {
@@ -31,7 +32,21 @@ const char* stageName(Stage s) {
 }
 
 Sim::Sim(const SimConfig& config)
-    : config_(config), rng_(Rng::derive(config.matchSeed, static_cast<std::uint64_t>(RngStream::Match))) {}
+    : config_(config), rng_(Rng::derive(config.matchSeed, static_cast<std::uint64_t>(RngStream::Match))) {
+    if (config_.map != nullptr) nav_ = std::make_unique<nav::NavWorld>(*config_.map);
+}
+
+Sim::~Sim() = default;
+Sim::Sim(Sim&&) noexcept = default;
+Sim& Sim::operator=(Sim&&) noexcept = default;
+
+std::uint32_t Sim::cellAt(FVec2 p) const {
+    const nav::NavGrid& g = nav_->grid;
+    const auto clampAxis = [](Fixed v, std::int32_t n) {
+        return static_cast<std::int32_t>(std::clamp<std::int64_t>(v.floorInt(), 0, n - 1));
+    };
+    return g.index(clampAxis(p.x, g.width()), clampAxis(p.y, g.height()));
+}
 
 void Sim::step(const std::vector<Command>& commands) {
     events_.clear();
@@ -117,6 +132,12 @@ void Sim::apply(const Command& c) {
         for (std::uint16_t i = 0; i < n; ++i) rng_.nextU32();
         return;
     }
+    case CommandType::DebugPlaceBlocker:
+        placeBlocker(c, std::get<DebugPlaceBlockerPayload>(c.payload));
+        return;
+    case CommandType::DebugRequestPath:
+        requestPath(c, std::get<DebugRequestPathPayload>(c.payload));
+        return;
     }
     reject();
 }
@@ -155,8 +176,45 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     }
 }
 
+void Sim::placeBlocker(const Command& c, const DebugPlaceBlockerPayload& p) {
+    const auto reject = [&] { events_.push_back({SimEvent::Type::CommandRejected, EntityId{}, c.player, c.type}); };
+    if (!nav_ || p.halfExtent.x <= Fixed{} || p.halfExtent.y <= Fixed{}) return reject();
+    const nav::NavGrid& g = nav_->grid;
+    // Cells overlapped by [pos - half, pos + half), clamped to the map.
+    const std::int64_t x0 = std::max<std::int64_t>((p.position.x - p.halfExtent.x).floorInt(), 0);
+    const std::int64_t y0 = std::max<std::int64_t>((p.position.y - p.halfExtent.y).floorInt(), 0);
+    const std::int64_t x1 = std::min<std::int64_t>((p.position.x + p.halfExtent.x).ceilInt() - 1, g.width() - 1);
+    const std::int64_t y1 = std::min<std::int64_t>((p.position.y + p.halfExtent.y).ceilInt() - 1, g.height() - 1);
+    if (x1 < x0 || y1 < y0) return reject();
+    const EntityId id = world_.registry.create();
+    if (id.isNull()) return reject();
+    const Footprint fp{static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(x1),
+                       static_cast<std::int32_t>(y1)};
+    world_.transforms.set(id, {p.position, Angle{}});
+    world_.footprints.set(id, fp);
+    nav_->grid.stamp({fp.x0, fp.y0, fp.x1, fp.y1});
+    events_.push_back({SimEvent::Type::Spawned, id, c.player, c.type});
+}
+
+void Sim::requestPath(const Command& c, const DebugRequestPathPayload& p) {
+    const auto reject = [&] { events_.push_back({SimEvent::Type::CommandRejected, EntityId{}, c.player, c.type}); };
+    const Transform* t = world_.registry.alive(p.target) ? world_.transforms.get(p.target) : nullptr;
+    if (!nav_ || t == nullptr || p.moveClass >= nav::kMoveClassCount) return reject();
+    const auto cls = static_cast<nav::MoveClass>(p.moveClass);
+    const std::uint32_t id = nav_->paths.request(p.target, cls, cellAt(t->position), cellAt(p.goal), tick_);
+    Path path;
+    path.status = Path::Status::Pending;
+    path.moveClass = p.moveClass;
+    path.requestId = id;
+    world_.paths.set(p.target, std::move(path));  // supersedes any earlier request of this entity
+}
+
 void Sim::cleanup() {
-    for (const EntityId id : world_.cleanup()) {
+    const auto unstamp = [this](EntityId id) {
+        const Footprint* fp = world_.footprints.get(id);
+        if (nav_ && fp != nullptr) nav_->grid.unstamp({fp->x0, fp->y0, fp->x1, fp->y1});
+    };
+    for (const EntityId id : world_.cleanup(unstamp)) {
         events_.push_back({SimEvent::Type::Destroyed, id, 0, CommandType::Noop});
     }
 }

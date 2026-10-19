@@ -1,5 +1,6 @@
 #include "session/state_io.hpp"
 
+#include "nav/nav_world.hpp"
 #include "session/bytes.hpp"
 
 namespace corps {
@@ -40,6 +41,35 @@ void get(ByteReader& r, Member& m) {
     m.organization = r.entity();
     m.slot = r.u16();
 }
+void put(ByteWriter& w, const Footprint& f) {
+    w.u32(static_cast<std::uint32_t>(f.x0));
+    w.u32(static_cast<std::uint32_t>(f.y0));
+    w.u32(static_cast<std::uint32_t>(f.x1));
+    w.u32(static_cast<std::uint32_t>(f.y1));
+}
+void get(ByteReader& r, Footprint& f) {
+    f.x0 = static_cast<std::int32_t>(r.u32());
+    f.y0 = static_cast<std::int32_t>(r.u32());
+    f.x1 = static_cast<std::int32_t>(r.u32());
+    f.y1 = static_cast<std::int32_t>(r.u32());
+}
+void put(ByteWriter& w, const Path& p) {
+    w.u8(static_cast<std::uint8_t>(p.status));
+    w.u8(p.moveClass);
+    w.u32(p.requestId);
+    w.u32(static_cast<std::uint32_t>(p.cost));
+    w.u32(static_cast<std::uint32_t>(p.waypoints.size()));
+    for (const std::uint32_t c : p.waypoints) w.u32(c);
+}
+void get(ByteReader& r, Path& p) {
+    p.status = static_cast<Path::Status>(r.u8());
+    p.moveClass = r.u8();
+    p.requestId = r.u32();
+    p.cost = static_cast<std::int32_t>(r.u32());
+    const std::uint32_t n = r.count(4);
+    p.waypoints.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) p.waypoints.push_back(r.u32());
+}
 
 template <class T>
 void putPool(ByteWriter& w, const Pool<T>& pool) {
@@ -66,7 +96,21 @@ bool getPool(ByteReader& r, Pool<T>& pool, const EntityRegistry& reg) {
     return r.ok;
 }
 
-constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB"};
+constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH"};
+
+std::uint64_t mapHashOf(const Sim& sim) {
+    return sim.config().map != nullptr ? sim.config().map->mapHash : 0;
+}
+
+// Nav state that isn't derivable from the map + footprints: graph version, clusters stamped since
+// the last rebuild, and the path service (queue, the job in progress, budget debt).
+void putNav(ByteWriter& w, const nav::NavWorld& nav) {
+    w.u32(nav.hpa.version());
+    const auto& dirty = nav.grid.dirtyClusters();
+    w.u32(static_cast<std::uint32_t>(dirty.size()));
+    for (const std::uint32_t k : dirty) w.u32(k);
+    nav.paths.save(w);
+}
 
 }  // namespace
 
@@ -77,6 +121,7 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
     w.u32(sim.tick());
     w.u64(sim.config().matchSeed);
     w.u64(sim.config().defs != nullptr ? sim.config().defs->dataHash : 0);
+    w.u64(mapHashOf(sim));
     w.u64(sim.rng().rawState());
     w.u64(sim.rng().rawInc());
 
@@ -98,6 +143,10 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
         putPool(w, pool);
     });
 
+    w.tag("NAVS");
+    w.boolean(sim.nav() != nullptr);
+    if (sim.nav() != nullptr) putNav(w, *sim.nav());
+
     return std::move(w.buf);
 }
 
@@ -116,6 +165,7 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     const std::uint32_t tick = r.u32();
     if (r.u64() != sim.config().matchSeed) return fail("match seed differs from this Sim's config");
     if (r.u64() != (sim.config().defs != nullptr ? sim.config().defs->dataHash : 0)) return fail("data hash differs (other TGI data)");
+    if (r.u64() != mapHashOf(sim)) return fail("map hash differs (other map)");
     const std::uint64_t rngState = r.u64();
     const std::uint64_t rngInc = r.u64();
 
@@ -142,8 +192,38 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     });
     if (!poolsOk) return fail("bad component pool");
 
+    if (!r.expectTag("NAVS")) return fail("missing NAVS");
+    const bool hasNav = r.boolean();
+    if (hasNav != (sim.config().map != nullptr)) return fail("nav section doesn't match the map");
+    std::uint32_t navVersion = 0;
+    std::vector<std::uint32_t> dirty;
+    nav::PathService paths;
+    if (hasNav) {
+        navVersion = r.u32();
+        const std::uint32_t nd = r.count(4);
+        for (std::uint32_t i = 0; i < nd && r.ok; ++i) dirty.push_back(r.u32());
+        if (!paths.load(r)) return fail("bad path service state");
+        for (const auto& fp : world.footprints.data()) {
+            if (fp.x0 < 0 || fp.y0 < 0 || fp.x1 < fp.x0 || fp.y1 < fp.y0 ||
+                static_cast<std::uint32_t>(fp.x1) >= sim.config().map->width || static_cast<std::uint32_t>(fp.y1) >= sim.config().map->height)
+                return fail("footprint outside the map");
+        }
+    }
+
     if (!r.ok || r.remaining() != 0) return fail("truncated or trailing bytes");
 
+    if (hasNav) {
+        // Swap the old footprints' stamps for the loaded ones and rebuild every touched cluster
+        // (plus any the old state still had dirty): the graph then equals a full build for the
+        // loaded stamps (incremental == full, tested). Then restore what isn't derivable.
+        nav::NavWorld& nav = *sim.nav();
+        for (const auto& fp : sim.world().footprints.data()) nav.grid.unstamp({fp.x0, fp.y0, fp.x1, fp.y1});
+        for (const auto& fp : world.footprints.data()) nav.grid.stamp({fp.x0, fp.y0, fp.x1, fp.y1});
+        nav.hpa.rebuildDirty();
+        for (const std::uint32_t k : dirty) nav.grid.markDirty(k);
+        nav.hpa.restoreVersion(navVersion);
+        nav.paths = std::move(paths);
+    }
     sim.world() = std::move(world);
     sim.rng() = Rng::fromRaw(rngState, rngInc);
     sim.restoreTick(tick);
