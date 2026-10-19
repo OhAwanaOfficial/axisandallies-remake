@@ -102,7 +102,7 @@ u8  vertexByte[count]     UNKNOWN: values 0..3 in HEIGHT_MAP (about 16% non-zero
 ```
 * `HEIGHT_MAP`'s default is 2.0 (the ground plane, matching `SVars ElevationDefault = 2`). `MOUNTAIN_HEIGHT_MAP`'s default is 0.
 * **Rendered ground = HEIGHT_MAP + MOUNTAIN_HEIGHT_MAP.** The mountain layer is positive under ridges and **negative under water**, so it carves lake and river beds. On Golden Fields the sum runs from −0.88 to 14.75. The objects tested sit where the mountain offset is 0, so the sum itself is inferred from the previews, not measured.
-* The floats need an integer float32→Fixed conversion before the sim sees them (see Determinism above).
+* The floats need an integer float32→Fixed conversion before the sim sees them (see Determinism above). Until the M10 importer does that from the raw bits, `tools/rmp.py` also writes integer millimetre copies (`vertex_height_mm`, `vertex_mountain_mm`) to `map.json`, and the sim's `loadRmpJson` (`sim/nav/map_def`) reads only those. Heights stay view-only.
 
 **`TERRAIN`**
 ```

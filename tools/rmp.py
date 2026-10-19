@@ -231,6 +231,9 @@ def export(m: DecodedMap, out: Path, scale: int) -> dict:
         "tile_blocked_land": blocked,
         "vertex_height": [round(x, 5) for x in h.values],
         "vertex_mountain_offset": [round(x, 5) for x in mt.values],
+        # Integer copies for the C++ sim, which never parses floats (CLAUDE.md rule 2).
+        "vertex_height_mm": [int(round(x * 1000)) for x in h.values],
+        "vertex_mountain_mm": [int(round(x * 1000)) for x in mt.values],
         "vertex_unknown_byte": list(h.vertex_bytes),
     }
     (out / "map.json").write_text(json.dumps(doc), encoding="utf-8")

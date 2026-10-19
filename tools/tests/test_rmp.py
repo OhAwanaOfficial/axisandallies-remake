@@ -74,6 +74,11 @@ class RmpTests(unittest.TestCase):
             self.assertEqual(summary["counts"]["blocked_tiles"], 2)
             self.assertEqual(summary["counts"]["settlement_tiles"], 1)
             self.assertAlmostEqual(summary["surface"]["max"], 7.0)
+            import json
+            layers = json.loads((Path(tmp) / "map.json").read_text(encoding="utf-8"))["layers"]
+            # Integer millimetre copies for the C++ sim (no float parsing there).
+            self.assertEqual(layers["vertex_height_mm"], [2000] * 4 + [3000] + [2000] * 4)
+            self.assertEqual(layers["vertex_mountain_mm"], [0] * 4 + [4000] + [0] * 4)
             png = (Path(tmp) / "blocking.png").read_bytes()
             self.assertTrue(png.startswith(b"\x89PNG"))
             w, h = struct.unpack(">II", png[16:24])

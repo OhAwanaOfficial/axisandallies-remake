@@ -13,6 +13,12 @@ add_library(sim STATIC
   session/replay.cpp
   data/defs.cpp
   data/def_compiler.cpp
+  data/json_lite.cpp
+  nav/map_def.cpp
+  nav/nav_grid.cpp
+  nav/grid_search.cpp
+  nav/hpa.cpp
+  nav/path_service.cpp
   vfs/path.cpp
   vfs/dir_depot.cpp
   vfs/memory_depot.cpp
