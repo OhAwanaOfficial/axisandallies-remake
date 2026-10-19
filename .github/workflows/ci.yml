@@ -9,7 +9,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - { name: windows-msvc, os: windows-latest, configure: "-DCMAKE_BUILD_TYPE=Debug" }
+          - { name: windows-clang-cl, os: windows-latest, configure: "-T ClangCL -DCORPS_BUILD_GDEXT=OFF" }
+          - { name: linux-gcc, os: ubuntu-latest, configure: "-DCMAKE_BUILD_TYPE=Debug" }
+          - { name: linux-clang, os: ubuntu-latest, configure: "-DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCORPS_BUILD_GDEXT=OFF" }
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +22,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
+        run: cmake -S . -B build ${{ matrix.configure }}
+      - name: Build (Debug)
         # Bounded: a bare --parallel becomes an unlimited `make -j` on Linux, and compiling all of
         # godot-cpp at once exhausts the runner's memory (the job is cancelled mid-build).
         run: cmake --build build --config Debug --parallel 4
-      - name: Test (unit tests + no-float check)
+      - name: Test (Debug)
         run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Release build + determinism (same hashes as Debug and every other job)
+        run: |
+          cmake -S . -B build-rel ${{ matrix.configure }} -DCMAKE_BUILD_TYPE=Release -DCORPS_BUILD_GDEXT=OFF
+          cmake --build build-rel --config Release --parallel 4 --target sim_tests simcli
+          ctest --test-dir build-rel -C Release --output-on-failure -R "sim_tests|simcli_determinism_check"
