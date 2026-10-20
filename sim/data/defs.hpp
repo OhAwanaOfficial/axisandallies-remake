@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "math/fixed.hpp"
+#include "math/fvec2.hpp"
 
 namespace corps {
 
@@ -59,6 +60,13 @@ struct ElementRef {
     std::uint32_t index = kNoDef;  // into DefSet::units or DefSet::buildings
 };
 
+// Movement class of a unit, from its property tags (PATHFINDING §2): aircraft → Air, seacraft →
+// Naval, tank → Tracked, other vehicle → Wheeled, else Foot. The first five values equal
+// nav::MoveClass; Air has no grid.
+enum class UnitMoveClass : std::uint8_t { Foot = 0, Wheeled = 1, Tracked = 2, Naval = 3, Amphibious = 4, Air = 5 };
+// MoverComponent turn_type: INSTANT (infantry), IN_PLACE (tanks pivot), WHILE_MOVING (wheels, ships).
+enum class TurnType : std::uint8_t { Instant = 0, InPlace = 1, WhileMoving = 2 };
+
 struct UnitDef {
     std::string ids;
     std::string nameKey;
@@ -66,9 +74,11 @@ struct UnitDef {
     std::string category;      // UNIT, or TRUCK (packable vehicles such as HQ trucks)
     Fixed health;
     Fixed defense;
-    Fixed speedMax;
-    Fixed acceleration;
-    Fixed turnRadius;
+    Fixed speedMax;            // world units per second
+    Fixed acceleration;        // units/s²; 0 = instant
+    Fixed turnRadius;          // 0 = turns on the spot
+    TurnType turnType = TurnType::Instant;
+    UnitMoveClass moveClass = UnitMoveClass::Foot;
     Fixed detectionRange;
     Fixed remoteDetectionRange;
     Fixed blockingRadius;
@@ -85,6 +95,7 @@ struct RegimentDef {
     std::string nameKey;
     std::string templateName;
     std::string layoutIds;
+    std::uint32_t layoutIndex = kNoDef;   // into DefSet::layouts
     std::vector<std::string> slotIds;     // element_IDS per slot, layout order
     std::vector<ElementRef> slots;        // resolved slot elements (kind None if missing)
     Fixed controlRange;
@@ -125,6 +136,56 @@ struct NationDef {
     std::string resourcePrefix;
 };
 
+// [Formation] (Organizations/Formations/regiment_formations.tgi): regiment_aggressive is the
+// manual's Assault, regiment_defensive its Normal/Aggressive, regiment_column Column.
+struct FormationDef {
+    std::string ids;
+    std::string nameKey;
+    bool organized = true;
+    bool aggressive = false;
+    bool herding = false;
+    std::string groupFormationIds;            // the group formation a division uses with it
+    std::uint32_t groupFormationIndex = kNoDef;
+    Fixed speedMultiplier = Fixed::fromInt(1);   // product of (1 + SPEED_MAX MultiplyModifier)
+    Fixed attackMultiplier = Fixed::fromInt(1);  // product of (1 + ATTACK_EFFICIENCY_DESIRED ...)
+};
+
+// Layout offsets are stored in the sim's regiment frame: +x = forward (the data's +y), +y = left
+// (the data's -x; the data's +x is taken to be the regiment's right).
+struct LayoutSlotDef {
+    std::string property;  // front / support / captain ...
+    std::uint32_t number = 1;
+    bool primary = false;
+    bool required = true;
+    bool locked = false;
+};
+struct LayoutFormationDef {
+    std::string formationIds;
+    std::uint32_t formationIndex = kNoDef;  // into DefSet::formations
+    std::vector<FVec2> offsets;             // per layout element (see LayoutDef::elementSlot)
+    Fixed halfWidth;                        // max |lateral offset|: the formation's half width
+};
+// [OrganizationLayout] (Organizations/Layouts/*.tgi). A regiment's slot i uses layout slot i;
+// layout slot j holds `number` elements, so the layout has sum(number) elements. Element e with
+// property p gets the k-th position tagged p in a formation, where k counts earlier elements with p.
+struct LayoutDef {
+    std::string ids;
+    std::string defaultFormationIds;
+    std::string combatFormationIds;
+    std::string retreatFormationIds;
+    std::vector<LayoutSlotDef> slots;
+    std::vector<std::uint32_t> elementSlot;  // element -> layout slot
+    std::vector<LayoutFormationDef> formations;
+
+    // Index into `formations` of the formation with this IDS, or kNoDef.
+    std::uint32_t formation(std::string_view formationIds) const;
+};
+// [GroupFormation] (Game/group_formations.tgi): regiment offsets in a division, sim frame.
+struct GroupFormationDef {
+    std::string ids;
+    std::vector<FVec2> offsets;
+};
+
 enum class SVarType : std::uint8_t { Fixed, Int, Bool, String };
 
 struct SVar {
@@ -160,11 +221,17 @@ struct DefSet {
     std::vector<BuildingDef> buildings;
     std::vector<AbilityDef> abilities;
     std::vector<NationDef> nations;
+    std::vector<LayoutDef> layouts;
+    std::vector<FormationDef> formations;
+    std::vector<GroupFormationDef> groupFormations;
     SVarsDef svars;
     std::uint64_t dataHash = 0;
     DefCompileStats stats;
 
     // Lookup by IDS (case-insensitive). Returns nullptr / kNoDef when absent.
+    std::uint32_t layoutIndex(std::string_view ids) const;
+    std::uint32_t formationIndex(std::string_view ids) const;
+    std::uint32_t groupFormationIndex(std::string_view ids) const;
     const UnitDef* unit(std::string_view ids) const;
     const RegimentDef* regiment(std::string_view ids) const;
     const BuildingDef* building(std::string_view ids) const;

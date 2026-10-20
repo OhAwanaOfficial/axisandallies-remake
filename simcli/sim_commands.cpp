@@ -356,9 +356,13 @@ int cmdShowDef(const SimArgs& a) {
     bool found = false;
     if (const UnitDef* u = d.unit(ids)) {
         found = true;
-        std::printf("UnitDef %s (template %s)\n  health %s defense %s speed %s accel %s turn radius %s detection %s\n",
+        static const char* kClass[] = {"foot", "wheeled", "tracked", "naval", "amphibious", "air"};
+        static const char* kTurn[] = {"instant", "in_place", "while_moving"};
+        std::printf("UnitDef %s (template %s)\n  health %s defense %s speed %s accel %s turn radius %s (%s) class %s radius %s "
+                    "detection %s\n",
                     u->ids.c_str(), u->templateName.c_str(), formatFixed(u->health).c_str(), formatFixed(u->defense).c_str(),
                     formatFixed(u->speedMax).c_str(), formatFixed(u->acceleration).c_str(), formatFixed(u->turnRadius).c_str(),
+                    kTurn[static_cast<int>(u->turnType)], kClass[static_cast<int>(u->moveClass)], formatFixed(u->blockingRadius).c_str(),
                     formatFixed(u->detectionRange).c_str());
         for (const std::uint32_t i : u->abilities) ability(i);
         std::printf("  properties:");
@@ -391,6 +395,37 @@ int cmdShowDef(const SimArgs& a) {
     if (const AbilityDef* ab = d.ability(ids)) {
         found = true;
         ability(static_cast<std::uint32_t>(ab - d.abilities.data()));
+    }
+    const auto vec = [](FVec2 v) { return "(" + formatFixed(v.x) + ", " + formatFixed(v.y) + ")"; };
+    if (const std::uint32_t li = d.layoutIndex(ids); li != kNoDef) {
+        found = true;
+        const LayoutDef& l = d.layouts[li];
+        std::printf("LayoutDef %s default %s combat %s retreat %s, %zu elements\n", l.ids.c_str(), l.defaultFormationIds.c_str(),
+                    l.combatFormationIds.c_str(), l.retreatFormationIds.c_str(), l.elementSlot.size());
+        for (std::size_t s = 0; s < l.slots.size(); ++s) {
+            const LayoutSlotDef& sd = l.slots[s];
+            std::printf("  slot %zu: %s x%u%s%s%s\n", s, sd.property.c_str(), sd.number, sd.primary ? " primary" : "",
+                        sd.required ? " required" : "", sd.locked ? " locked" : "");
+        }
+        for (const LayoutFormationDef& f : l.formations) {
+            std::printf("  formation %s%s half width %s:", f.formationIds.c_str(), f.formationIndex == kNoDef ? " (UNDEFINED)" : "",
+                        formatFixed(f.halfWidth).c_str());
+            for (const FVec2 o : f.offsets) std::printf(" %s", vec(o).c_str());
+            std::printf("\n");
+        }
+    }
+    if (const std::uint32_t fi = d.formationIndex(ids); fi != kNoDef) {
+        found = true;
+        const FormationDef& f = d.formations[fi];
+        std::printf("FormationDef %s organized %d aggressive %d herding %d speed x%s attack x%s group %s%s\n", f.ids.c_str(),
+                    f.organized, f.aggressive, f.herding, formatFixed(f.speedMultiplier).c_str(), formatFixed(f.attackMultiplier).c_str(),
+                    f.groupFormationIds.c_str(), f.groupFormationIndex == kNoDef && !f.groupFormationIds.empty() ? " (UNDEFINED)" : "");
+    }
+    if (const std::uint32_t gi = d.groupFormationIndex(ids); gi != kNoDef) {
+        found = true;
+        std::printf("GroupFormationDef %s:", d.groupFormations[gi].ids.c_str());
+        for (const FVec2 o : d.groupFormations[gi].offsets) std::printf(" %s", vec(o).c_str());
+        std::printf("\n");
     }
     if (const NationDef* n = d.nation(ids)) {
         found = true;

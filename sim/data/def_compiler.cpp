@@ -148,12 +148,20 @@ private:
         u.speedMax = fx(mover, "speed_max");
         u.acceleration = fx(mover, "acceleration");
         u.turnRadius = fx(mover, "turn_radius");
+        const std::string turn = asciiLowerCopy(text(mover, "turn_type"));
+        u.turnType = turn == "in_place" ? TurnType::InPlace : turn == "while_moving" ? TurnType::WhileMoving : TurnType::Instant;
         const ResolvedNode* det = childOf(t, "DetectionComponent");
         u.detectionRange = fx(det, "detection_range");
         u.remoteDetectionRange = fx(det, "remote_detection_range");
         u.blockingRadius = fx(childOf(t, "Size"), "blocking_radius");
         u.abilities = inlineAbilities(t, ids);
         u.properties = properties(t);
+        const auto has = [&](std::string_view p) { return std::find(u.properties.begin(), u.properties.end(), p) != u.properties.end(); };
+        u.moveClass = has("aircraft") ? UnitMoveClass::Air
+                      : has("seacraft") ? UnitMoveClass::Naval
+                      : has("tank") ? UnitMoveClass::Tracked
+                      : has("vehicle") ? UnitMoveClass::Wheeled
+                                       : UnitMoveClass::Foot;
         u.requiredStructures = asciiLowerCopy(text(childOf(t, "ElementComponent"), "required_structures"));
         const ResolvedNode* econ = childOf(t, "EconomyComponent");
         u.cost = resources(childOf(econ, "Cost"));
@@ -212,6 +220,95 @@ private:
         b.upkeep = resources(childOf(econ, "Upkeep"));
         b.production = resources(childOf(econ, "Production"));
         defs.buildings.push_back(std::move(b));
+    }
+
+    // Data offsets are (right, forward); the sim's regiment frame is (+x forward, +y left).
+    FVec2 offset(const ResolvedNode* n) {
+        const ResolvedField* f = fieldOf(n, "offset");
+        if (f == nullptr || !f->hasValue() || isNull(f->text())) return {};
+        const auto p = readPoint(f->text(), 2, site(f, "offset"));
+        return {p[1], -p[0]};
+    }
+
+    void layout(const Record& r, const std::string& ids) {
+        const ResolvedNode* t = &r.tree;
+        LayoutDef l;
+        l.ids = ids;
+        l.defaultFormationIds = asciiLowerCopy(text(t, "default_formation_ids"));
+        l.combatFormationIds = asciiLowerCopy(text(t, "combat_formation_ids"));
+        l.retreatFormationIds = asciiLowerCopy(text(t, "retreat_formation_ids"));
+        std::vector<std::string> elementProperty;
+        for (std::size_t i = 0; i < countOf(t, "Slot"); ++i) {
+            const ResolvedNode* s = childOf(t, "Slot", i);
+            LayoutSlotDef sd;
+            sd.property = asciiLowerCopy(text(s, "property_IDS"));
+            sd.number = static_cast<std::uint32_t>(std::clamp<std::int64_t>(fx(s, "number", Fixed::fromInt(1)).floorInt(), 0, 64));
+            sd.primary = flag(s, "primary", false);
+            sd.required = flag(s, "required", true);
+            sd.locked = flag(s, "locked", false);
+            for (std::uint32_t k = 0; k < sd.number; ++k) {
+                l.elementSlot.push_back(static_cast<std::uint32_t>(l.slots.size()));
+                elementProperty.push_back(sd.property);
+            }
+            l.slots.push_back(std::move(sd));
+        }
+        for (std::size_t i = 0; i < countOf(t, "Formation"); ++i) {
+            const ResolvedNode* fnode = childOf(t, "Formation", i);
+            LayoutFormationDef f;
+            f.formationIds = asciiLowerCopy(text(fnode, "formation_IDS"));
+            std::vector<std::pair<std::string, FVec2>> positions;
+            for (std::size_t p = 0; p < countOf(fnode, "Position"); ++p) {
+                const ResolvedNode* pn = childOf(fnode, "Position", p);
+                positions.emplace_back(asciiLowerCopy(text(pn, "property_IDS")), offset(pn));
+            }
+            // Element e (property p) takes the k-th unused position tagged p; leftovers trail behind.
+            std::vector<bool> used(positions.size(), false);
+            for (std::size_t e = 0; e < elementProperty.size(); ++e) {
+                FVec2 o{Fixed::fromInt(-2) * static_cast<std::int32_t>(e + 1), Fixed{}};
+                for (std::size_t p = 0; p < positions.size(); ++p) {
+                    if (!used[p] && positions[p].first == elementProperty[e]) {
+                        used[p] = true;
+                        o = positions[p].second;
+                        break;
+                    }
+                }
+                f.offsets.push_back(o);
+                f.halfWidth = max(f.halfWidth, abs(o.y));
+            }
+            l.formations.push_back(std::move(f));
+        }
+        defs.layouts.push_back(std::move(l));
+    }
+
+    void formation(const Record& r, const std::string& ids) {
+        const ResolvedNode* t = &r.tree;
+        FormationDef f;
+        f.ids = ids;
+        f.nameKey = locKey(text(t, "name"));
+        f.organized = flag(t, "organized", true);
+        f.aggressive = flag(t, "aggressive", false);
+        f.herding = flag(t, "herding", false);
+        f.groupFormationIds = asciiLowerCopy(text(t, "group_formation_ids"));
+        const Fixed one = Fixed::fromInt(1);
+        for (std::size_t i = 0; i < countOf(t, "Property"); ++i) {
+            const ResolvedNode* prop = childOf(t, "Property", i);
+            for (std::size_t m = 0; m < countOf(prop, "Modifier"); ++m) {
+                const ResolvedNode* mod = childOf(prop, "Modifier", m);
+                const std::string attr = asciiUpperCopy(text(mod, "attribute"));
+                const Fixed amount = fx(mod, "amount");
+                if (attr == "SPEED_MAX") f.speedMultiplier = f.speedMultiplier * (one + amount);
+                if (attr == "ATTACK_EFFICIENCY_DESIRED") f.attackMultiplier = f.attackMultiplier * (one + amount);
+            }
+        }
+        defs.formations.push_back(std::move(f));
+    }
+
+    void groupFormation(const Record& r, const std::string& ids) {
+        const ResolvedNode* t = &r.tree;
+        GroupFormationDef g;
+        g.ids = ids;
+        for (std::size_t i = 0; i < countOf(t, "Position"); ++i) g.offsets.push_back(offset(childOf(t, "Position", i)));
+        defs.groupFormations.push_back(std::move(g));
     }
 
     void nation(const Record& r, const std::string& ids) {
@@ -278,6 +375,9 @@ DefSet Compiler::run() {
     const Symbol abilitySym = sym("abilitydefinition");
     const Symbol nationSym = sym("nation");
     const Symbol svarsSym = sym("svars");
+    const Symbol layoutSym = sym("organizationlayout");
+    const Symbol formationSym = sym("formation");
+    const Symbol groupFormationSym = sym("groupformation");
     std::map<std::string, std::size_t> categories;
 
     // byIds is sorted by (type symbol, IDS), so this walk is deterministic.
@@ -296,6 +396,12 @@ DefSet Compiler::run() {
             defs.abilities.push_back(ability(&r.tree, ids, ""));
         } else if (e.type == nationSym) {
             nation(r, ids);
+        } else if (e.type == layoutSym) {
+            layout(r, ids);
+        } else if (e.type == formationSym) {
+            formation(r, ids);
+        } else if (e.type == groupFormationSym) {
+            groupFormation(r, ids);
         }
     }
     for (const DefIndex::Singleton& s : db.defs.singletons) {
@@ -311,6 +417,14 @@ DefSet Compiler::run() {
     sortByIds(defs.regiments);
     sortByIds(defs.buildings);
     sortByIds(defs.nations);
+    sortByIds(defs.layouts);
+    sortByIds(defs.formations);
+    sortByIds(defs.groupFormations);
+    for (FormationDef& f : defs.formations) f.groupFormationIndex = defs.groupFormationIndex(f.groupFormationIds);
+    for (LayoutDef& l : defs.layouts) {
+        for (LayoutFormationDef& f : l.formations) f.formationIndex = defs.formationIndex(f.formationIds);
+    }
+    for (RegimentDef& g : defs.regiments) g.layoutIndex = defs.layoutIndex(g.layoutIds);
     std::vector<std::pair<std::string, std::uint32_t>> abilityIndex;  // (lower IDS, new index), sorted
     abilityIndex.reserve(defs.abilities.size());
     for (std::uint32_t k = 0; k < defs.abilities.size(); ++k) abilityIndex.emplace_back(asciiLowerCopy(defs.abilities[k].ids), k);

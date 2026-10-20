@@ -53,6 +53,16 @@ const NationDef* DefSet::nation(std::string_view ids) const { return findDef(nat
 std::uint32_t DefSet::unitIndex(std::string_view ids) const { return findIndex(units, ids); }
 std::uint32_t DefSet::regimentIndex(std::string_view ids) const { return findIndex(regiments, ids); }
 std::uint32_t DefSet::buildingIndex(std::string_view ids) const { return findIndex(buildings, ids); }
+std::uint32_t DefSet::layoutIndex(std::string_view ids) const { return findIndex(layouts, ids); }
+std::uint32_t DefSet::formationIndex(std::string_view ids) const { return findIndex(formations, ids); }
+std::uint32_t DefSet::groupFormationIndex(std::string_view ids) const { return findIndex(groupFormations, ids); }
+
+std::uint32_t LayoutDef::formation(std::string_view formationIds) const {
+    for (std::uint32_t i = 0; i < formations.size(); ++i) {
+        if (iequals(formations[i].formationIds, formationIds)) return i;
+    }
+    return kNoDef;
+}
 
 const SVar* SVarsDef::find(std::string_view name) const {
     const std::string key = asciiLowerCopy(name);
@@ -78,7 +88,7 @@ bool SVarsDef::getBool(std::string_view name, bool fallback) const {
 std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     ByteWriter w;
     w.tag("DEFS");
-    w.u32(1);  // layout version
+    w.u32(2);  // layout version (2: move class, turn type, layouts, formations, group formations)
     w.u32(static_cast<std::uint32_t>(d.abilities.size()));
     for (const AbilityDef& a : d.abilities) {
         w.str(a.ids);
@@ -110,6 +120,8 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(u.speedMax);
         w.fixed(u.acceleration);
         w.fixed(u.turnRadius);
+        w.u8(static_cast<std::uint8_t>(u.turnType));
+        w.u8(static_cast<std::uint8_t>(u.moveClass));
         w.fixed(u.detectionRange);
         w.fixed(u.remoteDetectionRange);
         w.fixed(u.blockingRadius);
@@ -126,6 +138,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.str(g.nameKey);
         w.str(g.templateName);
         w.str(g.layoutIds);
+        w.u32(g.layoutIndex);
         putStrings(w, g.slotIds);
         w.u32(static_cast<std::uint32_t>(g.slots.size()));
         for (const ElementRef& e : g.slots) {
@@ -172,6 +185,48 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
             w.str(t);
         }
         w.str(n.resourcePrefix);
+    }
+    w.u32(static_cast<std::uint32_t>(d.layouts.size()));
+    for (const LayoutDef& l : d.layouts) {
+        w.str(l.ids);
+        w.str(l.defaultFormationIds);
+        w.str(l.combatFormationIds);
+        w.str(l.retreatFormationIds);
+        w.u32(static_cast<std::uint32_t>(l.slots.size()));
+        for (const LayoutSlotDef& s : l.slots) {
+            w.str(s.property);
+            w.u32(s.number);
+            w.boolean(s.primary);
+            w.boolean(s.required);
+            w.boolean(s.locked);
+        }
+        putIndexes(w, l.elementSlot);
+        w.u32(static_cast<std::uint32_t>(l.formations.size()));
+        for (const LayoutFormationDef& f : l.formations) {
+            w.str(f.formationIds);
+            w.u32(f.formationIndex);
+            w.u32(static_cast<std::uint32_t>(f.offsets.size()));
+            for (const FVec2 o : f.offsets) w.vec2(o);
+            w.fixed(f.halfWidth);
+        }
+    }
+    w.u32(static_cast<std::uint32_t>(d.formations.size()));
+    for (const FormationDef& f : d.formations) {
+        w.str(f.ids);
+        w.str(f.nameKey);
+        w.boolean(f.organized);
+        w.boolean(f.aggressive);
+        w.boolean(f.herding);
+        w.str(f.groupFormationIds);
+        w.u32(f.groupFormationIndex);
+        w.fixed(f.speedMultiplier);
+        w.fixed(f.attackMultiplier);
+    }
+    w.u32(static_cast<std::uint32_t>(d.groupFormations.size()));
+    for (const GroupFormationDef& g : d.groupFormations) {
+        w.str(g.ids);
+        w.u32(static_cast<std::uint32_t>(g.offsets.size()));
+        for (const FVec2 o : g.offsets) w.vec2(o);
     }
     w.u32(static_cast<std::uint32_t>(d.svars.vars.size()));
     for (const SVar& v : d.svars.vars) {
