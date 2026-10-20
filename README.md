@@ -33,7 +33,7 @@ GDExtension, use the `windows-sim-only` / `windows-sim-debug` presets. The first
 godot-cpp, and the godot-cpp bindings take several minutes to build.
 
 The build puts the GDExtension in `godot/bin/`. On a fresh checkout, run `godot --headless --path godot --import`
-once so Godot registers it; `godot --path godot` then shows `SimBridge.hello()`.
+once so Godot registers it; `godot --path godot res://scenes/main.tscn` then shows `SimBridge.hello()`.
 
 ## Run the sim headless (M3)
 ```bash
@@ -61,6 +61,24 @@ build\windows\simcli\Debug\simcli.exe determinism-check scenario.rpl --per-stage
 build\windows\simcli\Release\simcli.exe show-def regiment_infantry
 ```
 `scenario` spawns six mixed regiments (infantry, tanks, a halftrack) from the game data on the generated test map and moves them east: a division, a loose group, a Run, a formation change, a Stop and re-order, and a building dropped on the route. It prints when each regiment arrived and the state hash, and records the film. `show-def` also prints layouts, formations and group formations.
+
+## Play the battle view (M4)
+```bash
+cmake --build --preset windows-debug --target simbridge
+godot --path godot
+godot --path godot -- --gen=7:256
+godot --path godot -- --map=../cache/maps/kursk/map.json --demo
+```
+The main scene loads the game data and a map (Golden Fields from `cache/maps/` when present, else the generated
+test map), spawns six of your regiments and three enemy ones, and runs the sim at 10 ticks per second.
+* Select with a click, a box or a double-click (same type). Ctrl+1..9 stores a selection and 1..9 recalls it.
+* Right click moves, right drag also sets the facing, Alt+right click runs. Q/W/E set the formation, V toggles a
+  division, S stops.
+* The camera pans with the arrows or the screen edges, zooms with the wheel and rotates with the middle button.
+* F1/F2/F3 toggle the cost-grid, path and slot overlays.
+
+Needs `tools/import_game.py` output in `cache/` for models and terrain textures; without it, units are boxes and
+terrain uses the data colours. Loading takes a few seconds with the Debug GDExtension.
 
 ## Import the original art and browse it (M2)
 ```bash

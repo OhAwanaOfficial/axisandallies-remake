@@ -174,6 +174,41 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 * **HUD**: stats bar (money reserve, +income, oil, ammo, unit limit, building limit), operations bar (army XP, special ops), command panel, info panel (regiment banner, health/morale/efficiency bars), minimap, message log, team commands and flares. The original UI art is in `_rwd_extract/UI/` and can be used directly.
 * **Camera**: RTS camera (pan, edge scroll, zoom, rotate), with selection by click, box and double-click (same type).
 
+**Implemented (M4 part 3)** in `gdext/sim_bridge.*` and `godot/scripts/battle/`, scene `res://scenes/battle.tscn` (the main scene):
+
+* **SimBridge** owns the game data (VFS, TGI database, DefSet), the MapDef and the Sim.
+  * **Set-up and static data:** `start(game_dir, map_spec, seed)`, `map_info()` (size, view heights, terrain names and per-cell terrain/kind), `terrain_table(biome)`, `unit_visual(def)`, `regiment_def(def)`, `find_open_area()`.
+    * `terrain_table` gives every TGI `Terrain` variation's texture (relative to its record's folder), data colour and repeat size.
+    * `unit_visual` gives the cache model path: `resource_prefix` relative to the unit's TGI folder, `.glb`.
+  * **Commands:** `queue_*` for spawn, move (Run, explicit facing), stop, formation, group behaviour and debug blockers. Queued commands are applied by the next `step()`. Selections over six regiments are sent as several groups.
+  * **Reading:** `snapshot()` returns parallel packed arrays per entity: id, kind, def, organization, player, moving, and previous and current position and facing. `drain_events()`, and the debug queries `regiment_info()` (state, formation, compression, slot targets, path) and `cost_grid(class)`.
+  * Floats exist only on the bridge's side. Everything handed to the sim is `Fixed`, and the view can't reach sim state except through commands.
+* **Loop:** `battle.gd` steps the sim at 10 Hz from an accumulator (up to 8 ticks per frame; Space pauses; +/- changes speed) and renders at `alpha = accum / 0.1` between the snapshot's previous and current transforms.
+* **Terrain** (`terrain.gd`, `terrain.gdshader`):
+  * Mesh: a heightfield from the map's view heights. Generated test maps get a small relief from their terrain kinds.
+  * Texturing: one `Texture2DArray` layer per used variation (the original `.tga` from `cache/Terrain/...`, or the data colour when missing), picked per 2-unit tile and blended across tile borders. Each repeats every `texture_width` tiles.
+  * Water: a translucent plane at the median land height − 0.25 over water.
+  * Not yet: the original transition and edge textures, detail and macro textures, animated water.
+* **Units** (`unit_views.gd`):
+  * One prototype per UnitDef from the cached `.glb`, with hidden helper nodes (e.g. `SelectionBox`) hidden.
+  * Walk/Jog/Idle clips from `compatible_clips`, retargeted once per prototype and shared by every instance's AnimationPlayer.
+  * Facing: sim θ → `rotation.y = -θ`, and imported models face Godot +Z, so the model is turned by +90°.
+  * Not yet: biome and nation skins, death and attack animations, FXC.
+* **Camera** (`rts_camera.gd`): pan with the arrows or the screen edges, zoom with the wheel, rotate with middle drag or PgUp/PgDn, Home resets. Fixed 52° pitch.
+* **Input:**
+  * **Selection:** left click picks the regiment of the nearest own unit (24 px); box drag; Shift adds; double-click selects all visible own regiments of that RegimentDef; Ctrl+1..9 stores the selection, 1..9 recalls it (tap twice to jump the camera).
+  * **Orders:** right click moves, right drag moves with a facing, Alt+right click runs. Q/W/E set Assault/Normal/Column, V toggles group behaviour, S stops, B drops a debug blocker.
+* **Debug overlays:** F1 cost grid of the selected regiment's class (red blocked, green normal, blue roads, yellow/orange slower), F2 paths (remaining part bright), F3 slot targets with anchors and headings, F4 HUD (tick, fps, the selection's formation, state, group and compression, recent arrival/blocked events).
+* **Checks:** `godot --path godot -- --selftest` drives the controls with synthetic input events and prints PASS/FAIL:
+  * click, Shift-click, double-click, box, Ctrl+1/1;
+  * Q/E formations, right-click move to the clicked ground point, Alt+right-click Run;
+  * F1–F3 overlays, and one view per unit.
+  `--screenshot=PATH --frames=N` renders a frame and quits.
+* **Open:**
+  * Only the Debug GDExtension builds. With the Visual Studio multi-config generator, godot-cpp always produces its debug library, so the Release `simbridge.dll` fails to link (`_CrtDbgReport`). This predates M4 part 3: `godot/bin/` never had a Release DLL.
+  * Loading the TGI data through the Debug build takes 15–30 s on the dev laptop.
+  * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE, at about 10 fps with 70 units.
+
 ### 4.5 Controllers
 * `LocalPlayerController`: input → Commands (hotkeys from `Localization/Hotkeys/*.txt`).
 * `AIController` ([AI.md](AI.md)): reads the sim through the same read-only API, filtered by fog for its team, and emits Commands. It runs on the host.
