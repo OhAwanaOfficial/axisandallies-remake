@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "core/sim.hpp"
@@ -77,6 +78,10 @@ FVec2 groupSlotOffset(const Sim& sim, const Group& g, std::size_t k);
 // Speed of a regiment's slowest living unit × its formation's SPEED_MAX multiplier (units/s).
 // 0 if it has no living units.
 Fixed regimentSpeed(const Sim& sim, EntityId regiment, const Regiment& r);
+
+// World-space slot target of each of a regiment's mobile units (ascending), as the Movement stage
+// steers them: formation, Column or single file per the regiment's compression. View/debug use.
+std::vector<std::pair<EntityId, FVec2>> slotTargets(const Sim& sim, EntityId regiment);
 
 // Sum of current health of a regiment's units: the "combat value" that orders division slots.
 Fixed regimentStrength(const Sim& sim, EntityId regiment);

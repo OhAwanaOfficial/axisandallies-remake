@@ -190,27 +190,37 @@ std::uint32_t columnOf(const DefSet& defs, const Regiment& r) {
 }
 
 // Fills ctx.offsets for a regiment's members from its compression level.
-void computeOffsets(Ctx& ctx, const Regiment& r, RegInfo& info) {
+// Slot offsets for `units` (one regiment's mobile members, ascending) from its formation and
+// compression: layout formation, layout Column, or a synthesized single file.
+std::vector<FVec2> offsetsFor(const World& w, const DefSet& defs, const Regiment& r, const std::vector<EntityId>& units,
+                              Fixed maxRadius) {
     std::uint32_t f = r.formation;
     if (r.compression == 1) {
-        const std::uint32_t col = columnOf(ctx.defs, r);
+        const std::uint32_t col = columnOf(defs, r);
         if (col != kNoDef) f = col;
     }
-    info.formation = r.compression == 2 ? -1 : static_cast<std::int32_t>(f);
-    for (std::size_t i = info.lo; i < info.hi; ++i) {
-        const Member* m = ctx.w.members.get(ctx.units[i].unit);
-        ctx.offsets[i] = layoutOffset(ctx.defs, r, f, m->slot);
-    }
-    if (r.compression != 2) return;
+    std::vector<FVec2> out(units.size());
+    for (std::size_t i = 0; i < units.size(); ++i) out[i] = layoutOffset(defs, r, f, w.members.get(units[i])->slot);
+    if (r.compression != 2) return out;
     // Single file: front to back by forward offset, then element.
-    std::vector<std::pair<Fixed, std::size_t>> order;
-    for (std::size_t i = info.lo; i < info.hi; ++i) order.emplace_back(ctx.offsets[i].x, i);
-    std::sort(order.begin(), order.end(), [&](const auto& a, const auto& b) {
-        if (a.first != b.first) return b.first < a.first;
-        return ctx.w.members.get(ctx.units[a.second].unit)->slot < ctx.w.members.get(ctx.units[b.second].unit)->slot;
+    std::vector<std::size_t> order(units.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        if (out[a].x != out[b].x) return out[b].x < out[a].x;
+        return w.members.get(units[a])->slot < w.members.get(units[b])->slot;
     });
-    const Fixed spacing = info.maxRadius * 2 + 0.5_fx;
-    for (std::size_t k = 0; k < order.size(); ++k) ctx.offsets[order[k].second] = {-(spacing * static_cast<std::int32_t>(k)), Fixed{}};
+    const Fixed spacing = maxRadius * 2 + 0.5_fx;
+    std::vector<FVec2> file(units.size());
+    for (std::size_t k = 0; k < order.size(); ++k) file[order[k]] = {-(spacing * static_cast<std::int32_t>(k)), Fixed{}};
+    return file;
+}
+
+void computeOffsets(Ctx& ctx, const Regiment& r, RegInfo& info) {
+    std::vector<EntityId> units;
+    for (std::size_t i = info.lo; i < info.hi; ++i) units.push_back(ctx.units[i].unit);
+    const std::vector<FVec2> offs = offsetsFor(ctx.w, ctx.defs, r, units, info.maxRadius);
+    for (std::size_t i = info.lo; i < info.hi; ++i) ctx.offsets[i] = offs[i - info.lo];
+    info.formation = r.compression == 2 ? -1 : static_cast<std::int32_t>(r.formation);
 }
 
 FVec2 slotTarget(const Transform& anchor, FVec2 offset) {
@@ -674,6 +684,25 @@ Fixed regimentSpeed(const Sim& sim, EntityId regiment, const Regiment& r) {
         any = true;
     }
     return any && sim.config().defs != nullptr ? slowest * formationSpeed(*sim.config().defs, r) : Fixed{};
+}
+
+std::vector<std::pair<EntityId, FVec2>> slotTargets(const Sim& sim, EntityId regiment) {
+    std::vector<std::pair<EntityId, FVec2>> out;
+    const World& w = sim.world();
+    const Regiment* r = w.regiments.get(regiment);
+    const Transform* anchor = w.transforms.get(regiment);
+    if (r == nullptr || anchor == nullptr || sim.config().defs == nullptr) return out;
+    std::vector<EntityId> units;
+    Fixed maxRadius;
+    for (std::size_t i = 0; i < w.members.size(); ++i) {
+        const EntityId u = w.members.ids()[i];
+        if (w.members.data()[i].organization != regiment || !w.movers.has(u) || !w.transforms.has(u)) continue;
+        units.push_back(u);
+        maxRadius = max(maxRadius, radiusOf(unitDefOf(sim, u)));
+    }
+    const std::vector<FVec2> offs = offsetsFor(w, *sim.config().defs, *r, units, maxRadius);
+    for (std::size_t i = 0; i < units.size(); ++i) out.emplace_back(units[i], slotTarget(*anchor, offs[i]));
+    return out;
 }
 
 Fixed regimentStrength(const Sim& sim, EntityId regiment) {
