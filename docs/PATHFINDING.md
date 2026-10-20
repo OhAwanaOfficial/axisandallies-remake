@@ -164,9 +164,9 @@ Code: `sim/nav/` (`map_def`, `nav_grid`, `grid_search`, `hpa`, `path_service`, `
 | Shallow / Water | 0 | 0 | 0 | 16 | 16 |
 | Mountain / Border | 0 | 0 | 0 | 0 | 0 |
 
-**Grid.** 8-way moves, no corner cutting (a diagonal needs both orthogonal neighbours passable; labels use the same rule, so "same label" means reachable). Step cost = (10 | 14) × (cost[from] + cost[to]), int32. Heuristic = octile × 2 × the class's minimum cost (admissible with roads). Building stamps are ref-counted per cell and block every class; each stamp or unstamp marks the touched clusters dirty. Labels also keep a bounding box per component.
+**Grid.** 8-way moves, no corner cutting (a diagonal needs both orthogonal neighbours passable; labels use the same rule, so "same label" means reachable). Step cost = (10 | 14) × (cost[from] + cost[to]), int32. Heuristic = octile × 2 × the class's minimum cost (admissible with roads). Building stamps are ref-counted per cell and block every class; each stamp or unstamp marks the touched clusters dirty. Labels also keep a bounding box per component. Because a diagonal needs both orthogonal cells open, components are simply 4-connected, so labels come from one union-find raster pass plus a numbering pass (numbered by each component's lowest cell, as a flood-fill scan would). Only classes whose effective costs a stamp actually changed are relabelled.
 
-**HPA\*.** 16×16 clusters. Along each shared border, a run is a maximal stretch of cell pairs with the **same non-zero crossing cost**: one entrance in the middle of a run shorter than 6, one at each end of longer runs. Splitting runs by cost (rather than by passability only) keeps roads and forest edges as their own entrances. Without it, wheeled paths that should follow a road came out up to 1.5× optimal. Nodes are identified by cell index; intra edges come from bounded Dijkstra runs. `rebuildDirty()` (start of the Pathfinding stage) rebuilds dirty clusters plus their 4 neighbours for every class in ascending order, recomputes labels, and bumps `version`. A test checks that the incremental rebuild equals a from-scratch build.
+**HPA\*.** 16×16 clusters. Along each shared border, a run is a maximal stretch of cell pairs with the **same non-zero crossing cost**: one entrance in the middle of a run shorter than 6, one at each end of longer runs. Splitting runs by cost (rather than by passability only) keeps roads and forest edges as their own entrances. Without it, wheeled paths that should follow a road came out up to 1.5× optimal. Nodes are identified by cell index; intra edges come from bounded Dijkstra runs (moves are symmetric, so each node only searches for the nodes after it and the cost matrix is mirrored). For the abstract search each node also has a dense id (cluster × 64 + index; a cluster has at most 60 edge cells), and edges cache their target's id and coordinates; rebuilding a cluster relinks its neighbours' inter edges. `rebuildDirty()` (start of the Pathfinding stage) rebuilds dirty clusters plus their 4 neighbours for every class in ascending order, recomputes labels, and bumps `version`. A test checks that the incremental rebuild equals a from-scratch build.
 
 **Query** (`PathService`, one job at a time, FIFO by (requestTick, requester EntityId, request id)):
 1. A start on a blocked cell moves to the nearest passable cell. A goal in another component moves to the nearest cell with the start's label (status `FoundNearest`). Both use a square-ring spiral ordered by (distance², cell index), clipped to the component's bounding box.
@@ -188,15 +188,36 @@ Code: `sim/nav/` (`map_def`, `nav_grid`, `grid_search`, `hpa`, `path_service`, `
 
 | Map | Build | Foot ms/query | Expansions avg / p99 | Cost vs optimal (mean / worst) |
 |---|---|---|---|---|
-| gen:7:256 | 240 ms | 0.28 | 768 / 2,405 | 1.027 / 1.139 (all classes ≤ 1.173) |
-| Golden Fields (256²) | 237 ms | 0.25 | 803 / 1,772 | 1.028 / 1.114 (all classes ≤ 1.163) |
-| Kursk (448², tracked) | 853 ms | 0.43 | 1,160 / 2,283 | 1.034 / 1.165 |
+| gen:7:256 | 96 ms | 0.10 | 768 / 2,405 | 1.027 / 1.139 (all classes ≤ 1.173) |
+| Golden Fields (256²) | 80 ms | 0.11 | 803 / 1,772 | 1.028 / 1.114 (all classes ≤ 1.163) |
+| Kursk (448², tracked) | 356 ms | 0.22 | 1,211 / 2,763 | 1.024 / 1.099 (all classes ≤ 1.126) |
 
 Tests enforce mean ≤ 1.05× and worst ≤ 1.25× on generated maps (`simcli nav-bench --optimal` exits non-zero past the same bounds).
 
+**Performance pass** (after M4 part 1). The searches were made faster without changing any result: every path, cost, expansion count and therefore every tick timing is identical. `nav-bench` prints the same `NAV BENCH HASH` before and after, and the golden-path hashes and the nav fixture are unchanged. Changes:
+* Grid searches run in **rect-local coordinates** (stride = next power of two ≥ the rect width), so a cluster search's scratch is 256 records instead of the whole map, and x/y are a shift and a mask instead of two divisions. Local index order equals map index order, so the (f, h, cell) heap pops in the same order.
+* Scratch is one 16-byte record per node (gen, g, parent, flags). The open list lives in the scratch, so a search allocates nothing. It is a binary heap with (f, h) packed in one 64-bit key and a branch-free child pick.
+* **No closed set.** The heuristic is consistent (octile × 2 × min cost never drops by more than a step costs; abstract edges cost at least their octile length), so an expanded node is never improved. Every push lowers g, so `g == stored g` alone rejects stale entries. This skips exactly what the closed-set checks skipped.
+* Effective cost per class (terrain, or 0 under a stamp) is kept up to date on stamp/unstamp, so a cost lookup is one byte load.
+* Cluster Dijkstra marks its targets in the scratch instead of scanning the target list on every expansion. Refinement appends straight into the job's cell list (`gridAStarAppend`).
+* Abstract search uses dense node ids and edge-cached target ids and coordinates, instead of map-sized scratch, a binary search per expansion and divisions per relax.
+* Labels: union-find instead of a per-cell flood fill through `stepCost`, and only for classes a stamp changed.
+* Intra edges: half the Dijkstra runs (symmetric costs).
+
+Measured on the dev laptop (Intel i5-2520M, 2 cores, 2011; Release, MSVC). Each figure is the minimum of 3 interleaved runs at high priority on one pinned core. "ms per full tick" = `nav-bench` total time ÷ ticks at the 20,000 budget, so it averages full ticks plus the short final one:
+
+| Map | ms per full tick, before → after (land classes) | Naval | NavWorld build | `rebuildDirty` after one 4×4 stamp |
+|---|---|---|---|---|
+| gen:7:256 | 5.8–7.3 → 2.5–3.0 | 1.8 → 0.8 | 377 → 96 ms | 24–33 → 5–6 ms |
+| Golden Fields (256²) | 5.7–6.0 → 2.5–2.8 | 1.3 → 0.6 | 280 → 80 ms | 23–30 → 5–7 ms |
+| Kursk (448²) | 7.0–7.4 → 3.1–3.9 | 0.8 → 0.4 | 1,147 → 356 ms | 75–119 → 13–17 ms (labels were 62–100 ms of it) |
+
+That is about 3,000–3,500 → 5,000–8,500 expansions per ms. A Kursk stamp on a cluster corner (more clusters rebuilt) went from 92–135 to 19–29 ms. The busiest tick runs over its average because a started work unit always finishes (debt). Worst single ticks were about 3.2–3.5 ms on the 256² maps and 4.1–4.8 ms on Kursk.
+
+**Budget vs the 3 ms target (§1).** On this laptop, the 20,000 budget fits 3 ms per tick on 256² maps (2.5–3.0 ms). On Kursk the land classes average 3.1–3.9 ms. **15,000 expansions per tick fits 3 ms on all three maps** on this machine (at about 5,000 expansions per ms, the slowest Kursk class). `kPathBudgetPerTick` stays 20,000 for now: changing it is a rules change (it moves when paths are delivered, so replay fixtures change), and a current desktop core is roughly 2× this 2011 laptop's. Revisit when real request rates and the target hardware are known. The remaining time is split roughly evenly: abstract search (~40% on Kursk), the two per-query cluster Dijkstras (20–45%), refinement (~25%) and smoothing (~7%, not counted as expansions).
+
 **Open:**
-* At about 3,000 expansions per ms, a full 20,000 budget is about 6–7 ms, over the 3 ms target in §1. Either lower the budget once real request rates are known, or optimise (heap allocations per search, label recompute on every rebuild).
-* The 256² rebuild after a stamp recomputes labels for the whole map.
+* Kursk land classes are still above 3 ms per full tick on the dev laptop (see above).
 * Golden-path hashes and the nav fixture (`sim/tests/fixtures/synthetic_nav_300.rpl`) are recorded with MSVC. The Clang CI legs check them on the next push.
 
 ---

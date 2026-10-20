@@ -202,53 +202,52 @@ std::uint32_t PathService::resolveAndSearch(Hpa& hpa, Job& j) {
     const std::uint32_t sCl = g.clusterOf(j.start), gCl = g.clusterOf(j.goal);
     const ClusterGraph& sg = hpa.cluster(c, sCl);
     const ClusterGraph& gg = hpa.cluster(c, gCl);
-    std::vector<std::int32_t> sCost, gCost;
     spent += gridDijkstra(g, c, j.start, g.clusterRect(sCl), sg.nodes, sCost, gridScratch);
     spent += gridDijkstra(g, c, j.goal, g.clusterRect(gCl), gg.nodes, gCost, gridScratch);
 
-    // A* on the abstract graph from S to G. Nodes are cells; heap keyed on (f, h, cell).
-    absScratch.prepare(n);
+    // A* on the abstract graph from S to G, heap keyed on (f, h, cell). The scratch is indexed by
+    // dense node id; S and G use their node's id when they sit on a node, else two extra ids.
+    // Every edge costs at least its octile length x 2 x the minimum cost, so the heuristic is
+    // consistent and, as in the grid searches, no closed set is needed: an expanded node is never
+    // improved, and an entry whose g is not the node's current g is stale.
+    const std::uint32_t slots = hpa.nodeSlots();
+    const std::uint32_t sNode = hpa.nodeId(c, j.start), gNode = hpa.nodeId(c, j.goal);
+    const std::uint32_t sId = sNode != UINT32_MAX ? sNode : slots;
+    const std::uint32_t gId = gNode != UINT32_MAX ? gNode : slots + 1;
+    absScratch.prepare(static_cast<std::size_t>(slots) + 2);
     absScratch.begin();
     const std::int32_t hScale = 2 * g.minCost(c);
     const std::int32_t gx = g.xOf(j.goal), gy = g.yOf(j.goal);
-    const auto heur = [&](std::uint32_t cell) { return octile(g.xOf(cell) - gx, g.yOf(cell) - gy) * hScale; };
-    std::vector<OpenEntry> open;
-    const auto relax = [&](std::uint32_t from, std::uint32_t to, std::int32_t gv) {
-        if (absScratch.closed(to) || gv >= absScratch.g(to)) return;
-        absScratch.set(to, gv, from);
-        const std::int32_t hh = heur(to);
-        open.push_back({gv + hh, hh, to});
-        std::push_heap(open.begin(), open.end(), OpenGreater{});
+    const auto relax = [&](std::uint32_t fromId, std::uint32_t to, std::uint32_t toId, std::int32_t x, std::int32_t y,
+                           std::int32_t gv) {
+        if (gv >= absScratch.g(toId)) return;
+        absScratch.set(toId, gv, fromId);
+        const std::int32_t hh = octile(x - gx, y - gy) * hScale;
+        absScratch.push(OpenEntry::make(gv + hh, hh, to, toId));
     };
-    absScratch.set(j.start, 0, j.start);
-    open.push_back({heur(j.start), heur(j.start), j.start});
+    absScratch.set(sId, 0, sId);
+    const std::int32_t h0 = octile(g.xOf(j.start) - gx, g.yOf(j.start) - gy) * hScale;
+    absScratch.push(OpenEntry::make(h0, h0, j.start, sId));
     std::int32_t found = INT32_MAX;
-    while (!open.empty()) {
-        std::pop_heap(open.begin(), open.end(), OpenGreater{});
-        const OpenEntry e = open.back();
-        open.pop_back();
-        const std::int32_t gv = e.f - e.h;
-        if (absScratch.closed(e.cell) || gv != absScratch.g(e.cell)) continue;
-        absScratch.close(e.cell);
+    while (!absScratch.openEmpty()) {
+        const OpenEntry e = absScratch.pop();
+        const std::int32_t gv = e.f() - e.h();
+        if (gv != absScratch.g(e.id)) continue;  // stale entry
         ++spent;
         if (e.cell == j.goal) {
             found = gv;
             break;
         }
         if (e.cell == j.start) {
-            for (std::size_t i = 0; i < sg.nodes.size(); ++i) {
-                if (sCost[i] != INT32_MAX) relax(e.cell, sg.nodes[i], sCost[i]);
+            for (std::uint32_t i = 0; i < sg.nodes.size(); ++i) {
+                const std::uint32_t cell = sg.nodes[i];
+                if (sCost[i] != INT32_MAX) relax(e.id, cell, sCl * kClusterNodeSlots + i, g.xOf(cell), g.yOf(cell), sCost[i]);
             }
         }
-        const std::int32_t ni = hpa.nodeIndex(c, e.cell);
-        if (ni >= 0) {
-            const ClusterGraph& cg = hpa.cluster(c, g.clusterOf(e.cell));
-            for (const HpaEdge& ed : cg.edges[static_cast<std::size_t>(ni)]) relax(e.cell, ed.cell, gv + ed.cost);
-            if (g.clusterOf(e.cell) == gCl) {
-                const auto it = std::lower_bound(gg.nodes.begin(), gg.nodes.end(), e.cell);
-                const auto gi = static_cast<std::size_t>(it - gg.nodes.begin());
-                if (it != gg.nodes.end() && *it == e.cell && gCost[gi] != INT32_MAX) relax(e.cell, j.goal, gv + gCost[gi]);
-            }
+        if (e.id < slots) {  // a graph node
+            const std::uint32_t k = e.id / kClusterNodeSlots, i = e.id % kClusterNodeSlots;
+            for (const HpaEdge& ed : hpa.cluster(c, k).edges[i]) relax(e.id, ed.cell, ed.node, ed.x, ed.y, gv + ed.cost);
+            if (k == gCl && gCost[i] != INT32_MAX) relax(e.id, j.goal, gId, gx, gy, gv + gCost[i]);
         }
     }
     // Short requests: HPA*'s detours through entrances cost the most here (relative to the path),
@@ -270,9 +269,9 @@ std::uint32_t PathService::resolveAndSearch(Hpa& hpa, Job& j) {
     }
     if (found != INT32_MAX) {
         j.abstract.clear();
-        for (std::uint32_t cur = j.goal;; cur = absScratch.parentOf(cur)) {
-            j.abstract.push_back(cur);
-            if (cur == j.start) break;
+        for (std::uint32_t id = gId;; id = absScratch.parentOf(id)) {
+            j.abstract.push_back(id == sId ? j.start : id == gId ? j.goal : hpa.nodeCell(c, id));
+            if (id == sId) break;
         }
         std::reverse(j.abstract.begin(), j.abstract.end());
         j.cost = found;
@@ -296,13 +295,12 @@ std::uint32_t PathService::refineSegment(Hpa& hpa, Job& j) {
     if (g.clusterOf(a) != g.clusterOf(b)) {
         j.cells.push_back(b);  // inter edge: one step across the border
     } else {
-        const GridPath p = gridAStar(g, j.req.cls, a, b, g.clusterRect(g.clusterOf(a)), gridScratch);
+        const GridPath p = gridAStarAppend(g, j.req.cls, a, b, g.clusterRect(g.clusterOf(a)), gridScratch, j.cells);
         spent = p.expansions;
         if (!p.found) {  // graph out of date in a way the version didn't catch: restart
             j.phase = 0;
             return spent;
         }
-        j.cells.insert(j.cells.end(), p.cells.begin() + 1, p.cells.end());
     }
     if (++j.segment + 1 >= j.abstract.size()) j.phase = 2;
     return spent;

@@ -12,39 +12,63 @@
 
 namespace corps::nav {
 
-// Reusable per-cell scratch (generation-stamped, so a search never clears the whole map).
+// Open-list entry, ordered by (f, h, cell). f and h are never negative, so they pack into one
+// key that compares in (f, h) order.
+struct OpenEntry {
+    std::uint64_t key = 0;
+    std::uint32_t cell = 0;
+    std::uint32_t id = 0;  // abstract search: the node's scratch id (not part of the order)
+
+    static OpenEntry make(std::int32_t f, std::int32_t h, std::uint32_t cell, std::uint32_t id = 0) {
+        return {static_cast<std::uint64_t>(static_cast<std::uint32_t>(f)) << 32 | static_cast<std::uint32_t>(h), cell, id};
+    }
+    std::int32_t f() const { return static_cast<std::int32_t>(key >> 32); }
+    std::int32_t h() const { return static_cast<std::int32_t>(key & 0xFFFFFFFFu); }
+};
+
+// Reusable search scratch: one record per search node (generation-stamped, so a search never
+// clears it) plus the open list. Grid searches index it by rect-local cell (see grid_search.cpp),
+// the abstract search by abstract node id. One record per node keeps its state in one cache line.
 class SearchScratch {
 public:
-    void prepare(std::size_t cells);
-    void begin();  // new search: invalidates all entries in O(1)
+    void prepare(std::size_t nodes);  // grows only
+    void begin();  // new search: invalidates all entries in O(1) and empties the open list
 
-    bool seen(std::uint32_t c) const { return gen[c] == current; }
-    std::int32_t g(std::uint32_t c) const { return seen(c) ? gcost[c] : INT32_MAX; }
-    std::uint32_t parentOf(std::uint32_t c) const { return parent[c]; }
-    bool closed(std::uint32_t c) const { return seen(c) && closedFlag[c]; }
-    void set(std::uint32_t c, std::int32_t gv, std::uint32_t par);
-    void close(std::uint32_t c) { closedFlag[c] = 1; }
+    bool seen(std::uint32_t c) const { return node[c].gen == current; }
+    std::int32_t g(std::uint32_t c) const { return seen(c) ? node[c].g : INT32_MAX; }
+    std::uint32_t parentOf(std::uint32_t c) const { return node[c].parent; }
+    void set(std::uint32_t c, std::int32_t gv, std::uint32_t par) {
+        Node& n = node[c];
+        if (n.gen != current) {
+            n.gen = current;
+            n.flags = 0;
+        }
+        n.g = gv;
+        n.parent = par;
+    }
+    // Target marks for gridDijkstra (cleared by begin()). A marked cell is otherwise unseen.
+    // (No closed set: the searches' heuristics are consistent, see grid_search.cpp.)
+    void markTarget(std::uint32_t c);
+    bool isTarget(std::uint32_t c) const { return seen(c) && (node[c].flags & kTarget) != 0; }
+
+    // Open list: a binary min-heap in (f, h, cell) order. Searches never push two entries that
+    // compare equal (a node is only pushed again with a smaller g), so the pop order does not
+    // depend on how the heap is arranged.
+    void push(const OpenEntry& e);
+    OpenEntry pop();
+    bool openEmpty() const { return open.empty(); }
 
 private:
-    std::vector<std::uint32_t> gen;
-    std::vector<std::int32_t> gcost;
-    std::vector<std::uint32_t> parent;
-    std::vector<std::uint8_t> closedFlag;
+    static constexpr std::uint32_t kTarget = 1;
+    struct Node {
+        std::uint32_t gen = 0;
+        std::int32_t g = 0;
+        std::uint32_t parent = 0;
+        std::uint32_t flags = 0;
+    };
+    std::vector<Node> node;
+    std::vector<OpenEntry> open;
     std::uint32_t current = 0;
-};
-
-struct OpenEntry {
-    std::int32_t f = 0;
-    std::int32_t h = 0;
-    std::uint32_t cell = 0;
-};
-// Min-heap order on (f, h, cell).
-struct OpenGreater {
-    bool operator()(const OpenEntry& a, const OpenEntry& b) const {
-        if (a.f != b.f) return a.f > b.f;
-        if (a.h != b.h) return a.h > b.h;
-        return a.cell > b.cell;
-    }
 };
 
 struct GridPath {
@@ -54,11 +78,15 @@ struct GridPath {
     std::uint32_t expansions = 0;
 };
 
-// A* from `from` to `to` inside `bounds` (both must lie inside it).
+// A* from `from` to `to` inside `bounds` (`from` must lie inside it; a `to` outside is never found).
 GridPath gridAStar(const NavGrid& grid, MoveClass c, std::uint32_t from, std::uint32_t to, const CellRect& bounds,
                    SearchScratch& s);
+// The same search, but appends the path's cells after `from` (from excluded) to `cells` instead of
+// returning them; the result's `cells` stays empty. Saves the allocations when refining segments.
+GridPath gridAStarAppend(const NavGrid& grid, MoveClass c, std::uint32_t from, std::uint32_t to, const CellRect& bounds,
+                         SearchScratch& s, std::vector<std::uint32_t>& cells);
 
-// Dijkstra from `from` inside `bounds`; outCost[i] = cost to targets[i] (INT32_MAX if unreachable).
+// Dijkstra from `from` (inside `bounds`) within `bounds`; outCost[i] = cost to targets[i] (INT32_MAX if unreachable).
 // Stops early once every target is settled. Returns expansions.
 std::uint32_t gridDijkstra(const NavGrid& grid, MoveClass c, std::uint32_t from, const CellRect& bounds,
                            const std::vector<std::uint32_t>& targets, std::vector<std::int32_t>& outCost, SearchScratch& s);

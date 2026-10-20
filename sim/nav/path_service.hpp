@@ -93,6 +93,7 @@ private:
     std::uint32_t nextId = 1;
     SearchScratch gridScratch;
     SearchScratch absScratch;
+    std::vector<std::int32_t> sCost, gCost;  // start / goal to their cluster's nodes
 };
 
 // Smooths a cell path by string pulling with NavGrid::lineOfSight (lookahead window of 64 cells;

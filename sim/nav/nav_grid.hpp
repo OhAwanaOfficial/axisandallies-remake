@@ -41,9 +41,9 @@ public:
     bool inside(std::int32_t x, std::int32_t y) const { return x >= 0 && y >= 0 && x < w && y < h; }
 
     // Effective cost (0 = blocked) including stamps.
-    std::uint8_t cost(MoveClass c, std::uint32_t cell) const {
-        return stamps[cell] != 0 ? 0 : base[static_cast<std::size_t>(c)][cell];
-    }
+    std::uint8_t cost(MoveClass c, std::uint32_t cell) const { return eff[static_cast<std::size_t>(c)][cell]; }
+    // The effective cost layer of a class, indexed by cell (for the search inner loops).
+    const std::uint8_t* costs(MoveClass c) const { return eff[static_cast<std::size_t>(c)].data(); }
     bool passable(MoveClass c, std::int32_t x, std::int32_t y) const { return inside(x, y) && cost(c, index(x, y)) != 0; }
     // Cost of stepping from (x, y) in direction dir (0..7), or 0 if not allowed.
     std::int32_t stepCost(MoveClass c, std::int32_t x, std::int32_t y, int dir) const;
@@ -58,7 +58,9 @@ public:
     void clearDirty() { dirty.clear(); }
     void markDirty(std::uint32_t cluster);
 
-    // Component labels (0 = blocked cell). Recomputed for all classes on demand.
+    // Component labels (0 = blocked cell), numbered in order of each component's lowest cell index.
+    // Recomputed on demand for the classes whose costs changed since the last call (a stamp on
+    // cells a class can't enter anyway leaves its labels alone).
     void recomputeLabels();
     std::uint32_t label(MoveClass c, std::uint32_t cell) const { return labels[static_cast<std::size_t>(c)][cell]; }
     // Bounding box of a component (label != 0).
@@ -79,14 +81,18 @@ public:
 
 private:
     void touch(const CellRect& r);
+    void refreshEff(std::uint32_t cell);
 
     std::int32_t w = 0, h = 0, cw = 0, ch = 0;
-    std::array<std::vector<std::uint8_t>, kMoveClassCount> base;
+    std::array<std::vector<std::uint8_t>, kMoveClassCount> base;  // static terrain cost
+    std::array<std::vector<std::uint8_t>, kMoveClassCount> eff;   // base, or 0 under a stamp
     std::array<std::int32_t, kMoveClassCount> minCost_{};
     std::vector<std::uint16_t> stamps;
     std::array<std::vector<std::uint32_t>, kMoveClassCount> labels;
     std::array<std::vector<CellRect>, kMoveClassCount> labelBoxes;
     std::vector<std::uint32_t> dirty;
+    std::array<bool, kMoveClassCount> labelsStale{};
+    std::vector<std::uint32_t> unionParent;  // recomputeLabels scratch
 };
 
 // Octile distance in step units (straight 10, diagonal 14).

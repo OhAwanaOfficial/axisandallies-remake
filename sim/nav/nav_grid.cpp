@@ -19,9 +19,21 @@ NavGrid::NavGrid(const MapDef& map)
             if (v != 0) lo = std::min<std::int32_t>(lo, v);
         }
         minCost_[c] = lo == 255 ? kCostUnit : lo;
+        eff[c] = base[c];
         labels[c].assign(n, 0);
     }
+    labelsStale.fill(true);
     recomputeLabels();
+}
+
+void NavGrid::refreshEff(std::uint32_t cell) {
+    for (std::size_t c = 0; c < kMoveClassCount; ++c) {
+        const std::uint8_t v = stamps[cell] != 0 ? 0 : base[c][cell];
+        if (eff[c][cell] != v) {
+            eff[c][cell] = v;
+            labelsStale[c] = true;
+        }
+    }
 }
 
 std::int32_t NavGrid::stepCost(MoveClass c, std::int32_t x, std::int32_t y, int dir) const {
@@ -70,8 +82,10 @@ void NavGrid::stamp(const CellRect& in) {
     if (r.empty()) return;
     for (std::int32_t y = r.y0; y <= r.y1; ++y) {
         for (std::int32_t x = r.x0; x <= r.x1; ++x) {
-            std::uint16_t& s = stamps[index(x, y)];
+            const std::uint32_t cell = index(x, y);
+            std::uint16_t& s = stamps[cell];
             if (s != 0xFFFF) ++s;
+            refreshEff(cell);
         }
     }
     touch(r);
@@ -82,46 +96,88 @@ void NavGrid::unstamp(const CellRect& in) {
     if (r.empty()) return;
     for (std::int32_t y = r.y0; y <= r.y1; ++y) {
         for (std::int32_t x = r.x0; x <= r.x1; ++x) {
-            std::uint16_t& s = stamps[index(x, y)];
+            const std::uint32_t cell = index(x, y);
+            std::uint16_t& s = stamps[cell];
             if (s != 0) --s;
+            refreshEff(cell);
         }
     }
     touch(r);
 }
 
 void NavGrid::recomputeLabels() {
-    std::vector<std::uint32_t> stack;
+    // Components are 4-connected: a diagonal step needs both orthogonal cells open, so it never
+    // connects anything the two orthogonal steps don't. One raster pass links every open cell to
+    // its open W / N neighbour (union-find whose root is always the set's lowest cell), a second
+    // ascending pass numbers the roots in order and fills the bounding boxes. Labels come out
+    // numbered by each component's lowest cell, as an ascending flood-fill scan would number them.
+    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    std::vector<std::uint32_t>& up = unionParent;
+    up.resize(n);
+    const auto find = [&](std::uint32_t a) {
+        while (up[a] != a) {
+            up[a] = up[up[a]];  // path halving
+            a = up[a];
+        }
+        return a;
+    };
+    const auto uw = static_cast<std::uint32_t>(w);
     for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
-        const auto c = static_cast<MoveClass>(ci);
+        if (!labelsStale[ci]) continue;
+        labelsStale[ci] = false;
+        const std::uint8_t* cost = eff[ci].data();
         std::vector<std::uint32_t>& lab = labels[ci];
         std::vector<CellRect>& boxes = labelBoxes[ci];
-        std::fill(lab.begin(), lab.end(), 0);
-        boxes.assign(1, CellRect{});  // label 0 = blocked
-        std::uint32_t next = 1;
-        for (std::uint32_t start = 0; start < lab.size(); ++start) {  // ascending scan: stable label numbers
-            if (lab[start] != 0 || cost(c, start) == 0) continue;
-            lab[start] = next;
-            stack.assign(1, start);
-            CellRect box{xOf(start), yOf(start), xOf(start), yOf(start)};
-            while (!stack.empty()) {
-                const std::uint32_t cell = stack.back();
-                stack.pop_back();
-                const std::int32_t x = xOf(cell), y = yOf(cell);
-                box.x0 = std::min(box.x0, x);
-                box.y0 = std::min(box.y0, y);
-                box.x1 = std::max(box.x1, x);
-                box.y1 = std::max(box.y1, y);
-                for (int d = 0; d < 8; ++d) {
-                    if (stepCost(c, x, y, d) == 0) continue;
-                    const std::uint32_t nb = index(x + kDirX[d], y + kDirY[d]);
-                    if (lab[nb] == 0) {
-                        lab[nb] = next;
-                        stack.push_back(nb);
+        for (std::int32_t y = 0; y < h; ++y) {
+            const std::uint32_t row = static_cast<std::uint32_t>(y) * uw;
+            for (std::int32_t x = 0; x < w; ++x) {
+                const std::uint32_t i = row + static_cast<std::uint32_t>(x);
+                const bool west = x > 0 && cost[i] != 0 && cost[i - 1] != 0;
+                const bool north = y > 0 && cost[i] != 0 && cost[i - uw] != 0;
+                if (west && north) {
+                    // Already one set when the NW cell is open (W-NW and NW-N are links).
+                    if (cost[i - uw - 1] != 0) {
+                        up[i] = up[i - 1];
+                    } else {
+                        const std::uint32_t a = find(i - 1), b = find(i - uw);
+                        const std::uint32_t lo = std::min(a, b);
+                        up[a] = lo;
+                        up[b] = lo;
+                        up[i] = lo;
                     }
+                } else if (west) {
+                    up[i] = up[i - 1];
+                } else if (north) {
+                    up[i] = up[i - uw];
+                } else {
+                    up[i] = i;
                 }
             }
-            boxes.push_back(box);
-            ++next;
+        }
+        // up[i] < i for every non-root, so in ascending order up[up[i]] is already a root.
+        boxes.assign(1, CellRect{});  // label 0 = blocked
+        std::uint32_t next = 1;
+        for (std::int32_t y = 0; y < h; ++y) {
+            const std::uint32_t row = static_cast<std::uint32_t>(y) * uw;
+            for (std::int32_t x = 0; x < w; ++x) {
+                const std::uint32_t i = row + static_cast<std::uint32_t>(x);
+                if (cost[i] == 0) {
+                    lab[i] = 0;
+                    continue;
+                }
+                if (up[i] == i) {
+                    lab[i] = next++;
+                    boxes.push_back(CellRect{x, y, x, y});
+                    continue;
+                }
+                up[i] = up[up[i]];
+                const std::uint32_t l = lab[up[i]];
+                lab[i] = l;
+                CellRect& box = boxes[l];
+                box.x0 = std::min(box.x0, x);
+                box.x1 = std::max(box.x1, x);
+                box.y1 = y;  // rows ascend; y0 is the root's row
+            }
         }
     }
 }

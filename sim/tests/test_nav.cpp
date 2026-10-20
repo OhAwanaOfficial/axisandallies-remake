@@ -483,6 +483,8 @@ TEST_CASE("stamping reroutes, unstamping restores, and the incremental rebuild e
                 for (std::size_t e = 0; e < x.edges[i].size(); ++e) {
                     CHECK(x.edges[i][e].cell == y.edges[i][e].cell);
                     CHECK(x.edges[i][e].cost == y.edges[i][e].cost);
+                    CHECK(x.edges[i][e].node == y.edges[i][e].node);
+                    CHECK(nav.hpa.nodeCell(c, x.edges[i][e].node) == x.edges[i][e].cell);
                 }
             }
         }

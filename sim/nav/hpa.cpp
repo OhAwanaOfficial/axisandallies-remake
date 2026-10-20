@@ -16,6 +16,7 @@ Hpa::Hpa(NavGrid& grid) : grid_(grid) {
 void Hpa::rebuildAll() {
     for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
         for (std::uint32_t k = 0; k < graphs[ci].size(); ++k) buildCluster(static_cast<MoveClass>(ci), k);
+        for (std::uint32_t k = 0; k < graphs[ci].size(); ++k) linkCluster(static_cast<MoveClass>(ci), k);
     }
     grid_.recomputeLabels();
     grid_.clearDirty();
@@ -24,20 +25,27 @@ void Hpa::rebuildAll() {
 void Hpa::rebuildDirty() {
     if (grid_.dirtyClusters().empty()) return;
     // Dirty clusters plus their 4 neighbours (shared borders), ascending and unique.
-    std::vector<std::uint32_t> todo;
     const std::int32_t cw = grid_.clustersX(), chh = grid_.clustersY();
-    for (const std::uint32_t k : grid_.dirtyClusters()) {
-        const std::int32_t cx = static_cast<std::int32_t>(k) % cw, cy = static_cast<std::int32_t>(k) / cw;
-        todo.push_back(k);
-        if (cx > 0) todo.push_back(k - 1);
-        if (cx + 1 < cw) todo.push_back(k + 1);
-        if (cy > 0) todo.push_back(k - static_cast<std::uint32_t>(cw));
-        if (cy + 1 < chh) todo.push_back(k + static_cast<std::uint32_t>(cw));
-    }
-    std::sort(todo.begin(), todo.end());
-    todo.erase(std::unique(todo.begin(), todo.end()), todo.end());
+    const auto withNeighbours = [&](const std::vector<std::uint32_t>& in) {
+        std::vector<std::uint32_t> out;
+        for (const std::uint32_t k : in) {
+            const std::int32_t cx = static_cast<std::int32_t>(k) % cw, cy = static_cast<std::int32_t>(k) / cw;
+            out.push_back(k);
+            if (cx > 0) out.push_back(k - 1);
+            if (cx + 1 < cw) out.push_back(k + 1);
+            if (cy > 0) out.push_back(k - static_cast<std::uint32_t>(cw));
+            if (cy + 1 < chh) out.push_back(k + static_cast<std::uint32_t>(cw));
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    };
+    const std::vector<std::uint32_t> todo = withNeighbours(grid_.dirtyClusters());
+    // Rebuilt clusters may renumber their nodes, so their neighbours' inter edges are relinked too.
+    const std::vector<std::uint32_t> relink = withNeighbours(todo);
     for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
         for (const std::uint32_t k : todo) buildCluster(static_cast<MoveClass>(ci), k);
+        for (const std::uint32_t k : relink) linkCluster(static_cast<MoveClass>(ci), k);
     }
     grid_.recomputeLabels();
     grid_.clearDirty();
@@ -103,13 +111,28 @@ void Hpa::buildCluster(MoveClass c, std::uint32_t k) {
     cg.nodes.erase(std::unique(cg.nodes.begin(), cg.nodes.end()), cg.nodes.end());
     cg.edges.assign(cg.nodes.size(), {});
 
-    // Intra edges: bounded Dijkstra from every node to the others (symmetric costs).
+    // Intra edges: bounded Dijkstra between the nodes. Moves are symmetric (a step costs the same
+    // both ways and is allowed both ways), so cost(i, j) == cost(j, i): node i only searches for
+    // the nodes after it and the matrix is mirrored.
     const CellRect rect = grid_.clusterRect(k);
+    const std::size_t nn = cg.nodes.size();
+    costMatrix.assign(nn * nn, INT32_MAX);
+    std::vector<std::uint32_t> later;
     std::vector<std::int32_t> costs;
-    for (std::size_t i = 0; i < cg.nodes.size(); ++i) {
-        gridDijkstra(grid_, c, cg.nodes[i], rect, cg.nodes, costs, scratch);
-        for (std::size_t j = 0; j < cg.nodes.size(); ++j) {
-            if (j != i && costs[j] != INT32_MAX) cg.edges[i].push_back({cg.nodes[j], costs[j]});
+    for (std::size_t i = 0; i + 1 < nn; ++i) {
+        later.assign(cg.nodes.begin() + static_cast<std::ptrdiff_t>(i) + 1, cg.nodes.end());
+        gridDijkstra(grid_, c, cg.nodes[i], rect, later, costs, scratch);
+        for (std::size_t j = i + 1; j < nn; ++j) {
+            costMatrix[i * nn + j] = costs[j - i - 1];
+            costMatrix[j * nn + i] = costs[j - i - 1];
+        }
+    }
+    const auto edgeTo = [&](std::uint32_t cell, std::int32_t cost) {
+        return HpaEdge{cell, cost, 0, static_cast<std::int16_t>(grid_.xOf(cell)), static_cast<std::int16_t>(grid_.yOf(cell))};
+    };
+    for (std::size_t i = 0; i < nn; ++i) {
+        for (std::size_t j = 0; j < nn; ++j) {
+            if (j != i && costMatrix[i * nn + j] != INT32_MAX) cg.edges[i].push_back(edgeTo(cg.nodes[j], costMatrix[i * nn + j]));
         }
     }
     // Inter edges to partner nodes in neighbour clusters (one straight step).
@@ -122,8 +145,20 @@ void Hpa::buildCluster(MoveClass c, std::uint32_t k) {
         for (int d = 0; d < 4; ++d) {
             if (kDirX[d] == dx && kDirY[d] == dy) dir = d;
         }
-        cg.edges[i].push_back({partner, grid_.stepCost(c, grid_.xOf(own), grid_.yOf(own), dir)});
+        cg.edges[i].push_back(edgeTo(partner, grid_.stepCost(c, grid_.xOf(own), grid_.yOf(own), dir)));
     }
+}
+
+void Hpa::linkCluster(MoveClass c, std::uint32_t k) {
+    ClusterGraph& cg = graphs[static_cast<std::size_t>(c)][k];
+    for (auto& edges : cg.edges) {
+        for (HpaEdge& e : edges) e.node = nodeId(c, e.cell);
+    }
+}
+
+std::uint32_t Hpa::nodeId(MoveClass c, std::uint32_t cell) const {
+    const std::int32_t i = nodeIndex(c, cell);
+    return i < 0 ? UINT32_MAX : grid_.clusterOf(cell) * kClusterNodeSlots + static_cast<std::uint32_t>(i);
 }
 
 std::int32_t Hpa::nodeIndex(MoveClass c, std::uint32_t cell) const {
