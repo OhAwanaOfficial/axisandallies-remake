@@ -25,6 +25,7 @@
 
 using namespace corps;
 using namespace corps::tgi;
+using namespace corps::fixed_literals;
 
 namespace {
 
@@ -473,6 +474,40 @@ TEST_CASE("golden defs: buildings, nations, SVars, and the PER/SAU mod") {
     CHECK(defs.stats.badValues == 0);
 }
 
+TEST_CASE("golden defs: layouts, formations and group formations from Organizations/ and group_formations.tgi") {
+    REQUIRE_DEFS();
+    CHECK(defs.layouts.size() >= 8);
+    const std::uint32_t li = defs.layoutIndex("regiment_infantry");
+    REQUIRE(li != kNoDef);
+    const LayoutDef& inf = defs.layouts[li];
+    CHECK(inf.elementSlot.size() == 9);
+    CHECK(inf.defaultFormationIds == "regiment_defensive");
+    REQUIRE(inf.formations.size() == 3);
+    for (const LayoutFormationDef& f : inf.formations) {
+        CHECK(f.formationIndex != kNoDef);
+        CHECK(f.offsets.size() == 9);
+    }
+    // Captain at the anchor; data (x, y) = (right, forward) → sim (forward, left).
+    const LayoutFormationDef& agg = inf.formations[inf.formation("regiment_aggressive")];
+    CHECK(agg.offsets[8] == FVec2{});
+    CHECK(agg.offsets[0] == FVec2{5.25_fx, 1_fx});  // data offset -1,+5.25
+    CHECK(defs.formations[defs.formationIndex("regiment_aggressive")].speedMultiplier == 0.75_fx);
+    CHECK(defs.formations[defs.formationIndex("regiment_defensive")].speedMultiplier == 1_fx);
+    CHECK(defs.formations[defs.formationIndex("regiment_column")].speedMultiplier == 1.25_fx);
+    for (const char* g : {"group_aggressive", "group_defensive", "group_column"}) {
+        const std::uint32_t gi = defs.groupFormationIndex(g);
+        REQUIRE(gi != kNoDef);
+        CHECK(defs.groupFormations[gi].offsets.size() == 6);
+    }
+    CHECK(defs.regiment("regiment_per_infantry")->layoutIndex == li);
+    CHECK(defs.unit("per_infantry")->moveClass == UnitMoveClass::Foot);
+    CHECK(defs.unit("ger_tank_medium")->moveClass == UnitMoveClass::Tracked);
+    CHECK(defs.unit("ger_tank_medium")->turnType == TurnType::InPlace);
+    CHECK(defs.unit("usa_halftrack")->moveClass == UnitMoveClass::Wheeled);
+    CHECK(defs.unit("usa_battleship")->moveClass == UnitMoveClass::Naval);
+    CHECK(defs.unit("gbr_fighter")->moveClass == UnitMoveClass::Air);
+}
+
 TEST_CASE("golden defs: compilation is deterministic (same data hash twice)") {
     REQUIRE_DEFS();
     Diagnostics diags;
@@ -485,8 +520,10 @@ TEST_CASE("golden spawn-test: regiment_per_infantry, 100 ticks, stable hash, rep
     REQUIRE_DEFS();
     Sim sim({1, &defs});
     sim.step({makeSpawnRegiment(0, 0, 0, "regiment_per_infantry", {Fixed::fromInt(100), Fixed::fromInt(50)}, Angle{})});
-    CHECK(sim.world().registry.aliveCount() == 7);
-    CHECK(sim.world().health.size() == 6);
+    // The layout expands slot `number`s: 3+1+1+1 riflemen, 2 MG, 1 captain = 9 men + the regiment.
+    CHECK(sim.world().registry.aliveCount() == 10);
+    CHECK(sim.world().health.size() == 9);
+    CHECK(sim.world().regiments.size() == 1);
     for (std::uint32_t t = 1; t < 100; ++t) sim.step();
     const std::uint64_t h = stateHash(sim);
     Replay rep;

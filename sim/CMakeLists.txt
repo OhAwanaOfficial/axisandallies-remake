@@ -8,6 +8,8 @@ add_library(sim STATIC
   core/command.cpp
   core/sim.cpp
   systems/stages.cpp
+  systems/orders.cpp
+  systems/movement.cpp
   session/hash.cpp
   session/state_io.cpp
   session/replay.cpp

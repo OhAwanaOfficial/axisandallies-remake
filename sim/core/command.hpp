@@ -21,7 +21,12 @@ namespace corps {
 enum class CommandType : std::uint8_t {
     Noop = 0,
     SpawnRegiment = 1,  // create a regiment (and its units) from a RegimentDef by IDS
-    // 2..199: gameplay commands, assigned when their systems land.
+    MoveGroup = 2,          // move 1..6 regiments to a point (a group if several; GAME_DESIGN §6.5)
+    Run = 3,                // MoveGroup in temporary Column, back to the previous formation on arrival
+    Stop = 4,               // stop the regiments (and their division)
+    SetFormation = 5,       // choose a layout formation by IDS (regiment_aggressive / _defensive / _column)
+    SetGroupBehaviour = 6,  // group behaviour on (division) / off for the regiments' group
+    // 7..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
     DebugSetTransform = 202,
@@ -81,9 +86,41 @@ struct DebugRequestPathPayload {
     }
 };
 
+// Regiment lists hold 1..kMaxCommandRegiments ids (a group is at most 6 regiments; larger
+// selections are split by the host). Order matters only for validation messages; the sim sorts.
+constexpr std::size_t kMaxCommandRegiments = 6;
+struct MoveGroupPayload {  // MoveGroup and Run
+    std::vector<EntityId> regiments;
+    FVec2 goal;
+    bool hasFacing = false;  // explicit facing on arrival (right-drag)
+    Angle facing;
+    friend bool operator==(const MoveGroupPayload& a, const MoveGroupPayload& b) noexcept {
+        return a.regiments == b.regiments && a.goal == b.goal && a.hasFacing == b.hasFacing && a.facing == b.facing;
+    }
+};
+struct RegimentListPayload {  // Stop
+    std::vector<EntityId> regiments;
+    friend bool operator==(const RegimentListPayload& a, const RegimentListPayload& b) noexcept { return a.regiments == b.regiments; }
+};
+struct SetFormationPayload {
+    std::vector<EntityId> regiments;
+    std::string formationIds;
+    friend bool operator==(const SetFormationPayload& a, const SetFormationPayload& b) noexcept {
+        return a.regiments == b.regiments && a.formationIds == b.formationIds;
+    }
+};
+struct SetGroupBehaviourPayload {
+    std::vector<EntityId> regiments;
+    bool division = false;
+    friend bool operator==(const SetGroupBehaviourPayload& a, const SetGroupBehaviourPayload& b) noexcept {
+        return a.regiments == b.regiments && a.division == b.division;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
                                     DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
-                                    DebugRequestPathPayload>;
+                                    DebugRequestPathPayload, MoveGroupPayload, RegimentListPayload, SetFormationPayload,
+                                    SetGroupBehaviourPayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -107,6 +144,15 @@ Command makeDebugRngDraw(std::uint32_t tick, std::uint8_t player, std::uint16_t 
 Command makeDebugPlaceBlocker(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, FVec2 pos, FVec2 halfExtent);
 Command makeDebugRequestPath(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, FVec2 goal,
                              std::uint8_t moveClass);
+Command makeMoveGroup(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal);
+Command makeMoveGroupFacing(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal,
+                            Angle facing);
+Command makeRun(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal);
+Command makeStop(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments);
+Command makeSetFormation(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
+                         std::string formationIds);
+Command makeSetGroupBehaviour(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
+                              bool division);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

@@ -47,6 +47,35 @@ bool getU(const std::vector<std::uint8_t>& in, std::size_t& pos, std::uint64_t m
     return getVarint(in, pos, v) && v <= max;
 }
 
+void putIds(std::vector<std::uint8_t>& out, const std::vector<EntityId>& ids) {
+    putVarint(out, ids.size());
+    for (const EntityId id : ids) putVarint(out, id.bits);
+}
+
+bool getIds(const std::vector<std::uint8_t>& in, std::size_t& pos, std::vector<EntityId>& ids) {
+    std::uint64_t n = 0, v = 0;
+    if (!getU(in, pos, kMaxCommandRegiments, n) || n == 0) return false;
+    ids.clear();
+    for (std::uint64_t i = 0; i < n; ++i) {
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        ids.push_back(EntityId{static_cast<std::uint32_t>(v)});
+    }
+    return true;
+}
+
+void putString(std::vector<std::uint8_t>& out, const std::string& s) {
+    putVarint(out, s.size());
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+bool getString(const std::vector<std::uint8_t>& in, std::size_t& pos, std::string& s) {
+    std::uint64_t n = 0;
+    if (!getU(in, pos, 256, n) || pos + n > in.size()) return false;
+    s.assign(in.begin() + static_cast<std::ptrdiff_t>(pos), in.begin() + static_cast<std::ptrdiff_t>(pos + n));
+    pos += n;
+    return true;
+}
+
 }  // namespace
 
 Command makeNoop(std::uint32_t tick, std::uint8_t player, std::uint16_t seq) {
@@ -93,6 +122,45 @@ Command makeDebugRequestPath(std::uint32_t tick, std::uint8_t player, std::uint1
                              std::uint8_t moveClass) {
     Command c = base(tick, player, seq, CommandType::DebugRequestPath);
     c.payload = DebugRequestPathPayload{target, goal, moveClass};
+    return c;
+}
+
+Command makeMoveGroup(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal) {
+    Command c = base(tick, player, seq, CommandType::MoveGroup);
+    c.payload = MoveGroupPayload{std::move(regiments), goal, false, Angle{}};
+    return c;
+}
+
+Command makeMoveGroupFacing(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal,
+                            Angle facing) {
+    Command c = base(tick, player, seq, CommandType::MoveGroup);
+    c.payload = MoveGroupPayload{std::move(regiments), goal, true, facing};
+    return c;
+}
+
+Command makeRun(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal) {
+    Command c = base(tick, player, seq, CommandType::Run);
+    c.payload = MoveGroupPayload{std::move(regiments), goal, false, Angle{}};
+    return c;
+}
+
+Command makeStop(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments) {
+    Command c = base(tick, player, seq, CommandType::Stop);
+    c.payload = RegimentListPayload{std::move(regiments)};
+    return c;
+}
+
+Command makeSetFormation(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
+                         std::string formationIds) {
+    Command c = base(tick, player, seq, CommandType::SetFormation);
+    c.payload = SetFormationPayload{std::move(regiments), std::move(formationIds)};
+    return c;
+}
+
+Command makeSetGroupBehaviour(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
+                              bool division) {
+    Command c = base(tick, player, seq, CommandType::SetGroupBehaviour);
+    c.payload = SetGroupBehaviourPayload{std::move(regiments), division};
     return c;
 }
 
@@ -161,6 +229,30 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
         putVarint(out, p.moveClass);
         break;
     }
+    case CommandType::MoveGroup:
+    case CommandType::Run: {
+        const auto& p = std::get<MoveGroupPayload>(c.payload);
+        putIds(out, p.regiments);
+        putVec(out, p.goal);
+        putVarint(out, p.hasFacing ? 1 : 0);
+        if (p.hasFacing) putVarint(out, p.facing.units);
+        break;
+    }
+    case CommandType::Stop:
+        putIds(out, std::get<RegimentListPayload>(c.payload).regiments);
+        break;
+    case CommandType::SetFormation: {
+        const auto& p = std::get<SetFormationPayload>(c.payload);
+        putIds(out, p.regiments);
+        putString(out, p.formationIds);
+        break;
+    }
+    case CommandType::SetGroupBehaviour: {
+        const auto& p = std::get<SetGroupBehaviourPayload>(c.payload);
+        putIds(out, p.regiments);
+        putVarint(out, p.division ? 1 : 0);
+        break;
+    }
     }
 }
 
@@ -220,6 +312,37 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
         if (!getVec(in, pos, p.goal) || !getU(in, pos, 0xFF, v)) return false;
         p.moveClass = static_cast<std::uint8_t>(v);
         out.payload = p;
+        return true;
+    }
+    case CommandType::MoveGroup:
+    case CommandType::Run: {
+        MoveGroupPayload p;
+        if (!getIds(in, pos, p.regiments) || !getVec(in, pos, p.goal) || !getU(in, pos, 1, v)) return false;
+        p.hasFacing = v != 0;
+        if (p.hasFacing) {
+            if (!getU(in, pos, 0xFFFF, v)) return false;
+            p.facing = Angle::fromUnits(static_cast<std::uint32_t>(v));
+        }
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::Stop: {
+        RegimentListPayload p;
+        if (!getIds(in, pos, p.regiments)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::SetFormation: {
+        SetFormationPayload p;
+        if (!getIds(in, pos, p.regiments) || !getString(in, pos, p.formationIds)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::SetGroupBehaviour: {
+        SetGroupBehaviourPayload p;
+        if (!getIds(in, pos, p.regiments) || !getU(in, pos, 1, v)) return false;
+        p.division = v != 0;
+        out.payload = std::move(p);
         return true;
     }
     }

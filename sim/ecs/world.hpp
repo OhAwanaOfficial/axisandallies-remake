@@ -68,6 +68,67 @@ struct Path {
     }
 };
 
+// A regiment (on the organization entity; PATHFINDING §4). Its Transform is the invisible anchor.
+struct Regiment {
+    static constexpr std::uint16_t kNone = 0xFFFF;
+    std::uint32_t layout = 0xFFFFFFFFu;   // DefSet::layouts index (none: legacy placement)
+    std::uint8_t player = 0;
+    std::uint8_t moveClass = 0;           // UnitMoveClass: the most restrictive member's
+    std::uint16_t formation = 0;          // chosen formation: index into the layout's formations
+    std::uint16_t runRestore = kNone;     // formation to go back to after a Run
+    std::uint8_t compression = 0;         // chokepoints: 0 = none, 1 = layout Column, 2 = single file
+    std::uint8_t compressionHold = 0;     // ticks of wide clearance seen before decompressing
+    EntityId group;                       // Group entity, or null
+    friend bool operator==(const Regiment& a, const Regiment& b) noexcept {
+        return a.layout == b.layout && a.player == b.player && a.moveClass == b.moveClass && a.formation == b.formation &&
+               a.runRestore == b.runRestore && a.compression == b.compression && a.compressionHold == b.compressionHold &&
+               a.group == b.group;
+    }
+};
+
+// Movement order state of an anchor: a regiment, or a division's Group entity.
+struct Order {
+    enum class State : std::uint8_t { Idle = 0, WaitPath = 1, Moving = 2, Wheeling = 3, Arriving = 4, Following = 5 };
+    State state = State::Idle;
+    bool needPath = false;      // the Orders stage requests a path next tick
+    bool hasFacing = false;     // explicit facing on arrival
+    bool blocked = false;       // the last order ended without reaching the goal
+    std::uint8_t repaths = 0;   // stuck re-requests in this order
+    std::uint8_t window = 0;    // ticks in the current stuck-detection window
+    Angle facing;
+    FVec2 goal;
+    std::uint32_t waypoint = 0; // next Path waypoint
+    std::uint32_t stateTicks = 0;
+    Fixed progress;             // distance actually moved in the window
+    Fixed expected;             // distance the anchor's speed allowed in the window
+    friend bool operator==(const Order& a, const Order& b) noexcept {
+        return a.state == b.state && a.needPath == b.needPath && a.hasFacing == b.hasFacing && a.blocked == b.blocked &&
+               a.repaths == b.repaths && a.window == b.window && a.facing == b.facing && a.goal == b.goal &&
+               a.waypoint == b.waypoint && a.stateTicks == b.stateTicks && a.progress == b.progress && a.expected == b.expected;
+    }
+};
+
+// A unit's current velocity (world units per second).
+struct Mover {
+    FVec2 velocity;
+    friend bool operator==(const Mover& a, const Mover& b) noexcept { return a.velocity == b.velocity; }
+};
+
+// Up to 6 regiments sharing orders (GAME_DESIGN §6.11). As a division (`division`), the Group
+// entity's Transform/Order/Path are the division anchor and members hold group-formation slots.
+struct Group {
+    static constexpr std::size_t kMaxMembers = 6;
+    std::uint8_t player = 0;
+    bool division = false;
+    std::uint32_t groupFormation = 0xFFFFFFFFu;  // DefSet::groupFormations index
+    std::vector<EntityId> members;               // ascending
+    std::vector<EntityId> slotOrder;             // members by slot: strongest first (division)
+    friend bool operator==(const Group& a, const Group& b) noexcept {
+        return a.player == b.player && a.division == b.division && a.groupFormation == b.groupFormation &&
+               a.members == b.members && a.slotOrder == b.slotOrder;
+    }
+};
+
 struct World {
     EntityRegistry registry;
     Pool<Transform> transforms;
@@ -76,6 +137,10 @@ struct World {
     Pool<Member> members;
     Pool<Footprint> footprints;
     Pool<Path> paths;
+    Pool<Regiment> regiments;
+    Pool<Order> orders;
+    Pool<Mover> movers;
+    Pool<Group> groups;
 
     // Fixed pool order: serializer sections and component removal follow it.
     template <class F>
@@ -86,6 +151,10 @@ struct World {
         f(members);
         f(footprints);
         f(paths);
+        f(regiments);
+        f(orders);
+        f(movers);
+        f(groups);
     }
 
     // Runs the registry's deferred destruction and drops the dead entities' components.

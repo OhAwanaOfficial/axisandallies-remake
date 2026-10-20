@@ -7,6 +7,7 @@
 //   "ENTS" registry: generations, slot states, FIFO free list, pending destruction (ascending)
 //   one section per component pool, in World::forEachPool order, entries by ascending EntityId:
 //     "XFRM" Transform   "DREF" DefRef   "HLTH" Health   "MEMB" Member   "FTPR" Footprint   "PATH" Path
+//     "REGT" Regiment    "ORDR" Order    "MOVR" Mover    "GRUP" Group
 //   "NAVS" u8 hasNav, then if set: u32 navVersion, u32 n + dirty clusters, PathService state
 //          (queue, job in progress, budget debt, next id; see nav/path_service.cpp)
 //
@@ -24,7 +25,7 @@
 
 namespace corps {
 
-constexpr std::uint32_t kStateFormatVersion = 2;  // 2: mapHash, FTPR, PATH, NAVS (M4)
+constexpr std::uint32_t kStateFormatVersion = 3;  // 2: mapHash, FTPR, PATH, NAVS; 3: REGT, ORDR, MOVR, GRUP (M4)
 
 std::vector<std::uint8_t> saveState(const Sim& sim);
 std::uint64_t stateHash(const Sim& sim);

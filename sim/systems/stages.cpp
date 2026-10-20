@@ -7,7 +7,6 @@ namespace corps {
 
 void runEconomy(Sim&) {}
 void runTimers(Sim&) {}
-void runOrders(Sim&) {}
 
 // Rebuild the clusters touched by stamps since last tick, spend the expansion budget, and hand
 // finished paths to their requesters (dropped if the requester died or has asked again since).
@@ -26,7 +25,6 @@ void runPathfinding(Sim& sim) {
         p->waypoints = std::move(r.waypoints);
     }
 }
-void runMovement(Sim&) {}
 void runVision(Sim&) {}
 void runEngagement(Sim&) {}
 void runAbilities(Sim&) {}

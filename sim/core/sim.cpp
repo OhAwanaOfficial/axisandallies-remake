@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "nav/nav_world.hpp"
+#include "systems/movement.hpp"
+#include "systems/orders.hpp"
 #include "systems/stages.hpp"
 
 namespace corps {
@@ -34,6 +36,7 @@ const char* stageName(Stage s) {
 Sim::Sim(const SimConfig& config)
     : config_(config), rng_(Rng::derive(config.matchSeed, static_cast<std::uint64_t>(RngStream::Match))) {
     if (config_.map != nullptr) nav_ = std::make_unique<nav::NavWorld>(*config_.map);
+    moveCache_ = std::make_unique<MovementCache>();
 }
 
 Sim::~Sim() = default;
@@ -138,6 +141,19 @@ void Sim::apply(const Command& c) {
     case CommandType::DebugRequestPath:
         requestPath(c, std::get<DebugRequestPathPayload>(c.payload));
         return;
+    case CommandType::MoveGroup:
+    case CommandType::Run:
+        applyMoveGroup(*this, c, std::get<MoveGroupPayload>(c.payload), c.type == CommandType::Run);
+        return;
+    case CommandType::Stop:
+        applyStop(*this, c, std::get<RegimentListPayload>(c.payload));
+        return;
+    case CommandType::SetFormation:
+        applySetFormation(*this, c, std::get<SetFormationPayload>(c.payload));
+        return;
+    case CommandType::SetGroupBehaviour:
+        applySetGroupBehaviour(*this, c, std::get<SetGroupBehaviourPayload>(c.payload));
+        return;
     }
     reject();
 }
@@ -154,26 +170,60 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     if (org.isNull()) return reject();
     world_.transforms.set(org, {p.position, p.facing});
     world_.defRefs.set(org, {DefRef::Kind::Regiment, regIndex});
+    Regiment regiment;
+    regiment.layout = reg.layoutIndex;
+    regiment.player = c.player;
+    const LayoutDef* layout = reg.layoutIndex != kNoDef ? &defs.layouts[reg.layoutIndex] : nullptr;
+    if (layout != nullptr) {
+        const std::uint32_t f = layout->formation(layout->defaultFormationIds);
+        regiment.formation = static_cast<std::uint16_t>(f != kNoDef ? f : 0);
+    }
     events_.push_back({SimEvent::Type::Spawned, org, c.player, c.type});
 
-    for (std::size_t s = 0; s < reg.slots.size(); ++s) {
-        const ElementRef& el = reg.slots[s];
-        if (el.kind == ElementKind::None) continue;  // empty slot, or an element the data doesn't define
+    // Regiment slot s fills layout slot s, which holds `number` elements (PER infantry: 9 men).
+    // Member::slot is the layout element; slots past the layout use the legacy grid placement.
+    bool anyClass = false;
+    const auto addUnit = [&](const ElementRef& el, std::uint32_t element, FVec2 offset) {
         const EntityId e = world_.registry.create();
-        if (e.isNull()) break;
-        world_.transforms.set(e, {p.position + slotOffset(s).rotated(p.facing), p.facing});
+        if (e.isNull()) return false;
+        world_.transforms.set(e, {p.position + offset.rotated(p.facing), p.facing});
         if (el.kind == ElementKind::Unit) {
-            const Fixed hp = defs.units[el.index].health;
+            const UnitDef& u = defs.units[el.index];
             world_.defRefs.set(e, {DefRef::Kind::Unit, el.index});
-            world_.health.set(e, {hp, hp});
+            world_.health.set(e, {u.health, u.health});
+            world_.movers.set(e, {});
+            const auto cls = static_cast<std::uint8_t>(u.moveClass);
+            regiment.moveClass = anyClass ? restrictiveClass(regiment.moveClass, cls) : cls;
+            anyClass = true;
         } else {
             const Fixed hp = defs.buildings[el.index].health;
             world_.defRefs.set(e, {DefRef::Kind::Building, el.index});
             world_.health.set(e, {hp, hp});
         }
-        world_.members.set(e, {org, static_cast<std::uint16_t>(s)});
+        world_.members.set(e, {org, static_cast<std::uint16_t>(element)});
         events_.push_back({SimEvent::Type::Spawned, e, c.player, c.type});
+        return true;
+    };
+    const std::size_t layoutElements = layout != nullptr ? layout->elementSlot.size() : 0;
+    std::uint32_t extra = 0;
+    for (std::size_t s = 0; s < reg.slots.size(); ++s) {
+        const ElementRef& el = reg.slots[s];
+        if (el.kind == ElementKind::None) continue;  // empty slot, or an element the data doesn't define
+        if (layout != nullptr && s < layout->slots.size()) {
+            for (std::uint32_t e = 0; e < layoutElements; ++e) {
+                if (layout->elementSlot[e] == s && !addUnit(el, e, layoutOffset(defs, regiment, regiment.formation, e))) break;
+            }
+        } else if (!addUnit(el, static_cast<std::uint32_t>(layoutElements) + extra, slotOffset(s))) {
+            break;
+        } else {
+            ++extra;
+        }
     }
+    world_.regiments.set(org, regiment);
+    Order idle;
+    idle.facing = p.facing;
+    idle.goal = p.position;
+    world_.orders.set(org, idle);
 }
 
 void Sim::placeBlocker(const Command& c, const DebugPlaceBlockerPayload& p) {
@@ -213,6 +263,7 @@ void Sim::cleanup() {
     const auto unstamp = [this](EntityId id) {
         const Footprint* fp = world_.footprints.get(id);
         if (nav_ && fp != nullptr) nav_->grid.unstamp({fp->x0, fp->y0, fp->x1, fp->y1});
+        onEntityDestroyed(*this, id);  // leave groups
     };
     for (const EntityId id : world_.cleanup(unstamp)) {
         events_.push_back({SimEvent::Type::Destroyed, id, 0, CommandType::Noop});

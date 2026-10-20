@@ -23,6 +23,8 @@ struct NavWorld;
 
 namespace corps {
 
+struct MovementCache;
+
 constexpr std::uint32_t kTicksPerSecond = 10;  // ARCHITECTURE §4.3 / NETCODE §2 (original: SVars 16)
 
 enum class Stage : std::uint8_t {
@@ -45,7 +47,8 @@ constexpr std::size_t kStageCount = static_cast<std::size_t>(Stage::Count);
 const char* stageName(Stage s);
 
 struct SimEvent {
-    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected };
+    // Arrived / Blocked: a regiment's (or division's) move order finished at, or short of, its goal.
+    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked };
     Type type = Type::Spawned;
     EntityId entity;
     std::uint8_t player = 0;
@@ -89,6 +92,12 @@ public:
     const nav::NavWorld* nav() const noexcept { return nav_.get(); }
     // Nav cell under a world position, clamped to the map. Requires a map.
     std::uint32_t cellAt(FVec2 position) const;
+    // Derived movement data (clearance); not state. Valid while a map is set.
+    MovementCache& moveCache() noexcept { return *moveCache_; }
+
+    // Appends an output event (systems use it; the view drains events()).
+    void emit(const SimEvent& e) { events_.push_back(e); }
+    void reject(const Command& c) { events_.push_back({SimEvent::Type::CommandRejected, EntityId{}, c.player, c.type}); }
 
     // Called after every stage of every tick (per-system hashing for determinism checks, test
     // hooks). Not part of the state. Empty by default.
@@ -111,6 +120,7 @@ private:
     Rng rng_;
     std::vector<SimEvent> events_;
     std::unique_ptr<nav::NavWorld> nav_;
+    std::unique_ptr<MovementCache> moveCache_;
 };
 
 }  // namespace corps

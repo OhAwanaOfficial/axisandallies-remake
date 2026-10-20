@@ -70,6 +70,83 @@ void get(ByteReader& r, Path& p) {
     p.waypoints.clear();
     for (std::uint32_t i = 0; i < n && r.ok; ++i) p.waypoints.push_back(r.u32());
 }
+void put(ByteWriter& w, const Regiment& g) {
+    w.u32(g.layout);
+    w.u8(g.player);
+    w.u8(g.moveClass);
+    w.u16(g.formation);
+    w.u16(g.runRestore);
+    w.u8(g.compression);
+    w.u8(g.compressionHold);
+    w.entity(g.group);
+}
+void get(ByteReader& r, Regiment& g) {
+    g.layout = r.u32();
+    g.player = r.u8();
+    g.moveClass = r.u8();
+    g.formation = r.u16();
+    g.runRestore = r.u16();
+    g.compression = r.u8();
+    g.compressionHold = r.u8();
+    g.group = r.entity();
+}
+void put(ByteWriter& w, const Order& o) {
+    w.u8(static_cast<std::uint8_t>(o.state));
+    w.boolean(o.needPath);
+    w.boolean(o.hasFacing);
+    w.boolean(o.blocked);
+    w.u8(o.repaths);
+    w.u8(o.window);
+    w.angle(o.facing);
+    w.vec2(o.goal);
+    w.u32(o.waypoint);
+    w.u32(o.stateTicks);
+    w.fixed(o.progress);
+    w.fixed(o.expected);
+}
+void get(ByteReader& r, Order& o) {
+    o.state = static_cast<Order::State>(r.u8());
+    o.needPath = r.boolean();
+    o.hasFacing = r.boolean();
+    o.blocked = r.boolean();
+    o.repaths = r.u8();
+    o.window = r.u8();
+    o.facing = r.angle();
+    o.goal = r.vec2();
+    o.waypoint = r.u32();
+    o.stateTicks = r.u32();
+    o.progress = r.fixed();
+    o.expected = r.fixed();
+}
+void put(ByteWriter& w, const Mover& m) {
+    w.vec2(m.velocity);
+}
+void get(ByteReader& r, Mover& m) {
+    m.velocity = r.vec2();
+}
+void putIds(ByteWriter& w, const std::vector<EntityId>& v) {
+    w.u32(static_cast<std::uint32_t>(v.size()));
+    for (const EntityId id : v) w.entity(id);
+}
+void getIds(ByteReader& r, std::vector<EntityId>& v) {
+    const std::uint32_t n = r.count(4);
+    v.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) v.push_back(r.entity());
+}
+void put(ByteWriter& w, const Group& g) {
+    w.u8(g.player);
+    w.boolean(g.division);
+    w.u32(g.groupFormation);
+    putIds(w, g.members);
+    putIds(w, g.slotOrder);
+}
+void get(ByteReader& r, Group& g) {
+    g.player = r.u8();
+    g.division = r.boolean();
+    g.groupFormation = r.u32();
+    getIds(r, g.members);
+    getIds(r, g.slotOrder);
+}
 
 template <class T>
 void putPool(ByteWriter& w, const Pool<T>& pool) {
@@ -96,7 +173,7 @@ bool getPool(ByteReader& r, Pool<T>& pool, const EntityRegistry& reg) {
     return r.ok;
 }
 
-constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH"};
+constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH", "REGT", "ORDR", "MOVR", "GRUP"};
 
 std::uint64_t mapHashOf(const Sim& sim) {
     return sim.config().map != nullptr ? sim.config().map->mapHash : 0;
