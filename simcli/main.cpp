@@ -13,6 +13,7 @@
 //   simcli determinism-check F.rpl [--every-tick] [--per-stage] [--map F.json]
 //   simcli nav-bench [--map F.json | --gen SEED [--size N]] [--queries N] [--class C|all] [--seed S]
 //                    [--budget B] [--optimal]
+//   simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -62,7 +63,8 @@ void usage() {
                  "  simcli play F.rpl [--map F.json]\n"
                  "  simcli determinism-check F.rpl [--every-tick] [--per-stage] [--map F.json]\n"
                  "  simcli nav-bench [--map F.json | --gen SEED [--size N]] [--queries N] [--class C|all]\n"
-                 "                   [--seed S] [--budget B] [--optimal]\n");
+                 "                   [--seed S] [--budget B] [--optimal]\n"
+                 "  simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -340,6 +342,7 @@ int main(int argc, char** argv) {
     if (args->command == "spawn-test") return simcli::cmdSpawnTest(sa);
     if (args->command == "show-def") return simcli::cmdShowDef(sa);
     if (args->command == "nav-bench") return simcli::cmdNavBench(sa);
+    if (args->command == "scenario") return simcli::cmdScenario(sa);
     usage();
     return kExitUsage;
 }

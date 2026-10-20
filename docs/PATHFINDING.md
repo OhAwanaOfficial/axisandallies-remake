@@ -198,3 +198,94 @@ Tests enforce mean ≤ 1.05× and worst ≤ 1.25× on generated maps (`simcli na
 * At about 3,000 expansions per ms, a full 20,000 budget is about 6–7 ms, over the 3 ms target in §1. Either lower the budget once real request rates are known, or optimise (heap allocations per search, label recompute on every rebuild).
 * The 256² rebuild after a stamp recomputes labels for the whole map.
 * Golden-path hashes and the nav fixture (`sim/tests/fixtures/synthetic_nav_300.rpl`) are recorded with MSVC. The Clang CI legs check them on the next push.
+
+---
+
+## 10. Implementation status (M4 part 2: movement, sim only)
+
+Code: `sim/systems/orders.cpp` (commands, groups, the Orders stage's path requests), `sim/systems/movement.cpp` (the Movement stage), data in `sim/data/def_compiler.cpp` (layouts, formations, group formations, unit move class and turn type). Tests in `sim/tests/test_movement.cpp` (data-free, with a hand-built DefSet) and `test_tgi_golden.cpp` (the real data). `simcli scenario` runs six mixed regiments across the test map.
+
+**Data.**
+* `OrganizationLayout` records become `LayoutDef`. Regiment slot *i* fills layout slot *i*, which holds `number` elements, so a PER infantry regiment is 3+1+1+1 riflemen, 2 MGs and a captain (9 men), and a tank regiment is 3 tanks plus a commander.
+* In each layout formation, element *e* with property *p* (front, support, captain) takes the *k*-th position tagged *p*.
+* Offsets are stored in the regiment frame: +x forward is the data's +y, and +y left is the data's −x. **Assumption:** the data's +x is the regiment's right. The view will confirm it.
+* `Formation` records give speed and attack multipliers from their `MultiplyModifier`s: `regiment_aggressive` is the manual's Assault (speed ×0.75), `regiment_defensive` is Normal/Aggressive (attack ×0.75), and `regiment_column` is Column (speed ×1.25, attack ×0.5). Each also names its group formation.
+* Units get a move class from their property tags: aircraft → Air, seacraft → Naval, tank → Tracked, vehicle → Wheeled, else Foot. A regiment uses its most restrictive member's class (Naval > Amphibious > Wheeled > Tracked > Foot).
+
+**Commands.** All take 1–6 regiments; ids that aren't the sender's live regiments are skipped, and the command is rejected if none is left.
+* `MoveGroup` (2), with optional explicit facing.
+* `Run` (3): temporary Column, previous formation restored on arrival or on the next normal order.
+* `Stop` (4): stops the whole division if the regiment is in one.
+* `SetFormation` (5): by formation IDS.
+* `SetGroupBehaviour` (6): turns division mode on or off; switching stops the group.
+
+Ordering several regiments together makes them one `Group`, reused when the same set is ordered again. Ordering one regiment alone takes it out of its group. A group left with under two regiments dissolves.
+
+**Anchor** (the regiment's Transform):
+* Follows the path's waypoints, turning at most 11.25° per tick.
+* A waypoint more than 90° off makes it **wheel**: the heading snaps, and the anchor waits until 80% of its units reach their new slots, or 3 s pass.
+* Speed = slowest living unit × formation multiplier × terrain multiplier (16/cost of the cell, so roads are faster and forest slower) × a **lag factor**: 1 while every unit is within 3 units of its slot, falling linearly to 0 at 6.
+* While its path is pending, the anchor holds. **Deviation:** §3.1's straight-line pre-move isn't done; paths arrive within a tick or two at the current budget.
+
+**Chokepoints.**
+* A per-class clearance map (integer chamfer 10/14 distance to the nearest cell the class can't enter, recomputed when the nav graph version changes; derived data, not state) is sampled at the anchor and 2, 4, 6 and 8 units ahead.
+* If the clearance is under the formation's half width + unit radius + 0.5, the slots switch to the layout's Column. If it's under the Column's half width too, they switch to a **single file** (synthesized: front to back, spacing 2 × radius + 0.5).
+* The data's Column is not narrow: infantry is 5.5 wide.
+* The layout widens back after 10 ticks of enough clearance, also when halted. Speed and the combat formation don't change.
+
+**Arrival.**
+* The anchor reaches the goal (the exact point, or the nearest reachable cell's centre), then waits for ≥ 80% of its units to be within 1.5 of their slots, or 10 s.
+* An explicit facing is applied when arrival starts, so the units settle into the rotated slots.
+* The `Arrived` / `Blocked` events report the outcome.
+
+**Groups and divisions** (§5):
+* **Loose group:**
+  * Each regiment paths on its own to goal + its group-formation slot, rotated to the centroid→goal heading.
+  * The group formation comes from the first member's formation (Assault → `group_aggressive`, and so on).
+* **Division:**
+  * The `Group` entity has its own anchor, `Order` and `Path`, and paths with the members' most restrictive class.
+  * Speed = max(slowest member speed, `GroupSpeedMinimum`). It halves when a member is more than `GroupZoneRangeMin` (18) from its slot, and stops beyond 36.
+  * Slots: group-formation offsets sorted front to back (forward descending, then centre first, then left first), strongest regiment (total unit health) first.
+  * Members steer straight at their slot. When the slot is blocked or out of line of sight, they follow the division's trail (its anchor, or the latest path waypoint they can see).
+  * The division finishes when every member is in its slot with its units settled (or after 15 s), and all members get `Arrived` in the same tick.
+  * **Not yet:** coordinated arrival outside supply zones (`GroupSupplyZoneBuffer`), since supply zones arrive in M6.
+
+**Units** (§6):
+* Steering = arrive at the slot (approach speed = distance × 2/s, capped) + separation.
+* Neighbours come from a spatial hash of 4×4-cell buckets, filled by counting sort so each bucket stays in ascending id order. Every unit reacts to positions at the start of the phase (Jacobi update), so the processing order doesn't matter.
+* Separation weights:
+  * same regiment 0.25;
+  * friendly regiments: the lower-priority one yields with weight 1 while the other takes 0.5 (priority: moving > idle, then lower regiment id);
+  * enemies 1.
+* Gain is 10/s per unit of overlap. Units of different regiments also sidestep to their right, so head-on pairs pass instead of stalling.
+* Velocity is capped at speed_max × formation × terrain under the unit, with `acceleration` limiting the change per tick (0 = instant).
+* `turn_type`:
+  * INSTANT snaps.
+  * IN_PLACE turns at speed_max / turn_radius rad/s and pivots in place when more than 30° off.
+  * WHILE_MOVING turns at the same rate but always drives where it points.
+* Units settling inside their slot creep without turning and face the regiment's way.
+* Terrain and buildings are hard: a step into a blocked cell slides along one axis or stops, and a unit inside a stamped cell walks out to the nearest open cell.
+
+**Stuck → repath.**
+* Each 20-tick window compares the anchor's actual progress with its speed allowance (lag excluded). Under 10% → new path from the current position.
+* A building appearing on the next step also re-paths at once.
+* After 3 consecutive failures the order ends as blocked.
+
+**Measured.** `simcli scenario` on gen:7:256, six regiments (PER/USA/GBR-AT infantry, GER medium tank, GBR heavy tank, USA halftrack):
+
+| Regiments | Order | Arrived at tick |
+|---|---|---|
+| Three regiments | Division | 1046, together |
+| USA infantry | Loose group, switched to Column mid-way | 725 |
+| GBR heavy tank | Stopped at tick 200, re-ordered alone with a facing | 800 |
+| GBR AT infantry | Run | 742 |
+
+The film determinism-checks per stage, and a Release recording plays identically in Debug.
+
+**Open:**
+* Lazy refinement of the next 2–3 segments (§3) is still not done; whole paths are refined.
+* ZOC suspension of moves is M5.
+* Aircraft fly straight lines with no missions.
+* Trucks don't tow trailers, and ships use only their own turn radius.
+* Retreat formations aren't used yet.
+* The movement golden hash (`test_movement.cpp`) and fixtures are MSVC-recorded; the Clang CI legs check them on the next push.

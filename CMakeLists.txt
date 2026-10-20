@@ -34,6 +34,13 @@ if(CORPS_BUILD_TESTS)
   # Same with nav traffic (blockers, path requests) on the generated map the replay names.
   add_test(NAME simcli_determinism_check_nav
     COMMAND simcli determinism-check ${CMAKE_SOURCE_DIR}/sim/tests/fixtures/synthetic_nav_300.rpl --per-stage)
+  # Six mixed regiments cross the test map (needs the game install; skipped without it), then the
+  # recorded film must replay identically.
+  add_test(NAME simcli_scenario COMMAND simcli scenario --out ${CMAKE_BINARY_DIR}/scenario.rpl)
+  set_tests_properties(simcli_scenario PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP scenario_rpl)
+  add_test(NAME simcli_scenario_determinism
+    COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/scenario.rpl --per-stage)
+  set_tests_properties(simcli_scenario_determinism PROPERTIES FIXTURES_REQUIRED scenario_rpl)
   # HPA* quality bounds on a generated map (exits non-zero past mean 1.05x / worst 1.25x of optimal).
   add_test(NAME simcli_nav_bench
     COMMAND simcli nav-bench --gen 4 --size 192 --queries 150 --optimal)

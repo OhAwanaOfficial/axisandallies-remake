@@ -134,6 +134,8 @@ final    = mitig × attackerCombatEfficiency × attackerXPMult × terrainDefense
 | **Normal/Aggressive** [W] | −25% | +0% | Aggressive |
 | **Column** [E] | −50% | +25% | Passive (ignores enemies) |
 
+In the data these are `regiment_aggressive` (Assault), `regiment_defensive` (Normal/Aggressive) and `regiment_column` (Column) in `Organizations/Formations/regiment_formations.tgi`. The speed and efficiency numbers above come from their modifiers.
+
 * **Efficiency blends gradually** to the new formation's level after a change (rate **[CALIBRATE]**).
 * **Run** [R] / Alt+right-click: temporary Column, then back to the previous formation on arrival.
 * Aggressive regiments **auto-engage** anything in their zone of control (ZOC). A tank regiment in Assault formation crossing an enemy base will stop and destroy every building on the way. That's intended.
@@ -172,7 +174,7 @@ A regiment that stays still long enough becomes entrenched (sandbags on the bann
 Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from RMC). Each terrain gives per-movement-class **speed** and per-unit-type **defense** modifiers (e.g. jungle: big infantry defense bonus, big vehicle penalty, slow) **[MANUAL]**. Mountains and ocean block ground units.
 
 ### 6.11 Groups & divisions **[MANUAL p.38; DATA `group_formations.tgi`]**
-* Up to **6 regiments** per group. Ctrl+number saves it to the unit bar.
+* Up to **6 regiments** per group. Ctrl+number saves it to the unit bar. (Movement commands carry at most 6 regiments; how the sim forms and dissolves groups is in PATHFINDING §10.)
 * **Group** = independent regiments sharing an order.
 * **Division** (Group Behaviour [V]) = acts as one big regiment. Regiments take positions from `group_aggressive / group_defensive / group_column` offsets (stronger in front, weaker behind), move at the slowest member's speed, and arrive together.
 

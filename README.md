@@ -54,6 +54,14 @@ build\windows\simcli\Release\simcli.exe determinism-check nav.rpl --per-stage
 ```
 `nav-bench` runs random start/goal pairs per movement class through the budgeted PathService and reports expansions (avg, p50, p99), time, fallbacks and a hash of every path; `--optimal` also compares each path's cost with a full-grid A* (fails past 1.05x mean / 1.25x worst). `--map` takes `tools/rmp.py` output; `--gen SEED --size N` makes a deterministic test map. Replays recorded on a map regenerate it (`gen:` maps) or need the same `--map` file.
 
+## Regiment movement scenario (M4)
+```bash
+build\windows\simcli\Release\simcli.exe scenario --out scenario.rpl
+build\windows\simcli\Debug\simcli.exe determinism-check scenario.rpl --per-stage
+build\windows\simcli\Release\simcli.exe show-def regiment_infantry
+```
+`scenario` spawns six mixed regiments (infantry, tanks, a halftrack) from the game data on the generated test map and moves them east: a division, a loose group, a Run, a formation change, a Stop and re-order, and a building dropped on the route. It prints when each regiment arrived and the state hash, and records the film. `show-def` also prints layouts, formations and group formations.
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv
