@@ -14,7 +14,10 @@ extends Node3D
 ## Command line (after `--`): --map=PATH.json | --gen=SEED:SIZE, --seed=N, --cache=DIR,
 ##   --screenshot=PATH (renders after --frames=N frames and quits), --demo (orders a move at start),
 ##   --zoom=DIST, --select-all, --cost / --paths / --slots (overlays on at start),
-##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits).
+##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits),
+##   --regiments=N (N mixed regiments, half per side, crossing the map in groups of six),
+##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits),
+##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone).
 
 const TICK := 0.1
 const PLAYER := 0
@@ -85,7 +88,10 @@ func _ready() -> void:
 	print("map %s (%dx%d cells, biome %s) loaded in %d ms" % [map.name, map.width, map.height, map.biome, Time.get_ticks_msec() - t0])
 
 	_build_scene(map)
-	_spawn_demo(args.has("demo"))
+	if args.has("regiments"):
+		_spawn_many(int(args.regiments))
+	else:
+		_spawn_demo(args.has("demo"))
 	snap = bridge.snapshot()
 	loading_layer.queue_free()
 	if args.has("selftest"):
@@ -208,16 +214,110 @@ func _spawn_demo(order_move: bool) -> void:
 		bridge.queue_move(mine, (west + east) * 0.5, false, false, 0.0, PLAYER)
 
 
+const MANY_TYPES := ["regiment_ger_infantry", "regiment_ger_tank_medium", "regiment_usa_infantry",
+	"regiment_usa_halftrack", "regiment_gbr_tank_heavy", "regiment_gbr_infantry_at", "regiment_per_infantry",
+	"regiment_usa_tank_light"]
+
+
+## Performance setup (M4 close-out): like `simcli perf`, open spots on a 22-cell lattice, the
+## west third for player 0 and the east third for player 1, then groups of six cross over.
+func _spawn_many(n: int) -> void:
+	var w := terrain.cells.x
+	var h := terrain.cells.y
+	var foot: PackedByteArray = bridge.cost_grid(0)
+	var wheels: PackedByteArray = bridge.cost_grid(1)
+	var open := func(x: int, y: int) -> bool:
+		for dy in range(-7, 8, 7):
+			for dx in range(-7, 8, 7):
+				var i := (y + dy) * w + x + dx
+				if foot[i] == 0 or wheels[i] == 0:
+					return false
+		return true
+	var west: Array[Vector2] = []
+	var east: Array[Vector2] = []
+	for y in range(22, h - 22, 22):
+		for x in range(22, w - 22, 22):
+			if open.call(x, y):
+				if x < w / 3:
+					west.append(Vector2(x + 0.5, y + 0.5))
+				elif x > w * 2 / 3:
+					east.append(Vector2(x + 0.5, y + 0.5))
+	var half := n / 2
+	for i in n:
+		var side := west if i < half else east
+		var k := i if i < half else i - half
+		var count := half if i < half else n - half
+		if side.is_empty():
+			continue
+		var at: Vector2 = side[k * side.size() / count]
+		bridge.queue_spawn(MANY_TYPES[i % MANY_TYPES.size()], at, 0.0 if i < half else PI, 0 if i < half else 1)
+	bridge.step()
+	_learn_regiments()
+	for p in [0, 1]:
+		var mine := PackedInt64Array()
+		var keys := regiment_defs.keys()
+		keys.sort()
+		for bits in keys:
+			if _player_of(bits) == p:
+				mine.append(bits)
+		for s0 in range(0, mine.size(), 6):
+			var grp := mine.slice(s0, s0 + 6)
+			var a: Vector2 = bridge.regiment_info(grp[0]).anchor
+			bridge.queue_move(grp, Vector2(w - a.x, a.y), false, false, 0.0, p)
+	cam.setup(terrain, Vector2(w * 0.5, h * 0.5))
+	cam.distance = 160.0
+	print("spawned %d regiments" % regiment_defs.size())
+	if _args().has("pause-sim"):
+		# Render-only measurement: let the orders start, then freeze the sim (the views keep
+		# interpolating and syncing every frame).
+		for i in 20:
+			bridge.step()
+		snap = bridge.snapshot()
+		paused = true
+
+
+var _measure := {"frames": 0, "frame_ms": [], "step_ms": [], "steps": 0}
+
+
+func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
+	var want := int(_args().measure)
+	_measure.frames += 1
+	if _measure.frames <= 60:  # warm-up: shaders, first paths
+		return
+	(_measure.frame_ms as Array).append(delta * 1000.0)
+	if steps > 0:
+		(_measure.step_ms as Array).append(step_ms / steps)
+	if (_measure.frame_ms as Array).size() >= want:
+		var f: Array = _measure.frame_ms
+		var st: Array = _measure.step_ms
+		f.sort()
+		var total := 0.0
+		for x in f:
+			total += x
+		var stotal := 0.0
+		for x in st:
+			stotal += x
+		st.sort()
+		print("MEASURE %d regiments, %d units, %d frames: avg %.1f fps (frame %.1f ms, p95 %.1f ms); sim step avg %.2f ms, max %.2f ms; renderer %s" % [
+			regiment_defs.size(), units.stats.units, f.size(), 1000.0 / (total / f.size()), total / f.size(),
+			f[int(f.size() * 0.95)], stotal / maxi(st.size(), 1), st.back() if not st.is_empty() else 0.0,
+			RenderingServer.get_video_adapter_name()])
+		get_tree().quit()
+
+
 # ---------------------------------------------------------------- loop
 
 func _process(delta: float) -> void:
 	if snap.is_empty():
 		return
+	var steps := 0
+	var step_us := 0
 	if not paused:
 		accum += delta * speed
-		var steps := 0
 		while accum >= TICK and steps < 8:
+			var t0 := Time.get_ticks_usec()
 			bridge.step()
+			step_us += Time.get_ticks_usec() - t0
 			accum -= TICK
 			steps += 1
 		if steps > 0:
@@ -233,6 +333,8 @@ func _process(delta: float) -> void:
 	_update_hud()
 	_frames += 1
 	var args := _args()
+	if args.has("measure"):
+		_measure_frame(delta, step_us / 1000.0, steps)
 	if args.has("screenshot") and not args.has("selftest") and _frames == int(args.get("frames", "120")):
 		_save_screenshot(str(args.screenshot))
 

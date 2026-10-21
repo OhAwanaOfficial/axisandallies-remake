@@ -29,6 +29,7 @@ int cmdSpawnTest(const SimArgs& a);
 int cmdShowDef(const SimArgs& a);
 int cmdNavBench(const SimArgs& a);
 int cmdScenario(const SimArgs& a);
+int cmdPerf(const SimArgs& a);
 
 // --map F.json (tools/rmp.py output) or --gen SEED [--size N]; out stays empty if neither is given.
 // false (after printing why) if the map can't be loaded.

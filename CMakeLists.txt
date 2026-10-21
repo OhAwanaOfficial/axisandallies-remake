@@ -41,6 +41,9 @@ if(CORPS_BUILD_TESTS)
   add_test(NAME simcli_scenario_determinism
     COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/scenario.rpl --per-stage)
   set_tests_properties(simcli_scenario_determinism PROPERTIES FIXTURES_REQUIRED scenario_rpl)
+  # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
+  add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
+  set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)
   # HPA* quality bounds on a generated map (exits non-zero past mean 1.05x / worst 1.25x of optimal).
   add_test(NAME simcli_nav_bench
     COMMAND simcli nav-bench --gen 4 --size 192 --queries 150 --optimal)
@@ -68,5 +71,15 @@ if(CORPS_BUILD_GDEXT)
     GIT_SHALLOW TRUE
     PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/patch_godot_cpp.cmake)
   FetchContent_MakeAvailable(godot-cpp)
+  # godot-cpp 4.3 picks its CRT from CMAKE_BUILD_TYPE, which multi-config generators (Visual Studio)
+  # leave empty, so it hardcodes /MDd in every config and the Release GDExtension fails to link
+  # (_CrtDbgReport). Drop that flag; CMAKE_MSVC_RUNTIME_LIBRARY above picks the CRT per config.
+  if(MSVC)
+    get_target_property(_godot_cpp_flags godot-cpp COMPILE_FLAGS)
+    if(_godot_cpp_flags)
+      string(REPLACE "/MDd" "" _godot_cpp_flags "${_godot_cpp_flags}")
+      set_target_properties(godot-cpp PROPERTIES COMPILE_FLAGS "${_godot_cpp_flags}")
+    endif()
+  endif()
   add_subdirectory(gdext)
 endif()
