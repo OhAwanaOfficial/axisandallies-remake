@@ -50,15 +50,19 @@ constexpr Fixed kGroupZoneRangeMin = 18_fx;
 
 }  // namespace move
 
-// Derived per-map data the Movement stage needs; rebuilt whenever the nav graph version changes.
-// Not sim state: it is a pure function of the grid (which the state hash already pins).
+// Derived per-map data the Movement stage needs. Not sim state: a pure function of the map and the
+// live footprints (which the state hash pins), so it comes out identical after a load.
 struct MovementCache {
     bool valid = false;
-    std::uint32_t navVersion = 0;
     // Chamfer distance (10 per straight, 14 per diagonal step) from each cell to the nearest cell
-    // the class can't enter (or the map edge), per nav class. clearance/10 = world units.
+    // the class can't enter (or the map edge), capped at 16 units, per nav class. /10 = units.
     std::array<std::vector<std::uint16_t>, nav::kMoveClassCount> clearance;
+    std::vector<std::array<std::int32_t, 4>> footprints;  // footprint rects it reflects (sorted)
 };
+
+// Brings the clearance up to date with the current footprints: a full computation the first time
+// (map load), then only the cells within the cap of footprints placed or removed since.
+void refreshClearance(Sim& sim);
 
 // --- helpers shared by orders.cpp and movement.cpp ----------------------------------------------
 

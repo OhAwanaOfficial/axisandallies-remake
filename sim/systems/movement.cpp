@@ -1,6 +1,7 @@
 #include "systems/movement.hpp"
 
 #include <algorithm>
+#include <iterator>
 
 #include "nav/nav_world.hpp"
 #include "systems/stages.hpp"
@@ -12,7 +13,6 @@ using namespace move;
 namespace {
 
 constexpr Fixed kUnitsPerRadian = 10430.378_fx;  // 65536 / 2π
-constexpr std::uint16_t kFar = 0xFFFF;
 constexpr Fixed kStill = 0.05_fx;
 
 // ------------------------------------------------------------------------------ small helpers
@@ -96,40 +96,86 @@ bool nearestPassable(const nav::NavGrid& g, std::uint8_t cls, FVec2 p, std::int3
     return true;
 }
 
-void computeClearance(const nav::NavGrid& g, MovementCache& cache) {
-    const std::int32_t w = g.width(), h = g.height();
+// Clearance is capped: compression only compares it with formation half widths (under 10 units),
+// so 16 units is plenty, and a footprint change then only touches cells within 16 of it.
+constexpr std::int32_t kClearanceCapCells = 16;
+constexpr std::uint16_t kClearanceCap = kClearanceCapCells * 10;
+
+nav::CellRect grow(const nav::NavGrid& g, const nav::CellRect& r, std::int32_t by) {
+    return {std::max(r.x0 - by, 0), std::max(r.y0 - by, 0), std::min(r.x1 + by, g.width() - 1), std::min(r.y1 + by, g.height() - 1)};
+}
+
+// Capped chamfer distance (10 straight, 14 diagonal) to the nearest cell class `c` can't enter
+// (the map edge counts), computed in window `w` and written for the cells of `u`. Exact when `w`
+// is `u` grown by the cap: every blocked cell within the cap of a cell of `u` lies in `w`, and the
+// chamfer path between two cells stays in their bounding box. Cells outside `w` count as far.
+void clearanceWindow(const nav::NavGrid& g, nav::MoveClass c, const nav::CellRect& w, const nav::CellRect& u, std::vector<std::uint16_t>& d,
+                     std::vector<std::uint16_t>& buf) {
+    const std::int32_t ww = w.x1 - w.x0 + 1, wh = w.y1 - w.y0 + 1;
+    buf.assign(static_cast<std::size_t>(ww) * static_cast<std::size_t>(wh), kClearanceCap);
+    const auto local = [&](std::int32_t x, std::int32_t y) {
+        return static_cast<std::size_t>(y - w.y0) * static_cast<std::size_t>(ww) + static_cast<std::size_t>(x - w.x0);
+    };
+    const auto at = [&](std::int32_t x, std::int32_t y) -> std::uint32_t {
+        if (!g.inside(x, y)) return 0;
+        if (x < w.x0 || x > w.x1 || y < w.y0 || y > w.y1) return kClearanceCap;
+        return buf[local(x, y)];
+    };
+    const auto relax = [&](std::size_t i, std::uint32_t v) {
+        if (v < buf[i]) buf[i] = static_cast<std::uint16_t>(v);
+    };
+    for (std::int32_t y = w.y0; y <= w.y1; ++y) {
+        for (std::int32_t x = w.x0; x <= w.x1; ++x) {
+            const std::size_t i = local(x, y);
+            if (g.cost(c, g.index(x, y)) == 0) {
+                buf[i] = 0;
+                continue;
+            }
+            relax(i, at(x - 1, y) + 10);
+            relax(i, at(x - 1, y - 1) + 14);
+            relax(i, at(x, y - 1) + 10);
+            relax(i, at(x + 1, y - 1) + 14);
+        }
+    }
+    for (std::int32_t y = w.y1; y >= w.y0; --y) {
+        for (std::int32_t x = w.x1; x >= w.x0; --x) {
+            const std::size_t i = local(x, y);
+            if (buf[i] == 0) continue;
+            relax(i, at(x + 1, y) + 10);
+            relax(i, at(x + 1, y + 1) + 14);
+            relax(i, at(x, y + 1) + 10);
+            relax(i, at(x - 1, y + 1) + 14);
+        }
+    }
+    for (std::int32_t y = u.y0; y <= u.y1; ++y) {
+        for (std::int32_t x = u.x0; x <= u.x1; ++x) d[g.index(x, y)] = buf[local(x, y)];
+    }
+}
+
+// Recomputes the cells of `u` for every class. Classes that block the same cells in the window
+// (feet, wheels and tracks usually do) share one computation.
+void updateClearance(const nav::NavGrid& g, MovementCache& cache, const nav::CellRect& u) {
+    const nav::CellRect w = grow(g, u, kClearanceCapCells);
+    std::vector<std::uint16_t> buf;
     for (std::size_t ci = 0; ci < nav::kMoveClassCount; ++ci) {
         const auto c = static_cast<nav::MoveClass>(ci);
-        std::vector<std::uint16_t>& d = cache.clearance[ci];
-        d.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), kFar);
-        const auto at = [&](std::int32_t x, std::int32_t y) -> std::uint32_t {
-            return g.inside(x, y) ? d[g.index(x, y)] : 0u;  // outside the map counts as blocked
-        };
-        const auto relax = [&](std::uint32_t cell, std::uint32_t v) {
-            if (v < d[cell]) d[cell] = static_cast<std::uint16_t>(std::min<std::uint32_t>(v, kFar));
-        };
-        for (std::int32_t y = 0; y < h; ++y) {
-            for (std::int32_t x = 0; x < w; ++x) {
-                const std::uint32_t cell = g.index(x, y);
-                if (g.cost(c, cell) == 0) {
-                    d[cell] = 0;
-                    continue;
+        std::size_t same = ci;
+        for (std::size_t cj = 0; cj < ci && same == ci; ++cj) {
+            bool equal = true;
+            for (std::int32_t y = w.y0; y <= w.y1 && equal; ++y) {
+                for (std::int32_t x = w.x0; x <= w.x1 && equal; ++x) {
+                    const std::uint32_t cell = g.index(x, y);
+                    equal = (g.cost(c, cell) == 0) == (g.cost(static_cast<nav::MoveClass>(cj), cell) == 0);
                 }
-                relax(cell, at(x - 1, y) + 10);
-                relax(cell, at(x - 1, y - 1) + 14);
-                relax(cell, at(x, y - 1) + 10);
-                relax(cell, at(x + 1, y - 1) + 14);
             }
+            if (equal) same = cj;
         }
-        for (std::int32_t y = h - 1; y >= 0; --y) {
-            for (std::int32_t x = w - 1; x >= 0; --x) {
-                const std::uint32_t cell = g.index(x, y);
-                if (d[cell] == 0) continue;
-                relax(cell, at(x + 1, y) + 10);
-                relax(cell, at(x + 1, y + 1) + 14);
-                relax(cell, at(x, y + 1) + 10);
-                relax(cell, at(x - 1, y + 1) + 14);
+        if (same != ci) {
+            for (std::int32_t y = u.y0; y <= u.y1; ++y) {
+                for (std::int32_t x = u.x0; x <= u.x1; ++x) cache.clearance[ci][g.index(x, y)] = cache.clearance[same][g.index(x, y)];
             }
+        } else {
+            clearanceWindow(g, c, w, u, cache.clearance[ci], buf);
         }
     }
 }
@@ -715,18 +761,36 @@ Fixed regimentStrength(const Sim& sim, EntityId regiment) {
     return sum;
 }
 
+void refreshClearance(Sim& sim) {
+    if (sim.nav() == nullptr) return;
+    const nav::NavGrid& g = sim.nav()->grid;
+    MovementCache& cache = sim.moveCache();
+    std::vector<std::array<std::int32_t, 4>> now;
+    for (const Footprint& f : sim.world().footprints.data()) now.push_back({f.x0, f.y0, f.x1, f.y1});
+    std::sort(now.begin(), now.end());
+    if (!cache.valid) {
+        for (auto& c : cache.clearance) c.assign(static_cast<std::size_t>(g.width()) * static_cast<std::size_t>(g.height()), 0);
+        updateClearance(g, cache, {0, 0, g.width() - 1, g.height() - 1});
+        cache.valid = true;
+        cache.footprints = std::move(now);
+        return;
+    }
+    if (now == cache.footprints) return;
+    // Footprints placed or removed since the last refresh: recompute the cells within the cap.
+    std::vector<std::array<std::int32_t, 4>> changed;
+    std::set_symmetric_difference(now.begin(), now.end(), cache.footprints.begin(), cache.footprints.end(), std::back_inserter(changed));
+    for (const auto& f : changed) updateClearance(g, cache, grow(g, {f[0], f[1], f[2], f[3]}, kClearanceCapCells));
+    cache.footprints = std::move(now);
+}
+
 // ------------------------------------------------------------------------------ the stage
 
 void runMovement(Sim& sim) {
     nav::NavWorld* nav = sim.nav();
     if (nav == nullptr || sim.config().defs == nullptr) return;
     const nav::NavGrid& g = nav->grid;
+    refreshClearance(sim);
     MovementCache& cache = sim.moveCache();
-    if (!cache.valid || cache.navVersion != nav->hpa.version()) {
-        computeClearance(g, cache);
-        cache.valid = true;
-        cache.navVersion = nav->hpa.version();
-    }
     World& w = sim.world();
     Ctx ctx{sim, w, *sim.config().defs, g, cache, {}, {}};
     for (std::size_t i = 0; i < w.members.size(); ++i) {
@@ -784,7 +848,8 @@ void runMovement(Sim& sim) {
         }
         if (!any) continue;
         const Fixed nominal = max(slowest, groupSpeedMin);
-        const Fixed factor = drift <= zone ? Fixed::fromInt(1) : (drift <= zone * 2 ? 0.5_fx : Fixed{});
+        // Slow down (never stop: a stopped anchor reads as stuck) while a member is outside the zone.
+        const Fixed factor = drift <= zone ? Fixed::fromInt(1) : 0.5_fx;
         if (go->state == Order::State::Wheeling) {
             if (drift <= kSlotLength || go->stateTicks >= kWheelTimeoutTicks) {
                 go->state = Order::State::Moving;

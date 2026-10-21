@@ -249,7 +249,10 @@ Ordering several regiments together makes them one `Group`, reused when the same
 * While its path is pending, the anchor holds. **Deviation:** §3.1's straight-line pre-move isn't done; paths arrive within a tick or two at the current budget.
 
 **Chokepoints.**
-* A per-class clearance map (integer chamfer 10/14 distance to the nearest cell the class can't enter, recomputed when the nav graph version changes; derived data, not state) is sampled at the anchor and 2, 4, 6 and 8 units ahead.
+* A per-class clearance map is sampled at the anchor and 2, 4, 6 and 8 units ahead.
+  * It is the integer chamfer 10/14 distance to the nearest cell the class can't enter, **capped at 16 units**: compression only compares it with formation half widths under 10, so the cap changes no decision.
+  * It is derived data, not state, and is built once at map load. Classes that block the same cells (feet, wheels, tracks) share one computation.
+  * It is then patched incrementally: when footprints are placed or removed, only cells within the cap are recomputed, from a window grown by the cap, which gives exactly the full result.
 * If the clearance is under the formation's half width + unit radius + 0.5, the slots switch to the layout's Column. If it's under the Column's half width too, they switch to a **single file** (synthesized: front to back, spacing 2 × radius + 0.5).
 * The data's Column is not narrow: infantry is 5.5 wide.
 * The layout widens back after 10 ticks of enough clearance, also when halted. Speed and the combat formation don't change.
@@ -265,7 +268,7 @@ Ordering several regiments together makes them one `Group`, reused when the same
   * The group formation comes from the first member's formation (Assault → `group_aggressive`, and so on).
 * **Division:**
   * The `Group` entity has its own anchor, `Order` and `Path`, and paths with the members' most restrictive class.
-  * Speed = max(slowest member speed, `GroupSpeedMinimum`). It halves when a member is more than `GroupZoneRangeMin` (18) from its slot, and stops beyond 36.
+  * Speed = max(slowest member speed, `GroupSpeedMinimum`). It halves while any member is more than `GroupZoneRangeMin` (18) from its slot. It never stops for stragglers, which would read as stuck.
   * Slots: group-formation offsets sorted front to back (forward descending, then centre first, then left first), strongest regiment (total unit health) first.
   * Members steer straight at their slot. When the slot is blocked or out of line of sight, they follow the division's trail (its anchor, or the latest path waypoint they can see).
   * The division finishes when every member is in its slot with its units settled (or after 15 s), and all members get `Arrived` in the same tick.
@@ -303,7 +306,22 @@ Ordering several regiments together makes them one `Group`, reused when the same
 
 The film determinism-checks per stage, and a Release recording plays identically in Debug.
 
+**Performance (M4 close-out).** `simcli perf` on gen:7:1024 (the generator's largest map): 160 regiments of eight types (1,060 units), half per side, cross the map in groups of six, every third group a division. A 6×6 building drops every 100 ticks. 3,000 ticks, Release, MSVC, dev laptop (i5-2520M, 2011):
+
+| | avg | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| Sim tick | 3.6 ms | 2.8 ms | 4.5 ms | **10.7 ms** | 117 ms |
+| Ticks with a new building (29) | 57 ms | | | | 117 ms |
+| Movement stage | 3.0 ms | | | | 5.9 ms |
+
+* The 15 ms target (ARCHITECTURE §7) is at the 99th percentile, and it is met.
+* **Fixed** (the worst hotspot): the clearance map was recomputed for the whole map on every stamp or unstamp. That cost 95–130 ms in Movement, plus the first tick. It is now capped and incremental (see Chokepoints) and built at map load.
+* **Fixed** (found by the benchmark): divisions whose members started far apart stopped to wait for them and then counted as stuck. They now slow down instead.
+* **Remaining hotspot:** a stamp makes `rebuildDirty` relabel the touched classes over the whole map. That costs about 20 ms at 512² and 55–115 ms at 1024², so building ticks still exceed 15 ms on big maps. The fix is labels at cluster level: per-cluster components joined through the entrances, so only dirty clusters are relabelled.
+* The film (`simcli perf --out`) determinism-checks per stage over 3,000 ticks and plays identically in Debug.
+
 **Open:**
+* Building ticks on large maps (above).
 * Lazy refinement of the next 2–3 segments (§3) is still not done; whole paths are refined.
 * ZOC suspension of moves is M5.
 * Aircraft fly straight lines with no missions.

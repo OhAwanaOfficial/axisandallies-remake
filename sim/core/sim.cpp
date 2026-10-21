@@ -37,6 +37,7 @@ Sim::Sim(const SimConfig& config)
     : config_(config), rng_(Rng::derive(config.matchSeed, static_cast<std::uint64_t>(RngStream::Match))) {
     if (config_.map != nullptr) nav_ = std::make_unique<nav::NavWorld>(*config_.map);
     moveCache_ = std::make_unique<MovementCache>();
+    refreshClearance(*this);  // part of map load, not of the first tick
 }
 
 Sim::~Sim() = default;
