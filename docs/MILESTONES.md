@@ -52,7 +52,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 * **Numbers:** 160 regiments on a 1024² map at 10.7 ms p99 per tick.
 
 Carried over from M4:
-* building ticks on big maps (label rebuild, PATHFINDING §10);
+* building ticks on big maps: **done** (cluster-level labels, 6–8 ms avg at 1024², PATHFINDING §10);
 * the Release GDExtension crashing in the editor (ARCHITECTURE §4.4);
 * lazy path refinement;
 * real-map roads (objects, M10);

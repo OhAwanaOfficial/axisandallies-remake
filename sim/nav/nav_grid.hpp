@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "nav/map_def.hpp"
@@ -58,11 +59,20 @@ public:
     void clearDirty() { dirty.clear(); }
     void markDirty(std::uint32_t cluster);
 
-    // Component labels (0 = blocked cell), numbered in order of each component's lowest cell index.
-    // Recomputed on demand for the classes whose costs changed since the last call (a stamp on
-    // cells a class can't enter anyway leaves its labels alone).
+    // Component labels (0 = blocked cell). Kept per cluster: each cluster has local 4-connected
+    // components, and a union-find over the links where they touch across cluster borders joins
+    // them into the map's components. A label depends only on the current costs (components are
+    // numbered in order of their first local component by cluster, then local index), so an
+    // incremental update gives the same labels as a full one.
+    // recomputeLabels() relabels the dirty clusters of the classes whose costs changed since the
+    // last call (a stamp on cells a class can't enter anyway leaves its labels alone), then
+    // re-joins; recomputeAllLabels() relabels every cluster of every class.
     void recomputeLabels();
-    std::uint32_t label(MoveClass c, std::uint32_t cell) const { return labels[static_cast<std::size_t>(c)][cell]; }
+    void recomputeAllLabels();
+    std::uint32_t label(MoveClass c, std::uint32_t cell) const {
+        const auto ci = static_cast<std::size_t>(c);
+        return keyLabel[ci][cellKey[ci][cell]];
+    }
     // Bounding box of a component (label != 0).
     const CellRect& labelBox(MoveClass c, std::uint32_t lab) const { return labelBoxes[static_cast<std::size_t>(c)][lab]; }
 
@@ -82,17 +92,29 @@ public:
 private:
     void touch(const CellRect& r);
     void refreshEff(std::uint32_t cell);
+    void labelCluster(std::size_t ci, std::uint32_t cluster);
+    void linkBorders(std::size_t ci, std::uint32_t cluster);
+    void joinLabels(std::size_t ci);
+
+    // Local component slots per cluster: no two components touch, so a 16x16 cluster has at most
+    // 128 of them (a checkerboard). Slot 0 is "blocked".
+    static constexpr std::uint32_t kLocalSlots = 129;
 
     std::int32_t w = 0, h = 0, cw = 0, ch = 0;
     std::array<std::vector<std::uint8_t>, kMoveClassCount> base;  // static terrain cost
     std::array<std::vector<std::uint8_t>, kMoveClassCount> eff;   // base, or 0 under a stamp
     std::array<std::int32_t, kMoveClassCount> minCost_{};
     std::vector<std::uint16_t> stamps;
-    std::array<std::vector<std::uint32_t>, kMoveClassCount> labels;
-    std::array<std::vector<CellRect>, kMoveClassCount> labelBoxes;
+    // Labels. A key is cluster * kLocalSlots + local component (0 = blocked).
+    std::array<std::vector<std::uint32_t>, kMoveClassCount> cellKey;   // per cell
+    std::array<std::vector<std::uint32_t>, kMoveClassCount> keyLabel;  // per key
+    std::array<std::vector<std::vector<CellRect>>, kMoveClassCount> localBoxes;  // per cluster, per local component - 1
+    // Per cluster: (key, key) pairs of local components touching across its E and S borders.
+    std::array<std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>>, kMoveClassCount> borderLinks;
+    std::array<std::vector<CellRect>, kMoveClassCount> labelBoxes;  // per label
     std::vector<std::uint32_t> dirty;
     std::array<bool, kMoveClassCount> labelsStale{};
-    std::vector<std::uint32_t> unionParent;  // recomputeLabels scratch
+    std::vector<std::uint32_t> keyParent;  // joinLabels scratch
 };
 
 // Octile distance in step units (straight 10, diagonal 14).

@@ -20,10 +20,12 @@ NavGrid::NavGrid(const MapDef& map)
         }
         minCost_[c] = lo == 255 ? kCostUnit : lo;
         eff[c] = base[c];
-        labels[c].assign(n, 0);
+        cellKey[c].assign(n, 0);
+        keyLabel[c].assign(static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch) * kLocalSlots, 0);
+        localBoxes[c].resize(static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch));
+        borderLinks[c].resize(static_cast<std::size_t>(cw) * static_cast<std::size_t>(ch));
     }
-    labelsStale.fill(true);
-    recomputeLabels();
+    recomputeAllLabels();
 }
 
 void NavGrid::refreshEff(std::uint32_t cell) {
@@ -106,14 +108,138 @@ void NavGrid::unstamp(const CellRect& in) {
 }
 
 void NavGrid::recomputeLabels() {
+    for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
+        if (!labelsStale[ci]) continue;
+        labelsStale[ci] = false;
+        // Only dirty clusters' cells changed. Their links are on their own E / S borders and on
+        // the W neighbour's E and the N neighbour's S border.
+        for (const std::uint32_t k : dirty) labelCluster(ci, k);
+        for (const std::uint32_t k : dirty) {
+            linkBorders(ci, k);
+            if (static_cast<std::int32_t>(k) % cw > 0) linkBorders(ci, k - 1);
+            if (static_cast<std::int32_t>(k) >= cw) linkBorders(ci, k - static_cast<std::uint32_t>(cw));
+        }
+        joinLabels(ci);
+    }
+}
+
+void NavGrid::recomputeAllLabels() {
+    const auto clusters = static_cast<std::uint32_t>(cw * ch);
+    for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
+        labelsStale[ci] = false;
+        for (std::uint32_t k = 0; k < clusters; ++k) labelCluster(ci, k);
+        for (std::uint32_t k = 0; k < clusters; ++k) linkBorders(ci, k);
+        joinLabels(ci);
+    }
+}
+
+void NavGrid::labelCluster(std::size_t ci, std::uint32_t k) {
     // Components are 4-connected: a diagonal step needs both orthogonal cells open, so it never
-    // connects anything the two orthogonal steps don't. One raster pass links every open cell to
-    // its open W / N neighbour (union-find whose root is always the set's lowest cell), a second
-    // ascending pass numbers the roots in order and fills the bounding boxes. Labels come out
-    // numbered by each component's lowest cell, as an ascending flood-fill scan would number them.
-    const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-    std::vector<std::uint32_t>& up = unionParent;
-    up.resize(n);
+    // connects anything the two orthogonal steps don't. One raster pass over the cluster links
+    // every open cell to its open W / N neighbour (union-find whose root is always the set's
+    // lowest cell), a second pass numbers the roots in order and fills the local boxes.
+    const CellRect r = clusterRect(k);
+    const std::int32_t rw = r.x1 - r.x0 + 1, rh = r.y1 - r.y0 + 1;
+    std::uint16_t up[kClusterSize * kClusterSize];
+    std::uint8_t local[kClusterSize * kClusterSize];
+    const auto find = [&](std::uint16_t a) {
+        while (up[a] != a) {
+            up[a] = up[up[a]];  // path halving
+            a = up[a];
+        }
+        return a;
+    };
+    const std::uint8_t* cost = eff[ci].data();
+    const auto uw = static_cast<std::uint32_t>(w);
+    for (std::int32_t y = 0; y < rh; ++y) {
+        const std::uint32_t row = index(r.x0, r.y0 + y);
+        for (std::int32_t x = 0; x < rw; ++x) {
+            const std::uint32_t cell = row + static_cast<std::uint32_t>(x);
+            const auto i = static_cast<std::uint16_t>(y * rw + x);
+            const bool west = x > 0 && cost[cell] != 0 && cost[cell - 1] != 0;
+            const bool north = y > 0 && cost[cell] != 0 && cost[cell - uw] != 0;
+            if (west && north) {
+                // Already one set when the NW cell is open (W-NW and NW-N are links).
+                if (cost[cell - uw - 1] != 0) {
+                    up[i] = up[i - 1];
+                } else {
+                    const std::uint16_t a = find(static_cast<std::uint16_t>(i - 1));
+                    const std::uint16_t b = find(static_cast<std::uint16_t>(i - rw));
+                    const std::uint16_t lo = std::min(a, b);
+                    up[a] = lo;
+                    up[b] = lo;
+                    up[i] = lo;
+                }
+            } else if (west) {
+                up[i] = up[i - 1];
+            } else if (north) {
+                up[i] = up[i - rw];
+            } else {
+                up[i] = i;
+            }
+        }
+    }
+    // up[i] < i for every non-root, so in ascending order up[up[i]] is already a root.
+    std::vector<CellRect>& boxes = localBoxes[ci][k];
+    boxes.clear();
+    std::uint32_t* key = cellKey[ci].data();
+    const std::uint32_t keyBase = k * kLocalSlots;
+    for (std::int32_t y = 0; y < rh; ++y) {
+        const std::uint32_t row = index(r.x0, r.y0 + y);
+        for (std::int32_t x = 0; x < rw; ++x) {
+            const std::uint32_t cell = row + static_cast<std::uint32_t>(x);
+            const auto i = static_cast<std::uint16_t>(y * rw + x);
+            if (cost[cell] == 0) {
+                key[cell] = keyBase;
+                continue;
+            }
+            if (up[i] == i) {
+                boxes.push_back(CellRect{r.x0 + x, r.y0 + y, r.x0 + x, r.y0 + y});
+                local[i] = static_cast<std::uint8_t>(boxes.size());
+                key[cell] = keyBase + local[i];
+                continue;
+            }
+            up[i] = up[up[i]];
+            const std::uint8_t l = local[up[i]];
+            local[i] = l;
+            key[cell] = keyBase + l;
+            CellRect& box = boxes[l - 1u];
+            box.x0 = std::min(box.x0, r.x0 + x);
+            box.x1 = std::max(box.x1, r.x0 + x);
+            box.y1 = r.y0 + y;  // rows ascend; y0 is the root's row
+        }
+    }
+}
+
+void NavGrid::linkBorders(std::size_t ci, std::uint32_t k) {
+    // Open cells facing each other across the E and S borders join their local components. A
+    // run of open pairs usually lies in one component per side, so repeats of the last pair are
+    // skipped.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>>& links = borderLinks[ci][k];
+    links.clear();
+    const std::uint8_t* cost = eff[ci].data();
+    const std::uint32_t* key = cellKey[ci].data();
+    const CellRect r = clusterRect(k);
+    const auto add = [&](std::uint32_t a, std::uint32_t b) {
+        if (cost[a] == 0 || cost[b] == 0) return;
+        const std::pair<std::uint32_t, std::uint32_t> p{key[a], key[b]};
+        if (links.empty() || links.back() != p) links.push_back(p);
+    };
+    if (r.x1 + 1 < w) {
+        for (std::int32_t y = r.y0; y <= r.y1; ++y) add(index(r.x1, y), index(r.x1 + 1, y));
+    }
+    if (r.y1 + 1 < h) {
+        for (std::int32_t x = r.x0; x <= r.x1; ++x) add(index(x, r.y1), index(x, r.y1 + 1));
+    }
+}
+
+void NavGrid::joinLabels(std::size_t ci) {
+    // Union-find over the local components (root = the set's lowest key), then number the sets
+    // in ascending key order and merge their local boxes. A component's box is the union of its
+    // local boxes, so it is exact.
+    const auto clusters = static_cast<std::uint32_t>(cw * ch);
+    std::vector<std::uint32_t>& up = keyParent;
+    up.resize(static_cast<std::size_t>(clusters) * kLocalSlots);
     const auto find = [&](std::uint32_t a) {
         while (up[a] != a) {
             up[a] = up[up[a]];  // path halving
@@ -121,63 +247,44 @@ void NavGrid::recomputeLabels() {
         }
         return a;
     };
-    const auto uw = static_cast<std::uint32_t>(w);
-    for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
-        if (!labelsStale[ci]) continue;
-        labelsStale[ci] = false;
-        const std::uint8_t* cost = eff[ci].data();
-        std::vector<std::uint32_t>& lab = labels[ci];
-        std::vector<CellRect>& boxes = labelBoxes[ci];
-        for (std::int32_t y = 0; y < h; ++y) {
-            const std::uint32_t row = static_cast<std::uint32_t>(y) * uw;
-            for (std::int32_t x = 0; x < w; ++x) {
-                const std::uint32_t i = row + static_cast<std::uint32_t>(x);
-                const bool west = x > 0 && cost[i] != 0 && cost[i - 1] != 0;
-                const bool north = y > 0 && cost[i] != 0 && cost[i - uw] != 0;
-                if (west && north) {
-                    // Already one set when the NW cell is open (W-NW and NW-N are links).
-                    if (cost[i - uw - 1] != 0) {
-                        up[i] = up[i - 1];
-                    } else {
-                        const std::uint32_t a = find(i - 1), b = find(i - uw);
-                        const std::uint32_t lo = std::min(a, b);
-                        up[a] = lo;
-                        up[b] = lo;
-                        up[i] = lo;
-                    }
-                } else if (west) {
-                    up[i] = up[i - 1];
-                } else if (north) {
-                    up[i] = up[i - uw];
-                } else {
-                    up[i] = i;
-                }
+    for (std::uint32_t k = 0; k < clusters; ++k) {
+        const std::uint32_t keyBase = k * kLocalSlots;
+        const auto n = static_cast<std::uint32_t>(localBoxes[ci][k].size());
+        for (std::uint32_t l = 1; l <= n; ++l) up[keyBase + l] = keyBase + l;
+    }
+    for (std::uint32_t k = 0; k < clusters; ++k) {
+        for (const auto& [p, q] : borderLinks[ci][k]) {
+            const std::uint32_t a = find(p), b = find(q);
+            if (a < b) {
+                up[b] = a;
+            } else if (b < a) {
+                up[a] = b;
             }
         }
-        // up[i] < i for every non-root, so in ascending order up[up[i]] is already a root.
-        boxes.assign(1, CellRect{});  // label 0 = blocked
-        std::uint32_t next = 1;
-        for (std::int32_t y = 0; y < h; ++y) {
-            const std::uint32_t row = static_cast<std::uint32_t>(y) * uw;
-            for (std::int32_t x = 0; x < w; ++x) {
-                const std::uint32_t i = row + static_cast<std::uint32_t>(x);
-                if (cost[i] == 0) {
-                    lab[i] = 0;
-                    continue;
-                }
-                if (up[i] == i) {
-                    lab[i] = next++;
-                    boxes.push_back(CellRect{x, y, x, y});
-                    continue;
-                }
-                up[i] = up[up[i]];
-                const std::uint32_t l = lab[up[i]];
-                lab[i] = l;
-                CellRect& box = boxes[l];
-                box.x0 = std::min(box.x0, x);
-                box.x1 = std::max(box.x1, x);
-                box.y1 = y;  // rows ascend; y0 is the root's row
+    }
+    std::vector<std::uint32_t>& lab = keyLabel[ci];
+    std::vector<CellRect>& boxes = labelBoxes[ci];
+    boxes.assign(1, CellRect{});  // label 0 = blocked
+    for (std::uint32_t k = 0; k < clusters; ++k) {
+        const std::uint32_t keyBase = k * kLocalSlots;
+        lab[keyBase] = 0;
+        const std::vector<CellRect>& local = localBoxes[ci][k];
+        for (std::uint32_t l = 1; l <= local.size(); ++l) {
+            const std::uint32_t key = keyBase + l;
+            const std::uint32_t root = find(key);
+            const CellRect& lb = local[l - 1];
+            if (root == key) {  // a set's lowest key comes first, so it opens the label
+                lab[key] = static_cast<std::uint32_t>(boxes.size());
+                boxes.push_back(lb);
+                continue;
             }
+            const std::uint32_t id = lab[root];
+            lab[key] = id;
+            CellRect& box = boxes[id];
+            box.x0 = std::min(box.x0, lb.x0);
+            box.y0 = std::min(box.y0, lb.y0);
+            box.x1 = std::max(box.x1, lb.x1);
+            box.y1 = std::max(box.y1, lb.y1);
         }
     }
 }

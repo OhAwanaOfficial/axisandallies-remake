@@ -506,6 +506,120 @@ TEST_CASE("stamping reroutes, unstamping restores, and the incremental rebuild e
     CHECK(sameResult(after, before));
 }
 
+TEST_CASE("cluster-level labels and boxes equal a whole-map flood fill through stamps and unstamps") {
+    // 100 cells: the last cluster row and column are partial.
+    const MapDef m = generateTestMap(11, 100);
+    NavWorld nav(m);
+    const NavGrid& g = nav.grid;
+    const auto n = static_cast<std::uint32_t>(m.cellCount());
+    const auto check = [&](const char* when) {
+        INFO(when);
+        for (std::size_t ci = 0; ci < kMoveClassCount; ++ci) {
+            const auto c = static_cast<MoveClass>(ci);
+            // Reference: 4-connected flood fill, components numbered in scan order.
+            std::vector<std::uint32_t> ref(n, 0);
+            std::vector<CellRect> refBox(1);
+            std::vector<std::uint32_t> stack;
+            for (std::uint32_t s = 0; s < n; ++s) {
+                if (g.cost(c, s) == 0 || ref[s] != 0) continue;
+                const auto id = static_cast<std::uint32_t>(refBox.size());
+                refBox.push_back(CellRect{g.xOf(s), g.yOf(s), g.xOf(s), g.yOf(s)});
+                ref[s] = id;
+                stack.assign(1, s);
+                while (!stack.empty()) {
+                    const std::uint32_t cell = stack.back();
+                    stack.pop_back();
+                    const std::int32_t x = g.xOf(cell), y = g.yOf(cell);
+                    CellRect& b = refBox[id];
+                    b.x0 = std::min(b.x0, x);
+                    b.y0 = std::min(b.y0, y);
+                    b.x1 = std::max(b.x1, x);
+                    b.y1 = std::max(b.y1, y);
+                    for (int d = 0; d < 4; ++d) {
+                        const std::int32_t nx = x + kDirX[d], ny = y + kDirY[d];
+                        if (!g.passable(c, nx, ny) || ref[g.index(nx, ny)] != 0) continue;
+                        ref[g.index(nx, ny)] = id;
+                        stack.push_back(g.index(nx, ny));
+                    }
+                }
+            }
+            // Same partition (a bijection between reference ids and labels) and the same boxes.
+            std::vector<std::uint32_t> labOfRef(refBox.size(), UINT32_MAX);
+            std::vector<std::uint32_t> refOfLab(n + 1, UINT32_MAX);
+            bool same = true;
+            for (std::uint32_t cell = 0; cell < n && same; ++cell) {
+                const std::uint32_t lab = g.label(c, cell);
+                if ((ref[cell] == 0) != (lab == 0)) same = false;
+                if (ref[cell] == 0 || !same) continue;
+                if (labOfRef[ref[cell]] == UINT32_MAX && refOfLab[lab] == UINT32_MAX) {
+                    labOfRef[ref[cell]] = lab;
+                    refOfLab[lab] = ref[cell];
+                    const CellRect& a = g.labelBox(c, lab);
+                    const CellRect& b = refBox[ref[cell]];
+                    same = a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1;
+                } else {
+                    same = labOfRef[ref[cell]] == lab && refOfLab[lab] == ref[cell];
+                }
+            }
+            CHECK_MESSAGE(same, moveClassName(c));
+        }
+    };
+    check("initial");
+    // A ring across cluster borders cuts off its inside; opening one side joins it again.
+    const CellRect ring[4] = {{10, 10, 40, 11}, {10, 38, 40, 39}, {10, 10, 11, 39}, {39, 10, 40, 39}};
+    for (const CellRect& r : ring) nav.grid.stamp(r);
+    nav.hpa.rebuildDirty();
+    check("ring");
+    CHECK(g.label(MoveClass::Foot, g.index(25, 25)) != g.label(MoveClass::Foot, g.index(5, 5)));
+    nav.grid.unstamp(ring[3]);
+    nav.hpa.rebuildDirty();
+    check("ring opened");
+    // Random stamps and unstamps, some on cluster corners and the partial clusters.
+    Rng rng = Rng::derive(11, 0x1ABE1ULL);
+    std::vector<CellRect> placed;
+    for (int step = 0; step < 40; ++step) {
+        if (!placed.empty() && rng.below(3) == 0) {
+            const std::uint32_t i = rng.below(static_cast<std::uint32_t>(placed.size()));
+            nav.grid.unstamp(placed[i]);
+            placed.erase(placed.begin() + i);
+        } else {
+            const auto x = static_cast<std::int32_t>(rng.below(100)), y = static_cast<std::int32_t>(rng.below(100));
+            const CellRect r{x, y, x + static_cast<std::int32_t>(rng.below(20)), y + static_cast<std::int32_t>(rng.below(3))};
+            nav.grid.stamp(r);
+            placed.push_back(r);
+        }
+        if (step % 4 == 3) {
+            nav.hpa.rebuildDirty();
+            check("random");
+        }
+    }
+}
+
+TEST_CASE("relabelling a cluster refreshes the links its clean W and N neighbours hold") {
+    // Cluster (1,1) is walled off except towards one neighbour (W, or N when transposed). A wall
+    // inside it alone then splits it in two halves that are only joined through that neighbour.
+    for (const bool transposed : {false, true}) {
+        CAPTURE(transposed);
+        NavWorld nav(openMap(64, 64));
+        const auto rect = [&](std::int32_t x0, std::int32_t y0, std::int32_t x1, std::int32_t y1) {
+            return transposed ? CellRect{y0, x0, y1, x1} : CellRect{x0, y0, x1, y1};
+        };
+        const auto at = [&](std::int32_t x, std::int32_t y) { return transposed ? nav.grid.index(y, x) : nav.grid.index(x, y); };
+        nav.grid.stamp(rect(16, 15, 31, 15));
+        nav.grid.stamp(rect(16, 32, 31, 32));
+        nav.grid.stamp(rect(32, 16, 32, 31));
+        nav.hpa.rebuildDirty();
+        nav.grid.stamp(rect(16, 24, 31, 24));
+        REQUIRE(nav.grid.dirtyClusters().size() == 1);
+        nav.hpa.rebuildDirty();
+        for (const MoveClass c : {MoveClass::Foot, MoveClass::Tracked}) {
+            CHECK(nav.grid.label(c, at(20, 20)) == nav.grid.label(c, at(20, 28)));
+            CHECK(nav.grid.label(c, at(20, 28)) == nav.grid.label(c, at(60, 60)));
+            CHECK(nav.grid.labelBox(c, nav.grid.label(c, at(20, 20))).x1 == 63);
+        }
+    }
+}
+
 TEST_CASE("a job restarts when the graph changes while it is suspended") {
     const MapDef m = openMap(128, 64);
     NavWorld nav(m);

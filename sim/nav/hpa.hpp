@@ -40,7 +40,7 @@ public:
     explicit Hpa(NavGrid& grid);
 
     // Rebuilds the clusters the grid marked dirty plus their neighbours (ascending cluster order),
-    // recomputes component labels, clears the dirty set and bumps version(). No-op if nothing dirty.
+    // relabels the dirty clusters, clears the dirty set and bumps version(). No-op if nothing dirty.
     void rebuildDirty();
     void rebuildAll();
 

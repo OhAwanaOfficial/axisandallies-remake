@@ -18,7 +18,7 @@ void Hpa::rebuildAll() {
         for (std::uint32_t k = 0; k < graphs[ci].size(); ++k) buildCluster(static_cast<MoveClass>(ci), k);
         for (std::uint32_t k = 0; k < graphs[ci].size(); ++k) linkCluster(static_cast<MoveClass>(ci), k);
     }
-    grid_.recomputeLabels();
+    grid_.recomputeAllLabels();
     grid_.clearDirty();
 }
 
