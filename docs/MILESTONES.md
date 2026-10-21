@@ -20,6 +20,44 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M11** | World War II mode | World map (WorldMap NIFs), territories, armies, purchase/upgrade/tech, turn flow, Quick Resolve, RTS battle hand-off, metagame AI. | Sonnet · medium, Opus for AI |
 | **M12** | Campaigns & polish | Trigger/objective system from `game_events`, campaign missions, Bink → OGV cutscenes, music, options, localization, accessibility, performance pass. | Sonnet · medium |
 
+### Progress
+
+| # | Status | Tag | What's in it |
+|---|---|---|---|
+| **M0** | Done | v0.2 (with M1–M2) | CMake (sim, simcli, doctest tests), godot-cpp GDExtension with `SimBridge`, Godot 4 project, CI on Windows and Linux (green at v0.2; the clang-cl and Clang jobs added in M3 haven't run yet, since nothing was pushed after v0.2), no-float check. |
+| **M1** | Done | v0.2 | TGI lexer, parser, template resolver and `index_aa.lst` loader (TGI_FORMAT.md); `rwd.py` and `RwdArchive`; VFS with the overlay order; `simcli dump-defs`; golden tests on 20 real files; PER/SAU load. |
+| **M2** | Done | v0.2 | `import_game.py` (static and skinned NIF → glb, KF → clips, textures) and the Godot Model Browser. |
+| **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
+| **M4** | Done | v0.4 | See below. |
+
+**M4 details:**
+* **Nav:**
+  * MapDef (deterministic test-map generator, plus `tools/rmp.py` maps, from the M10 spike).
+  * Per-class cost grids, labels, building stamps.
+  * HPA* within 1.25× of optimal; nearest-reachable fallback; smoothing.
+  * Budgeted PathService, sped up 2–3× in a performance pass.
+* **Movement:**
+  * Layouts, formations and group formations from the data.
+  * Regiment anchors and slots with slowest-unit speed, turning and wheeling, Column / single-file compression in chokepoints, arrival.
+  * Loose groups and divisions.
+  * Spatial-hash avoidance; stuck → repath.
+  * Commands MoveGroup, Run, Stop, SetFormation, SetGroupBehaviour.
+* **View:**
+  * SimBridge (map, snapshots, events, commands).
+  * Battle scene: textured terrain from the original data, interpolated unit models, RTS camera, selection (click, box, double-click, Ctrl+number), right-click move with facing, Alt Run, Q/W/E, F1–F3 overlays.
+* **Checks:**
+  * `simcli nav-bench`, `scenario` and `perf`.
+  * Golden-path, movement and replay fixtures.
+  * Godot `--selftest`.
+* **Numbers:** 160 regiments on a 1024² map at 10.7 ms p99 per tick.
+
+Carried over from M4:
+* building ticks on big maps (label rebuild, PATHFINDING §10);
+* the Release GDExtension crashing in the editor (ARCHITECTURE §4.4);
+* lazy path refinement;
+* real-map roads (objects, M10);
+* fps on the dev laptop's GPU (rendering, not the sim; the target PC isn't tested yet).
+
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.
 

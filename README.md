@@ -80,6 +80,15 @@ test map), spawns six of your regiments and three enemy ones, and runs the sim a
 Needs `tools/import_game.py` output in `cache/` for models and terrain textures; without it, units are boxes and
 terrain uses the data colours. Loading takes a few seconds with the Debug GDExtension.
 
+## Performance check (M4)
+```bash
+build\windows\simcli\Release\simcli.exe perf --ticks 3000 --out perf.rpl
+godot --path godot -- --gen=7:1024 --regiments=160 --measure=300
+```
+`perf` puts 160 regiments on the largest generated map (1024²), sends them across in groups and divisions, drops a
+building every 100 ticks, and prints tick times (avg, p50, p95, p99, max), the cost of building ticks and the time per
+stage. `--measure` makes the battle view print its fps (add `--pause-sim` to measure rendering alone).
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv

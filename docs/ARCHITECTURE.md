@@ -205,7 +205,13 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
   * F1–F3 overlays, and one view per unit.
   `--screenshot=PATH --frames=N` renders a frame and quits.
 * **Open:**
-  * Only the Debug GDExtension builds. With the Visual Studio multi-config generator, godot-cpp always produces its debug library, so the Release `simbridge.dll` fails to link (`_CrtDbgReport`). This predates M4 part 3: `godot/bin/` never had a Release DLL.
+  * The Release GDExtension now links: the root CMakeLists strips godot-cpp's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio. But the debug editor binary crashes with it after spawning (heap free, signal 11). Likely cause: godot-cpp defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` only in its Debug config, so the Release extension is a template_release build. The editor and `godot --path` load the Debug DLL, which works.
+  * Battle view fps (M4 close-out, dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
+    * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms).
+    * 6 regiments (40 units): 13.1 fps (frame 76 ms).
+    * Rendering the scene, not the units, dominates on this GPU; each unit adds about 0.03 ms.
+    * With the sim running in the Debug DLL: 7.5 fps, of which the Debug sim takes about 140 ms per tick (Release: about 3.6 ms).
+    * This laptop is far below the §7 target PC.
   * Loading the TGI data through the Debug build takes 15–30 s on the dev laptop.
   * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE, at about 10 fps with 70 units.
 
@@ -260,7 +266,7 @@ Remake/                         ← this repo (move it out of the game folder wh
 | Item | Budget |
 |---|---|
 | Worst case | 8 kingdoms × 20 regiments × up to 8 units ≈ **1,300 units** plus about 300 buildings and projectiles |
-| Sim tick (10 Hz) | ≤ **15 ms** at the 99th percentile on one core (≈15% of the tick period) |
+| Sim tick (10 Hz) | ≤ **15 ms** at the 99th percentile on one core (≈15% of the tick period). M4: 10.7 ms p99 with 160 regiments on a 1024² map (PATHFINDING §10) |
 | Pathfinding | ≤ 3 ms per tick budgeted, the rest amortized |
 | Render | 60 fps at 1080p. Use MultiMesh instancing for infantry where possible, and LOD on distant units. |
 | Memory | < 2 GB |
