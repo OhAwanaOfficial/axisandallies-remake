@@ -49,11 +49,12 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
   * `simcli nav-bench`, `scenario` and `perf`.
   * Golden-path, movement and replay fixtures.
   * Godot `--selftest`.
-* **Numbers:** 160 regiments on a 1024² map at 10.7 ms p99 per tick.
+* **Numbers:** 160 regiments on a 1024² map at 10.7 ms p99 per tick (6–8 ms average on ticks with a new building). Sim step 3.9–4.4 ms inside Godot with the optimized GDExtension.
 
 Carried over from M4:
 * building ticks on big maps: **done** (cluster-level labels, 6–8 ms avg at 1024², PATHFINDING §10);
-* the Release GDExtension crashing in the editor (ARCHITECTURE §4.4);
+* the Release GDExtension crashing in the editor: **done**. Debug, RelWithDebInfo (optimized, what the editor runs) and Release all build and run the battle view. A Godot 4.7.2 crash in its 2D canvas renderer remains whenever a 2D item is visible. The HUD is now a Label3D, which avoids it (0 crashes, against 5 of 5 with the throttled 2D label); the upstream report is drafted, not filed (ARCHITECTURE §4.4);
+* TGI load time: 0.7 s in Release, so no DefSet cache is needed;
 * lazy path refinement;
 * real-map roads (objects, M10);
 * fps on the dev laptop's GPU (rendering, not the sim; the target PC isn't tested yet).

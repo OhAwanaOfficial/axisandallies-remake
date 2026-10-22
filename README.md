@@ -43,7 +43,7 @@ template_debug GDExtension. Two configurations write it, and the last one built 
   next Debug and Release builds each recompile godot-cpp once.
 
 `windows-release` writes a template_release GDExtension to `godot/bin/windows/release/`, for exported games. The
-editor binary doesn't load it.
+editor binary only loads the debug slot, but the Release DLL also runs the battle view there when copied into it.
 
 ## Run the sim headless (M3)
 ```bash

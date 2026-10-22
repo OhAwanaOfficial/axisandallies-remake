@@ -210,16 +210,29 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
     * Release writes the template_release library `bin/windows/release/`, for exports.
     * The root CMakeLists strips godot-cpp 4.3's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio.
     * It also defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` for godot-cpp's RelWithDebInfo; godot-cpp itself defines them only in Debug.
-  * **Known crash (Godot 4.7.2, dev laptop):** with 160 regiments moving, Godot sometimes crashes (signal 11) in its 2D canvas renderer.
-    * Where: `msvcrt!memmove` under `LocalVector`, called from the code that culls and renders the CanvasItem tree. The only visible 2D item is the HUD `Label`, whose text changes every frame.
-    * How often: 3 of 5 `--measure` runs with the optimized DLL crashed, 0 of 3 with the HUD hidden. The Debug DLL passed. It depends on frame timing; one Release DLL crashed at tick 215 every run until `battle.gd` did a little more work per frame.
-    * Not the GDExtension: the same crash happens with `DEBUG_ENABLED`/`DEBUG_METHODS_ENABLED` on or off. An AddressSanitizer build of sim and SimBridge runs the scenario clean. Godot's allocator (msvcrt) uses a private heap, separate from ours (ucrtbase, process heap).
-    * Not yet: a minimal Godot repro and an upstream report.
+  * **Known crash (Godot 4.7.2, dev laptop), avoided by drawing the HUD in 3D:** with 160 regiments moving and any 2D item visible, Godot crashes (signal 11) in its 2D canvas renderer.
+    * Where: `msvcrt!memmove` under `LocalVector`, called from the code that culls and renders the CanvasItem tree (same offsets in every crash: main+153bd7d, 153f1ef, 379d9df, 379dc02 in the official 4.7.2 exe).
+    * Not the GDExtension: a GDScript-only project with no extension crashes the same way (below). An AddressSanitizer build of sim and SimBridge also runs the scenario clean.
+    * **Workaround (`battle.gd`):** the HUD is a `Label3D` 1 m in front of the camera, sized so one font pixel is one screen pixel. With no CanvasItem visible, the crash doesn't happen. `--hud2d` brings back the 2D `Label` to reproduce it.
+    * 160-regiment `--measure` runs:
+
+      | HUD | Crashed |
+      |---|---|
+      | 2D Label, text set every frame | 3 of 5 |
+      | 2D Label, text set at most 4 times a second | 5 of 5 with the laptop otherwise idle (each ~36 s after spawn); 3 of 17 in earlier runs, some with another Godot running |
+      | Hidden (F4 or `--no-hud`) | 0 of 10 |
+      | Label3D (now the default) | 0 of 10 |
+
+      So throttling the text doesn't help; only having no visible CanvasItem does. The box-select `ColorRect` is still 2D, so a crash during a long drag is possible.
+    * Minimal repro (no GDExtension): a 3D scene with 1,060 instanced skinned, animated characters plus a 2D `Label` updated every frame. It crashed in 2 of 15 runs with the same backtrace; boxes instead of characters crashed 0 of 9, and 0 of 3 with the Label hidden. The project and a draft upstream issue are in the session notes (`canvas_crash_repro/`, `godot-canvas-crash-issue-draft.md`); the issue isn't filed yet.
+  * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was built last. The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at 7.6 fps, sim step 3.9 ms. Godot itself loads it only in exported release builds.
+  * **TGI load time (Release):** mounting the archives, loading and resolving the TGI and compiling the Defs takes 0.7 s from a cold process (`simcli show-def`; load and resolve alone, 0.46–0.54 s). That's under the 5 s threshold, so there is no binary DefSet cache.
   * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
     * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms; M4 close-out).
     * 6 regiments (40 units): 13.1 fps (frame 76 ms; M4 close-out).
     * Rendering the scene, not the units, dominates on this GPU; each unit adds about 0.03 ms.
     * 160 regiments with the sim running, optimized (RelWithDebInfo) DLL: 7.5 fps (frame 133 ms, p95 144–147 ms). The sim takes 3.5–4.4 ms per tick (max 6–11 ms), so rendering bounds the frame.
+    * Caution: `--measure` times frames with `_process` `delta`, which Godot clamps to about 8 physics ticks (133 ms), so it can't report less than ~7.5 fps. The real rate is lower: 360 frames took 58–60 s (about 6 fps) in the Label3D runs. In a GDScript-only test scene, `delta` said 130 ms while frames took 1.1 s.
     * The Debug DLL also gives 7.5 fps, but its sim takes about 146 ms per tick, so the sim falls behind real time.
     * This laptop is far below the §7 target PC.
   * Loading the TGI data and the gen:7:1024 map (`SimBridge.start`) takes 3.0 s on the dev laptop with the optimized GDExtension, 29 s with the Debug one.

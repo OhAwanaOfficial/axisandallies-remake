@@ -17,7 +17,9 @@ extends Node3D
 ##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits),
 ##   --regiments=N (N mixed regiments, half per side, crossing the map in groups of six),
 ##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits),
-##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone).
+##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone),
+##   --no-hud (hide the HUD label),
+##   --hud2d (draw the HUD as a 2D Label instead of a Label3D on the camera; crashes Godot 4.7.2, ARCHITECTURE §4.4).
 
 const TICK := 0.1
 const PLAYER := 0
@@ -35,6 +37,7 @@ var terrain: BattleTerrain
 var units: UnitViews
 var cam: RtsCamera
 var hud: Label
+var hud3d: Label3D           # the HUD text, unless --hud2d: then `hud` shows it
 var box_rect: ColorRect
 var overlay_root: Node3D
 
@@ -658,10 +661,25 @@ func _build_cost_overlay(cls: int) -> void:
 	m.set_shader_parameter("cell_count", Vector2(w, h))
 
 
+var _hud_next_ms := 0
+
+
 func _update_hud() -> void:
-	hud.visible = overlay.hud
-	if not overlay.hud:
+	if not _args().has("hud2d") and hud3d == null and cam.camera != null:
+		hud3d = _make_hud3d()
+	hud.visible = overlay.hud and hud3d == null
+	if hud3d != null:
+		hud3d.visible = overlay.hud
+	if not overlay.hud or _args().has("no-hud"):
+		hud.visible = false
+		if hud3d != null:
+			hud3d.visible = false
 		return
+	# Rebuild the text at most 4 times a second, and only when it changes.
+	var now := Time.get_ticks_msec()
+	if now < _hud_next_ms:
+		return
+	_hud_next_ms = now + 250
 	var lines_out: Array[String] = []
 	lines_out.append("tick %d  %s  x%s  %d fps  %d units%s" % [snap.get("tick", 0), "PAUSED" if paused else "", str(speed),
 		Engine.get_frames_per_second(), units.stats.units, "  (%d placeholders)" % units.stats.placeholders if units.stats.placeholders > 0 else ""])
@@ -681,7 +699,41 @@ func _update_hud() -> void:
 	for e in events_log:
 		lines_out.append("  " + e)
 	lines_out.append("F1 cost  F2 paths  F3 slots  F4 HUD   Q/W/E formation  V division  S stop  Alt+RMB run  B blocker")
-	hud.text = "\n".join(lines_out)
+	var text := "\n".join(lines_out)
+	if hud3d != null:
+		_place_hud3d()
+		if text != hud3d.text:
+			hud3d.text = text
+	elif text != hud.text:
+		hud.text = text
+
+
+## The HUD as a Label3D 1 m in front of the camera, sized so one font pixel is one screen pixel.
+## It renders with the 3D scene, so no CanvasItem is visible (Godot 4.7.2 canvas crash,
+## ARCHITECTURE §4.4).
+func _make_hud3d() -> Label3D:
+	var l := Label3D.new()
+	l.font_size = 16
+	l.outline_size = 8
+	l.modulate = Color.WHITE
+	l.outline_modulate = Color.BLACK
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	l.vertical_alignment = VERTICAL_ALIGNMENT_TOP
+	l.shaded = false
+	l.no_depth_test = true
+	l.render_priority = 10
+	l.outline_render_priority = 9
+	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	cam.camera.add_child(l)
+	return l
+
+
+func _place_hud3d() -> void:
+	var size := get_viewport().get_visible_rect().size
+	var half_h := tan(deg_to_rad(cam.camera.fov) * 0.5)  # frustum half-height at 1 m
+	var px := 2.0 * half_h / size.y
+	hud3d.pixel_size = px
+	hud3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, half_h - 8.0 * px, -1.0)
 
 
 # ---------------------------------------------------------------- setup helpers
