@@ -39,7 +39,8 @@ Which build the editor runs: the editor and `godot --path` load `godot/bin/windo
 template_debug GDExtension. Two configurations write it, and the last one built wins:
 * `windows-debug`: unoptimized, for stepping through the bridge. The sim is about 40x slower.
 * `windows-relwithdebinfo`: optimized, with symbols. Use this to play or measure the battle view. Its first build
-  compiles godot-cpp once more (about 40 min on the dev laptop).
+  compiles godot-cpp once more (about 40 min on the dev laptop). It also regenerates the godot-cpp bindings, so the
+  next Debug and Release builds each recompile godot-cpp once.
 
 `windows-release` writes a template_release GDExtension to `godot/bin/windows/release/`, for exported games. The
 editor binary doesn't load it.
