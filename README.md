@@ -35,6 +35,15 @@ godot-cpp, and the godot-cpp bindings take several minutes to build.
 The build puts the GDExtension in `godot/bin/`. On a fresh checkout, run `godot --headless --path godot --import`
 once so Godot registers it; `godot --path godot res://scenes/main.tscn` then shows `SimBridge.hello()`.
 
+Which build the editor runs: the editor and `godot --path` load `godot/bin/windows/debug/simbridge.dll`, a
+template_debug GDExtension. Two configurations write it, and the last one built wins:
+* `windows-debug`: unoptimized, for stepping through the bridge. The sim is about 40x slower.
+* `windows-relwithdebinfo`: optimized, with symbols. Use this to play or measure the battle view. Its first build
+  compiles godot-cpp once more (about 40 min on the dev laptop).
+
+`windows-release` writes a template_release GDExtension to `godot/bin/windows/release/`, for exported games. The
+editor binary doesn't load it.
+
 ## Run the sim headless (M3)
 ```bash
 build\windows\simcli\Debug\simcli.exe show-def regiment_per_infantry
@@ -64,7 +73,7 @@ build\windows\simcli\Release\simcli.exe show-def regiment_infantry
 
 ## Play the battle view (M4)
 ```bash
-cmake --build --preset windows-debug --target simbridge
+cmake --build --preset windows-relwithdebinfo --target simbridge
 godot --path godot
 godot --path godot -- --gen=7:256
 godot --path godot -- --map=../cache/maps/kursk/map.json --demo
@@ -78,7 +87,7 @@ test map), spawns six of your regiments and three enemy ones, and runs the sim a
 * F1/F2/F3 toggle the cost-grid, path and slot overlays.
 
 Needs `tools/import_game.py` output in `cache/` for models and terrain textures; without it, units are boxes and
-terrain uses the data colours. Loading takes a few seconds with the Debug GDExtension.
+terrain uses the data colours. Loading takes about 3 s with the optimized GDExtension, and up to 30 s with the Debug one.
 
 ## Performance check (M4)
 ```bash
@@ -87,7 +96,9 @@ godot --path godot -- --gen=7:1024 --regiments=160 --measure=300
 ```
 `perf` puts 160 regiments on the largest generated map (1024²), sends them across in groups and divisions, drops a
 building every 100 ticks, and prints tick times (avg, p50, p95, p99, max), the cost of building ticks and the time per
-stage. `--measure` makes the battle view print its fps (add `--pause-sim` to measure rendering alone).
+stage. `--measure` makes the battle view print its fps (add `--pause-sim` to measure rendering alone). Measure with the
+`windows-relwithdebinfo` GDExtension. On the dev laptop, Godot 4.7.2 sometimes crashes in its 2D canvas renderer
+during this run (ARCHITECTURE §4.4).
 
 ## Import the original art and browse it (M2)
 ```bash

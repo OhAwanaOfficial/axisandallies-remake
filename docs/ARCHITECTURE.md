@@ -205,14 +205,24 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
   * F1–F3 overlays, and one view per unit.
   `--screenshot=PATH --frames=N` renders a frame and quits.
 * **Open:**
-  * The Release GDExtension now links: the root CMakeLists strips godot-cpp's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio. But the debug editor binary crashes with it after spawning (heap free, signal 11). Likely cause: godot-cpp defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` only in its Debug config, so the Release extension is a template_release build. The editor and `godot --path` load the Debug DLL, which works.
-  * Battle view fps (M4 close-out, dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
-    * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms).
-    * 6 regiments (40 units): 13.1 fps (frame 76 ms).
+  * GDExtension builds, by Godot template kind:
+    * The editor and `godot --path` load the template_debug library `bin/windows/debug/simbridge.dll`. Two configs write it: Debug (unoptimized) and RelWithDebInfo (optimized, with symbols; `windows-relwithdebinfo`). The battle view uses RelWithDebInfo.
+    * Release writes the template_release library `bin/windows/release/`, for exports.
+    * The root CMakeLists strips godot-cpp 4.3's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio.
+    * It also defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` for godot-cpp's RelWithDebInfo; godot-cpp itself defines them only in Debug.
+  * **Known crash (Godot 4.7.2, dev laptop):** with 160 regiments moving, Godot sometimes crashes (signal 11) in its 2D canvas renderer.
+    * Where: `msvcrt!memmove` under `LocalVector`, called from the code that culls and renders the CanvasItem tree. The only visible 2D item is the HUD `Label`, whose text changes every frame.
+    * How often: 3 of 5 `--measure` runs with the optimized DLL crashed, 0 of 3 with the HUD hidden. The Debug DLL passed. It depends on frame timing; one Release DLL crashed at tick 215 every run until `battle.gd` did a little more work per frame.
+    * Not the GDExtension: the same crash happens with `DEBUG_ENABLED`/`DEBUG_METHODS_ENABLED` on or off. An AddressSanitizer build of sim and SimBridge runs the scenario clean. Godot's allocator (msvcrt) uses a private heap, separate from ours (ucrtbase, process heap).
+    * Not yet: a minimal Godot repro and an upstream report.
+  * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
+    * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms; M4 close-out).
+    * 6 regiments (40 units): 13.1 fps (frame 76 ms; M4 close-out).
     * Rendering the scene, not the units, dominates on this GPU; each unit adds about 0.03 ms.
-    * With the sim running in the Debug DLL: 7.5 fps, of which the Debug sim takes about 140 ms per tick (Release: about 3.6 ms).
+    * 160 regiments with the sim running, optimized (RelWithDebInfo) DLL: 7.5 fps (frame 133 ms, p95 144–147 ms). The sim takes 3.5–4.4 ms per tick (max 6–11 ms), so rendering bounds the frame.
+    * The Debug DLL also gives 7.5 fps, but its sim takes about 146 ms per tick, so the sim falls behind real time.
     * This laptop is far below the §7 target PC.
-  * Loading the TGI data through the Debug build takes 15–30 s on the dev laptop.
+  * Loading the TGI data and the gen:7:1024 map (`SimBridge.start`) takes 3.0 s on the dev laptop with the optimized GDExtension, 29 s with the Debug one.
   * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE, at about 10 fps with 70 units.
 
 ### 4.5 Controllers

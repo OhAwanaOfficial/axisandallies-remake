@@ -46,6 +46,11 @@
       "configuration": "Release"
     },
     {
+      "name": "windows-relwithdebinfo",
+      "configurePreset": "windows",
+      "configuration": "RelWithDebInfo"
+    },
+    {
       "name": "windows-sim-debug",
       "configurePreset": "windows-sim-only",
       "configuration": "Debug"

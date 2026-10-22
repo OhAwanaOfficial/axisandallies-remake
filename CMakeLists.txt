@@ -8,6 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # One CRT everywhere (sim is linked into the GDExtension DLL, which godot-cpp also builds).
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# RelWithDebInfo builds the optimized GDExtension (see below): full inlining, as in Release.
+string(REPLACE "/Ob1" "/Ob2" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
 
 option(CORPS_BUILD_GDEXT "Build the godot-cpp GDExtension (SimBridge)" ON)
 option(CORPS_BUILD_TESTS "Build unit tests" ON)
@@ -81,5 +83,11 @@ if(CORPS_BUILD_GDEXT)
       set_target_properties(godot-cpp PROPERTIES COMPILE_FLAGS "${_godot_cpp_flags}")
     endif()
   endif()
+  # godot-cpp 4.3 defines DEBUG_ENABLED / DEBUG_METHODS_ENABLED only in its Debug config, so its
+  # Release config is a template_release build (no call argument checks), meant for export
+  # templates. RelWithDebInfo is the optimized template_debug build (scons target=template_debug):
+  # gdext/ writes it, like Debug, to godot/bin/<os>/debug/, the library the editor loads.
+  target_compile_definitions(godot-cpp PUBLIC
+    $<$<CONFIG:RelWithDebInfo>:DEBUG_ENABLED DEBUG_METHODS_ENABLED>)
   add_subdirectory(gdext)
 endif()
