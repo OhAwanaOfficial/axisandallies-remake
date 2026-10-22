@@ -23,7 +23,6 @@ const TICK := 0.1
 const PLAYER := 0
 const FORMATIONS := {KEY_Q: "regiment_aggressive", KEY_W: "regiment_defensive", KEY_E: "regiment_column"}
 const FORMATION_LABELS := {"regiment_aggressive": "Assault", "regiment_defensive": "Normal", "regiment_column": "Column"}
-const DOUBLE_CLICK_MS := 350
 const DRAG_PX := 6.0
 const CLASS_NAMES := ["foot", "wheeled", "tracked", "naval", "amphibious", "air"]
 const DEMO_REGIMENTS := ["regiment_per_infantry", "regiment_usa_infantry", "regiment_ger_tank_medium",
@@ -60,7 +59,7 @@ var _left_from := Vector2.ZERO
 var _right_down := false
 var _right_from_screen := Vector2.ZERO
 var _right_from_ground: Variant = null
-var _last_click_ms := 0
+var _left_double := false  # the press was the second of an OS double-click
 var _frames := 0
 
 
@@ -376,15 +375,16 @@ func _unhandled_input(ev: InputEvent) -> void:
 			if mb.pressed:
 				_left_down = true
 				_left_from = mb.position
+				_left_double = mb.double_click
 			elif _left_down:
 				_left_down = false
 				box_rect.visible = false
 				if mb.position.distance_to(_left_from) > DRAG_PX:
 					_select_box(Rect2(_left_from, Vector2.ZERO).expand(mb.position), mb.shift_pressed)
 				else:
-					var now := Time.get_ticks_msec()
-					_select_click(mb.position, mb.shift_pressed, now - _last_click_ms < DOUBLE_CLICK_MS)
-					_last_click_ms = now
+					# The OS times the double-click (from its own event times, with the user's setting), so it
+					# works at any frame rate; timing it here would count frames, not clicks.
+					_select_click(mb.position, mb.shift_pressed, _left_double)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
 			if mb.pressed:
 				_right_down = true
@@ -737,12 +737,11 @@ func _save_screenshot(path: String) -> void:
 # ---------------------------------------------------------------- self test (synthetic input)
 
 func _selftest() -> void:
+	# Lambdas capture locals by value, so `check` only appends to the (shared) array; failures are
+	# counted from it at the end.
 	var results: Array[String] = []
-	var fails := 0
 	var check := func(name: String, ok: bool) -> void:
 		results.append(("PASS  " if ok else "FAIL  ") + name)
-		if not ok:
-			fails += 1
 	for i in 10:
 		await get_tree().process_frame
 	var mine: Array = []
@@ -755,11 +754,12 @@ func _selftest() -> void:
 		var info: Dictionary = bridge.regiment_info(reg)
 		var slots: PackedVector2Array = info.slots
 		return cam.camera.unproject_position(terrain.to_world(slots[0] if slots.size() > 0 else info.anchor, 0.6))
-	var click := func(at: Vector2, button := MOUSE_BUTTON_LEFT, shift := false, alt := false) -> void:
+	var click := func(at: Vector2, button := MOUSE_BUTTON_LEFT, shift := false, alt := false, double := false) -> void:
 		for pressed in [true, false]:
 			var ev := InputEventMouseButton.new()
 			ev.button_index = button
 			ev.pressed = pressed
+			ev.double_click = double and pressed
 			ev.position = at
 			ev.global_position = at
 			ev.shift_pressed = shift
@@ -786,10 +786,9 @@ func _selftest() -> void:
 	# Shift-click adds another.
 	await click.call(screen_of.call(mine[1]), MOUSE_BUTTON_LEFT, true)
 	check.call("shift-click adds", selected.size() == 2)
-	# Double-click: every visible own regiment of that type.
-	_last_click_ms = 0
+	# Double-click: every visible own regiment of that type. The OS flags the second press, as on Windows.
 	await click.call(screen_of.call(first))
-	await click.call(screen_of.call(first))
+	await click.call(screen_of.call(first), MOUSE_BUTTON_LEFT, false, false, true)
 	var same := 0
 	for bits in mine:
 		if regiment_defs[bits] == regiment_defs[first]:
@@ -856,7 +855,10 @@ func _selftest() -> void:
 	if shot != "":
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(shot)
+	var fails := 0
 	for r in results:
 		print(r)
+		if r.begins_with("FAIL"):
+			fails += 1
 	print("SELFTEST %s: %d checks, %d failed" % ["PASSED" if fails == 0 else "FAILED", results.size(), fails])
 	(v.node as Node3D).get_tree().quit(1 if fails > 0 else 0)

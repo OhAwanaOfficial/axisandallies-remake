@@ -196,10 +196,10 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
   * Not yet: biome and nation skins, death and attack animations, FXC.
 * **Camera** (`rts_camera.gd`): pan with the arrows or the screen edges, zoom with the wheel, rotate with middle drag or PgUp/PgDn, Home resets. Fixed 52° pitch.
 * **Input:**
-  * **Selection:** left click picks the regiment of the nearest own unit (24 px); box drag; Shift adds; double-click selects all visible own regiments of that RegimentDef; Ctrl+1..9 stores the selection, 1..9 recalls it (tap twice to jump the camera).
+  * **Selection:** left click picks the regiment of the nearest own unit (24 px); box drag; Shift adds; double-click selects all visible own regiments of that RegimentDef (the OS times it and Godot flags the second press `double_click`, so it works at any frame rate); Ctrl+1..9 stores the selection, 1..9 recalls it (tap twice to jump the camera).
   * **Orders:** right click moves, right drag moves with a facing, Alt+right click runs. Q/W/E set Assault/Normal/Column, V toggles group behaviour, S stops, B drops a debug blocker.
 * **Debug overlays:** F1 cost grid of the selected regiment's class (red blocked, green normal, blue roads, yellow/orange slower), F2 paths (remaining part bright), F3 slot targets with anchors and headings, F4 HUD (tick, fps, the selection's formation, state, group and compression, recent arrival/blocked events).
-* **Checks:** `godot --path godot -- --selftest` drives the controls with synthetic input events and prints PASS/FAIL:
+* **Checks:** `godot --path godot -- --selftest` drives the controls with synthetic input events, prints PASS/FAIL and exits 1 if any check failed:
   * click, Shift-click, double-click, box, Ctrl+1/1;
   * Q/E formations, right-click move to the clicked ground point, Alt+right-click Run;
   * F1–F3 overlays, and one view per unit.
