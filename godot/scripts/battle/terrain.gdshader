@@ -1,5 +1,7 @@
 // Terrain: one texture-array layer per terrain variation, chosen per 2-unit tile from an index
 // texture, blended across tile borders. Variations without a cached texture use their data colour.
+// With LOW defined (Low graphics quality, BattleTerrain.set_low_quality) each pixel samples only its
+// own tile's layer: one index fetch and one texture sample instead of four of each.
 shader_type spatial;
 
 uniform sampler2DArray layers : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
@@ -28,6 +30,9 @@ vec3 layer_rgb(int l, vec2 wp) {
 }
 
 void fragment() {
+#ifdef LOW
+	ALBEDO = layer_rgb(layer_at(ivec2(floor(world_pos.xz / tile_size))), world_pos.xz);
+#else
 	vec2 t = world_pos.xz / tile_size - 0.5;
 	ivec2 i0 = ivec2(floor(t));
 	vec2 f = fract(t);
@@ -37,6 +42,7 @@ void fragment() {
 	vec3 c01 = layer_rgb(layer_at(i0 + ivec2(0, 1)), world_pos.xz);
 	vec3 c11 = layer_rgb(layer_at(i0 + ivec2(1, 1)), world_pos.xz);
 	ALBEDO = mix(mix(c00, c10, w.x), mix(c01, c11, w.x), w.y);
+#endif
 	ROUGHNESS = 0.95;
 	SPECULAR = 0.1;
 }

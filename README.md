@@ -85,7 +85,7 @@ test map), spawns six of your regiments and three enemy ones, and runs the sim a
 * Right click moves, right drag also sets the facing, Alt+right click runs. Q/W/E set the formation, V toggles a
   division, S stops.
 * The camera pans with the arrows or the screen edges, zooms with the wheel and rotates with the middle button.
-* F1/F2/F3 toggle the cost-grid, path and slot overlays.
+* F1/F2/F3 toggle the cost-grid, path and slot overlays. F6 cycles the graphics quality (Low/Medium/High).
 
 Needs `tools/import_game.py` output in `cache/` for models and terrain textures; without it, units are boxes and
 terrain uses the data colours. Loading takes about 3 s with the optimized GDExtension, and up to 30 s with the Debug one.
@@ -94,12 +94,14 @@ terrain uses the data colours. Loading takes about 3 s with the optimized GDExte
 ```bash
 build\windows\simcli\Release\simcli.exe perf --ticks 3000 --out perf.rpl
 godot --path godot -- --gen=7:1024 --regiments=160 --measure=300
+godot --path godot --resolution 1280x720 -- --regiments=75 --quality=low --profile=240
 ```
 `perf` puts 160 regiments on the largest generated map (1024²), sends them across in groups and divisions, drops a
 building every 100 ticks, and prints tick times (avg, p50, p95, p99, max), the cost of building ticks and the time per
 stage. `--measure` makes the battle view print its fps (add `--pause-sim` to measure rendering alone). Measure with the
-`windows-relwithdebinfo` GDExtension. On the dev laptop, Godot 4.7.2 sometimes crashes in its 2D canvas renderer
-during this run (ARCHITECTURE §4.4).
+`windows-relwithdebinfo` GDExtension. `--profile` times real frames with V-Sync off and splits them into sim,
+script, process and render time; `--no-anim`, `--hide-units`, `--no-shadows` and `--plain-terrain` remove one cost
+at a time (ARCHITECTURE §4.4).
 
 ## Import the original art and browse it (M2)
 ```bash

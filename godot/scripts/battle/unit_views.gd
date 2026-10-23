@@ -1,8 +1,8 @@
 class_name UnitViews
 extends Node3D
-## One view per sim unit, built from the imported model of its UnitDef (resource_prefix → cache
-## .glb) and moved by render interpolation between the snapshot's previous and current tick
-## (ARCHITECTURE §4.4). The view never touches sim state.
+## High quality: one node tree per sim unit (a copy of its UnitDef's model with an AnimationPlayer)
+## moved by render interpolation between the snapshot's previous and current tick (ARCHITECTURE
+## §4.4). Low and Medium use UnitBatches instead. The view never touches sim state.
 ##
 ## Facing: sim angle θ is counter-clockwise from +x towards +y; sim (x, y) is Godot (x, z), so a
 ## node faces the sim heading with rotation.y = -θ. Imported models face Godot -Z after the
@@ -13,21 +13,16 @@ const MODEL_YAW := PI / 2.0
 const WALK_SPEED_SCALE := 1.0
 const PLAYER_COLORS := [Color(0.25, 0.55, 1.0), Color(1.0, 0.3, 0.25), Color(0.3, 0.9, 0.35), Color(1.0, 0.85, 0.2)]
 
-var loader: CacheLoader
-var bridge: SimBridge
+var models: UnitModels
 var terrain: BattleTerrain
-var protos := {}          # unit def index -> {root, anims: {name: Animation}, model, error}
 var views := {}           # entity bits -> {node, player, def, anim, ring, org}
-var model_index := {}     # lower-case cache path -> cache path (for case-insensitive lookups)
 var stats := {"units": 0, "placeholders": 0}
+var animate := true       # false: no AnimationPlayers (profiling)
 
 
-func setup(p_loader: CacheLoader, p_bridge: SimBridge, p_terrain: BattleTerrain) -> void:
-	loader = p_loader
-	bridge = p_bridge
+func setup(p_models: UnitModels, p_terrain: BattleTerrain) -> void:
+	models = p_models
 	terrain = p_terrain
-	for m in loader.manifest.get("models", []):
-		model_index[str(m.glb).to_lower()] = m.glb
 
 
 ## Creates and removes views to match the snapshot, then places them at interpolation `alpha`.
@@ -69,14 +64,14 @@ func _create_view(bits: int, def: int, player: int, org: int) -> Dictionary:
 	var node := Node3D.new()
 	node.name = "Unit_%d" % bits
 	add_child(node)
-	var proto := _proto(def)
+	var proto := models.proto(def)
 	var model: Node3D = null
 	var anim_player: AnimationPlayer = null
 	if proto.has("root"):
 		model = (proto.root as Node3D).duplicate()
 		model.rotation.y = MODEL_YAW
 		node.add_child(model)
-		if not (proto.anims as Dictionary).is_empty():
+		if animate and not (proto.anims as Dictionary).is_empty():
 			anim_player = AnimationPlayer.new()
 			model.add_child(anim_player)
 			anim_player.root_node = anim_player.get_path_to(model)
@@ -98,75 +93,10 @@ func _animate(v: Dictionary, moving: bool) -> void:
 	var ap: AnimationPlayer = v.anim
 	if ap == null:
 		return
-	var want := ""
-	for n in (["Walk", "Jog"] if moving else ["Idle", "Fidget1"]):
-		if ap.has_animation(n):
-			want = n
-			break
+	var want := UnitModels.pick_clip(models.proto(v.def).anims, ["Walk", "Jog"] if moving else ["Idle", "Fidget1"])
 	if want != "" and want != v.playing:
 		ap.play(want, 0.2)
 		v.playing = want
-
-
-func _proto(def: int) -> Dictionary:
-	if protos.has(def):
-		return protos[def]
-	var vis: Dictionary = bridge.unit_visual(def)
-	var proto := {"radius": maxf(float(vis.get("radius", 0.5)), 0.3), "ids": vis.get("ids", "?")}
-	protos[def] = proto
-	var rel := _resolve_model(str(vis.get("model", "")))
-	if rel == "":
-		proto.error = "no cached model for %s (%s)" % [vis.get("ids", "?"), vis.get("model", "")]
-		push_warning(proto.error)
-		return proto
-	var r: Dictionary = loader.load_model(rel)
-	if r.has("error"):
-		proto.error = r.error
-		push_warning("%s: %s" % [rel, r.error])
-		return proto
-	var root: Node3D = r.root
-	for n in root.find_children("*", "Node3D", true, false):
-		var ex: Dictionary = n.get_meta("extras", {})
-		if ex.get("hidden", false):
-			(n as Node3D).visible = false
-	for ap in root.find_children("*", "AnimationPlayer", true, false):
-		ap.queue_free()
-	proto.root = root
-	proto.model = rel
-	proto.anims = _load_clips(rel, root)
-	return proto
-
-
-func _resolve_model(rel: String) -> String:
-	if rel == "":
-		return ""
-	var key := rel.to_lower()
-	if model_index.has(key):
-		return model_index[key]
-	var tail := key.get_file()
-	for k in model_index:
-		if str(k).ends_with("/" + tail):
-			return model_index[k]
-	return ""
-
-
-## Walk / Jog / Idle / Fidget1 clips compatible with the model, retargeted to it.
-func _load_clips(rel: String, root: Node3D) -> Dictionary:
-	var out := {}
-	var compat: Dictionary = loader.manifest.get("compatible_clips", {})
-	for clip_glb in compat.get(rel, []):
-		var short := str(clip_glb).get_file().trim_suffix(".anim.glb")
-		if short not in ["Walk", "Jog", "Idle", "Fidget1"] or out.has(short):
-			continue
-		var anims: Dictionary = loader.load_animations(clip_glb)
-		for an in anims:
-			var rt: Array = CacheLoader.retarget(anims[an], root, root)
-			if rt[1] > 0:
-				var a: Animation = rt[0]
-				a.loop_mode = Animation.LOOP_LINEAR
-				out[short] = a
-				break
-	return out
 
 
 func _placeholder(radius: float, player: int) -> Node3D:

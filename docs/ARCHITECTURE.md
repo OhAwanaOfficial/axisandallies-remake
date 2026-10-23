@@ -189,11 +189,24 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
   * Texturing: one `Texture2DArray` layer per used variation (the original `.tga` from `cache/Terrain/...`, or the data colour when missing), picked per 2-unit tile and blended across tile borders. Each repeats every `texture_width` tiles.
   * Water: a translucent plane at the median land height − 0.25 over water.
   * Not yet: the original transition and edge textures, detail and macro textures, animated water.
-* **Units** (`unit_views.gd`):
-  * One prototype per UnitDef from the cached `.glb`, with hidden helper nodes (e.g. `SelectionBox`) hidden.
-  * Walk/Jog/Idle clips from `compatible_clips`, retargeted once per prototype and shared by every instance's AnimationPlayer.
+* **Units:** `unit_models.gd` loads one prototype per UnitDef from the cached `.glb` (hidden helper nodes such as `SelectionBox` stay hidden) with its Walk/Jog/Idle/Fidget1 clips from `compatible_clips`, retargeted once. Two renderers draw them, picked by the graphics quality (below):
+  * `unit_batches.gd` (Low, Medium): one `MultiMesh` per UnitDef, so a unit type costs one draw call per material.
+    * The model is merged into one mesh in unit space, surfaces grouped by material.
+    * Skinned models: the move and idle clips are skinned on the CPU at load and baked into a vertex animation texture (VAT): a row per frame (15 per second, at most 40 per clip), a texel per vertex with the position in RGB and an octahedral normal packed into A. `unit_vat.gdshader` plays it from `TIME` and each instance's custom data (moving, phase), blending two frames near the camera and stepping frame by frame beyond `anim_lod_distance` (60 on Low, 150 on Medium). Animation costs no CPU per frame.
+    * Instance buffers come from `SimBridge.unit_instances(alpha, selected_orgs)`, which interpolates every unit in C++ and places it on the terrain heights handed over by `set_view_heights()`. Selection rings are a second MultiMesh per type, of selected units only.
+    * Each batch rotates through 3 MultiMeshes: rewriting a buffer the GPU is still drawing from makes ANGLE wait for the GPU (about 10 ms a frame with 500 units on the HD 3000).
+    * `godot --path godot --script res://scripts/tools/vat_check.gd -- <model.glb> <clip>` compares the bake with Godot's own skinning (needs a renderer, not `--headless`). PERInfantry and GERInfantry, Walk and Idle: difference 0.0000.
+  * `unit_views.gd` (High): a copy of the model and an AnimationPlayer per unit, blending between clips.
   * Facing: sim θ → `rotation.y = -θ`, and imported models face Godot +Z, so the model is turned by +90°.
   * Not yet: biome and nation skins, death and attack animations, FXC.
+* **Graphics quality** (F6 cycles it and saves it to `user://settings.cfg`; `--quality=low|medium|high` overrides it). The default is Low when Godot fell back to GL Compatibility (no Vulkan or D3D12), Medium otherwise.
+
+  | | Low | Medium | High |
+  |---|---|---|---|
+  | Units | MultiMesh + VAT | MultiMesh + VAT | node tree + AnimationPlayer per unit |
+  | Lighting | per vertex (terrain and units) | per pixel | per pixel |
+  | Terrain shader | one layer sample per pixel, hard tile borders | four layers blended across tile borders | same as Medium |
+  | Shadows | off | one orthogonal map, 120 m, only units cast | four splits, 250 m, terrain casts too |
 * **Camera** (`rts_camera.gd`): pan with the arrows or the screen edges, zoom with the wheel, rotate with middle drag or PgUp/PgDn, Home resets. Fixed 52° pitch.
 * **Input:**
   * **Selection:** left click picks the regiment of the nearest own unit (24 px); box drag; Shift adds; double-click selects all visible own regiments of that RegimentDef (the OS times it and Godot flags the second press `double_click`, so it works at any frame rate); Ctrl+1..9 stores the selection, 1..9 recalls it (tap twice to jump the camera).
@@ -202,11 +215,11 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 * **Checks:** `godot --path godot -- --selftest` drives the controls with synthetic input events, prints PASS/FAIL and exits 1 if any check failed:
   * click, Shift-click, double-click, box, Ctrl+1/1;
   * Q/E formations, right-click move to the clicked ground point, Alt+right-click Run;
-  * F1–F3 overlays, and one view per unit.
+  * F1–F3 overlays, every unit drawn, and F6 cycling through the three qualities with every unit drawn in each.
   `--screenshot=PATH --frames=N` renders a frame and quits.
 * **Open:**
   * GDExtension builds, by Godot template kind:
-    * The editor and `godot --path` load the template_debug library `bin/windows/debug/simbridge.dll`. Two configs write it: Debug (unoptimized) and RelWithDebInfo (optimized, with symbols; `windows-relwithdebinfo`). The battle view uses RelWithDebInfo.
+    * The editor and `godot --path` load the template_debug library `bin/windows/debug/simbridge.dll`. Two configs write it: Debug (unoptimized) and RelWithDebInfo (optimized, with symbols; `windows-relwithdebinfo`). The battle view uses RelWithDebInfo. After a Debug build, delete the DLL before building RelWithDebInfo: MSBuild sees the newer Debug DLL as up to date and doesn't relink (a Debug DLL imports `MSVCP140D`/`VCRUNTIME140D`; its sim step is ~40× slower).
     * Release writes the template_release library `bin/windows/release/`, for exports.
     * The root CMakeLists strips godot-cpp 4.3's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio.
     * It also defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` for godot-cpp's RelWithDebInfo; godot-cpp itself defines them only in Debug.
@@ -225,7 +238,7 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 
       So throttling the text doesn't help; only having no visible CanvasItem does. The box-select `ColorRect` is still 2D, so a crash during a long drag is possible.
     * Minimal repro (no GDExtension): a 3D scene with 1,060 instanced skinned, animated characters plus a 2D `Label` updated every frame. It crashed in 2 of 15 runs with the same backtrace; boxes instead of characters crashed 0 of 9, and 0 of 3 with the Label hidden. The project and a draft upstream issue are in the session notes (`canvas_crash_repro/`, `godot-canvas-crash-issue-draft.md`); the issue isn't filed yet.
-  * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was built last. The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at 7.6 fps, sim step 3.9 ms. Godot itself loads it only in exported release builds.
+  * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was linked last (see above). The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at 7.6 fps, sim step 3.9 ms. Godot itself loads it only in exported release builds.
   * **TGI load time (Release):** mounting the archives, loading and resolving the TGI and compiling the Defs takes 0.7 s from a cold process (`simcli show-def`; load and resolve alone, 0.46–0.54 s). That's under the 5 s threshold, so there is no binary DefSet cache.
   * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
     * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms; M4 close-out).
@@ -236,7 +249,34 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
     * The Debug DLL also gives 7.5 fps, but its sim takes about 146 ms per tick, so the sim falls behind real time.
     * This laptop is far below the §7 target PC.
   * Loading the TGI data and the gen:7:1024 map (`SimBridge.start`) takes 3.0 s on the dev laptop with the optimized GDExtension, 29 s with the Debug one.
-  * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE, at about 10 fps with 70 units.
+  * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE. It ran the battle view at about 8 fps with 70 units before the graphics presets; see **Rendering performance** below.
+
+**Rendering performance (dev laptop: i5-2520M, Intel HD 3000 through ANGLE, GL Compatibility, 1280×720, V-Sync off).**
+
+`godot --path godot -- --profile=FRAMES [--quality=Q] [--regiments=N]` times wall-clock frames after a 90-frame warm-up and splits them into our script work (sim step, snapshot, view sync, selection, overlays, HUD), Godot's process and render CPU time, and draw calls and primitives. Switches remove one cost at a time: `--no-anim`, `--hide-units`, `--no-shadows`, `--plain-terrain`. The GPU timer reads 0 on ANGLE, so GPU cost shows up as the CPU waiting, mostly inside the instance-buffer upload ("view sync").
+
+*Before* (per-unit nodes, i.e. today's High), 71-unit demo on Golden Fields:
+
+| Run | Frame | fps | Render CPU | Draw calls | Primitives |
+|---|---|---|---|---|---|
+| Baseline | 120.9 ms | 8.3 | 111 ms | 790 | 230k |
+| No AnimationPlayers | 56.0 ms | 17.9 | 48 ms | 789 | 230k |
+| Units hidden | 50.5 ms | 19.8 | 1.6 ms | 8 | 164k |
+| Shadows off | 77.3 ms | 12.9 | 63 ms | 230 | 52k |
+| Flat terrain material | 110.6 ms | 9.0 | 100 ms | 790 | 230k |
+
+Where the time went: sim + GDScript about 2 ms (sim step 0.16, snapshot 0.12, view sync 1.5); skeletal animation about 45–50 ms of CPU (AnimationPlayers and skeletons, even with the units hidden); unit draw calls about 60 ms (11 mesh parts per unit, and shadows draw them all again); the terrain shader about 10 ms.
+
+*After:*
+
+| Scene | Low | Medium | High |
+|---|---|---|---|
+| 71-unit demo, Golden Fields | **13.2 ms, 75.6 fps** (35 draws) | 38.9 ms, 25.7 fps | 120.2 ms, 8.3 fps |
+| 499 units (`--regiments=75`), Golden Fields | **24.3 ms, 41.2 fps** (p95 25.4 ms, 41 draws, 243k primitives) | 59.5 ms, 16.8 fps | 436 ms, 2.3 fps (4,755 draws) |
+| 1,060 units (`--regiments=160`), gen:7:1024 | 46.3 ms, 21.6 fps (p95 47.9 ms, 974k primitives; sim 1.5 ms a frame) | 87.7 ms, 11.4 fps | not measured |
+
+500 units on Low, step by step: MultiMesh + VAT with two RGBA32F texels per vertex 43.7 ms → position and normal in one texel, animation LOD and vertex lighting 34.3 ms → rotating the instance buffers 24.3 ms. With the units hidden the frame is 11.7 ms (terrain, HUD, sim), so the 500 units cost about 12 ms. The sim takes 0.4–0.7 ms per frame (about 4 ms per tick).
+
 
 ### 4.5 Controllers
 * `LocalPlayerController`: input → Commands (hotkeys from `Localization/Hotkeys/*.txt`).
@@ -291,7 +331,7 @@ Remake/                         ← this repo (move it out of the game folder wh
 | Worst case | 8 kingdoms × 20 regiments × up to 8 units ≈ **1,300 units** plus about 300 buildings and projectiles |
 | Sim tick (10 Hz) | ≤ **15 ms** at the 99th percentile on one core (≈15% of the tick period). M4: 10.7 ms p99 with 160 regiments on a 1024² map (PATHFINDING §10) |
 | Pathfinding | ≤ 3 ms per tick budgeted, the rest amortized |
-| Render | 60 fps at 1080p. Use MultiMesh instancing for infantry where possible, and LOD on distant units. |
+| Render | 60 fps at 1080p. Units are MultiMesh-instanced per type with baked vertex animation on Low and Medium (§4.4); the dev laptop runs 500 units at 41 fps on Low at 720p. |
 | Memory | < 2 GB |
 
 ---

@@ -24,6 +24,7 @@ var heights := PackedFloat32Array()  # (tiles + 1)^2 vertex heights, row-major
 var hw := 0                     # vertices per row
 var mesh_instance: MeshInstance3D
 var info := ""
+var _low_shader: Shader
 
 
 func build(map: Dictionary, table: Dictionary, loader: CacheLoader) -> void:
@@ -38,6 +39,20 @@ func build(map: Dictionary, table: Dictionary, loader: CacheLoader) -> void:
 	mesh_instance.material_override = _build_material(map, table, loader)
 	add_child(mesh_instance)
 	_build_water(map)
+
+
+## Low quality: one texture sample per pixel from the tile's own layer, no blending across tile
+## borders, lit per vertex (terrain.gdshader built with LOW defined). Off: the blended four-layer
+## shader lit per pixel.
+func set_low_quality(low: bool) -> void:
+	var mat := mesh_instance.material_override as ShaderMaterial
+	if mat == null:
+		return
+	if low and _low_shader == null:
+		var base: Shader = load("res://scripts/battle/terrain.gdshader")
+		_low_shader = Shader.new()
+		_low_shader.code = base.code.replace("shader_type spatial;", "shader_type spatial;\nrender_mode vertex_lighting;\n#define LOW")
+	mat.shader = _low_shader if low else load("res://scripts/battle/terrain.gdshader")
 
 
 func height_at(x: float, y: float) -> float:

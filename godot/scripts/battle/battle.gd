@@ -10,6 +10,7 @@ extends Node3D
 ##   B: drop a debug blocker at the cursor.  Space: pause.  + / -: sim speed.
 ##   Camera: arrows or screen edges pan, wheel zooms, middle drag or PgUp/PgDn rotates, Home resets.
 ##   F1 cost grid (selected regiment's class), F2 paths, F3 slot targets and anchors, F4 HUD.
+##   F6: graphics quality Low / Medium / High (saved to user://settings.cfg).
 ##
 ## Command line (after `--`): --map=PATH.json | --gen=SEED:SIZE, --seed=N, --cache=DIR,
 ##   --screenshot=PATH (renders after --frames=N frames and quits), --demo (orders a move at start),
@@ -18,7 +19,8 @@ extends Node3D
 ##   --regiments=N (N mixed regiments, half per side, crossing the map in groups of six),
 ##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits),
 ##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone),
-##   --no-hud (hide the HUD label),
+##   --no-hud (hide the HUD label), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
+##   --profile=FRAMES (frame time split by cost; with --no-anim, --hide-units, --no-shadows, --plain-terrain),
 ##   --hud2d (draw the HUD as a 2D Label instead of a Label3D on the camera; crashes Godot 4.7.2, ARCHITECTURE §4.4).
 
 const TICK := 0.1
@@ -30,11 +32,19 @@ const CLASS_NAMES := ["foot", "wheeled", "tracked", "naval", "amphibious", "air"
 const DEMO_REGIMENTS := ["regiment_per_infantry", "regiment_usa_infantry", "regiment_ger_tank_medium",
 	"regiment_gbr_tank_heavy", "regiment_usa_halftrack", "regiment_gbr_infantry_at", "regiment_per_infantry"]
 const ENEMY_REGIMENTS := ["regiment_ger_infantry", "regiment_ger_tank_medium", "regiment_ger_infantry"]
+## Graphics presets (ARCHITECTURE §4.4). Low and Medium draw units as one MultiMesh per unit type
+## with baked vertex animation (UnitBatches); High keeps a node tree and AnimationPlayer per unit
+## (UnitViews). Low also turns shadows off and uses the one-sample terrain shader.
+const QUALITIES := ["low", "medium", "high"]
+const SETTINGS_PATH := "user://settings.cfg"
 
 var bridge := SimBridge.new()
 var loader: CacheLoader
 var terrain: BattleTerrain
-var units: UnitViews
+var units                    # UnitBatches (Low, Medium) or UnitViews (High)
+var models: UnitModels
+var quality := ""
+var sun: DirectionalLight3D
 var cam: RtsCamera
 var hud: Label
 var hud3d: Label3D           # the HUD text, unless --hud2d: then `hud` shows it
@@ -96,6 +106,8 @@ func _ready() -> void:
 		_spawn_demo(args.has("demo"))
 	snap = bridge.snapshot()
 	loading_layer.queue_free()
+	if args.has("profile"):
+		_profile_setup()
 	if args.has("selftest"):
 		_selftest()
 
@@ -112,10 +124,9 @@ func _build_scene(map: Dictionary) -> void:
 	e.tonemap_white = 1.6
 	env.environment = e
 	add_child(env)
-	var sun := DirectionalLight3D.new()
+	sun = DirectionalLight3D.new()
 	sun.rotation = Vector3(deg_to_rad(-55), deg_to_rad(35), 0)
 	sun.light_energy = 0.75
-	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 250.0
 	add_child(sun)
 
@@ -124,11 +135,13 @@ func _build_scene(map: Dictionary) -> void:
 	add_child(terrain)
 	terrain.build(map, bridge.terrain_table(map.biome), loader)
 	print(terrain.info)
+	if _args().has("plain-terrain"):  # profiling: a flat material instead of the layer shader
+		var plain := StandardMaterial3D.new()
+		plain.albedo_color = Color(0.45, 0.55, 0.3)
+		terrain.mesh_instance.material_override = plain
 
-	units = UnitViews.new()
-	units.name = "Units"
-	add_child(units)
-	units.setup(loader, bridge, terrain)
+	models = UnitModels.new(loader, bridge)
+	_apply_quality(_initial_quality())
 
 	overlay_root = Node3D.new()
 	overlay_root.name = "Overlays"
@@ -280,6 +293,66 @@ func _spawn_many(n: int) -> void:
 
 var _measure := {"frames": 0, "frame_ms": [], "step_ms": [], "steps": 0}
 
+# ---------------------------------------------------------------- profiling (--profile=FRAMES)
+# Wall-clock frame time (Godot clamps `delta`, so delta-based fps can't go below ~7.5) split into
+# our script work and Godot's own process and render times. Experiment switches remove one cost
+# at a time: --no-anim, --hide-units, --no-shadows, --plain-terrain.
+
+var _profiling := false
+var _prof := {"n": 0, "last_us": 0, "sum": [], "frame": [], "process": 0.0, "render_cpu": 0.0, "render_gpu": 0.0,
+	"draws": 0.0, "objects": 0.0, "prims": 0.0}
+const PROF_NAMES := ["sim step", "snapshot", "view sync", "selection", "overlays", "hud", "our _process"]
+
+
+func _profile_setup() -> void:
+	_profiling = true
+	# Without V-Sync: frame times are not rounded up to the display refresh.
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
+	var sums := []
+	sums.resize(PROF_NAMES.size())
+	sums.fill(0)
+	_prof.sum = sums
+
+
+func _profile_frame(parts: Array) -> void:
+	var now := Time.get_ticks_usec()
+	var last: int = _prof.last_us
+	_prof.last_us = now
+	_measure.frames += 1
+	if _measure.frames <= 90 or last == 0:  # warm-up: shaders, first paths, animation start
+		return
+	(_prof.frame as Array).append((now - last) / 1000.0)
+	for k in parts.size():
+		_prof.sum[k] += parts[k]
+	_prof.n += 1
+	var vp := get_viewport().get_viewport_rid()
+	_prof.process += Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	_prof.render_cpu += RenderingServer.viewport_get_measured_render_time_cpu(vp)
+	_prof.render_gpu += RenderingServer.viewport_get_measured_render_time_gpu(vp)
+	_prof.draws += Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
+	_prof.objects += Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)
+	_prof.prims += Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+	if _prof.n >= int(_args().profile):
+		var n: float = _prof.n
+		var f: Array = _prof.frame
+		var total := 0.0
+		for x in f:
+			total += x
+		f.sort()
+		var parts_txt: Array[String] = []
+		for k in PROF_NAMES.size():
+			parts_txt.append("%s %.2f" % [PROF_NAMES[k], _prof.sum[k] / n / 1000.0])
+		var flags: Array[String] = []
+		for key in ["no-anim", "hide-units", "no-shadows", "plain-terrain", "quality"]:
+			if _args().has(key):
+				flags.append(key if key != "quality" else "quality=" + str(_args().quality))
+		print("PROFILE [%s] %d units, %d frames: frame %.1f ms = %.1f fps (p50 %.1f, p95 %.1f) | %s | godot process %.2f | render cpu %.2f gpu %.2f | draws %.0f objects %.0f prims %.0f" % [
+			",".join(flags) if not flags.is_empty() else "baseline", units.stats.units, f.size(), total / f.size(),
+			1000.0 / (total / f.size()), f[f.size() / 2], f[int(f.size() * 0.95)], ", ".join(parts_txt),
+			_prof.process / n, _prof.render_cpu / n, _prof.render_gpu / n, _prof.draws / n, _prof.objects / n, _prof.prims / n])
+		get_tree().quit()
+
 
 func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
 	var want := int(_args().measure)
@@ -312,8 +385,10 @@ func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
 func _process(delta: float) -> void:
 	if snap.is_empty():
 		return
+	var t_frame := Time.get_ticks_usec()
 	var steps := 0
 	var step_us := 0
+	var snap_us := 0
 	if not paused:
 		accum += delta * speed
 		while accum >= TICK and steps < 8:
@@ -323,18 +398,27 @@ func _process(delta: float) -> void:
 			accum -= TICK
 			steps += 1
 		if steps > 0:
+			var t1 := Time.get_ticks_usec()
 			snap = bridge.snapshot()
 			_learn_regiments()
 			_drain_events()
+			snap_us = Time.get_ticks_usec() - t1
 		if steps == 8:
 			accum = 0.0
 	var alpha := clampf(accum / TICK, 0.0, 1.0) if not paused else 1.0
+	var t2 := Time.get_ticks_usec()
 	units.sync(snap, alpha)
+	var t3 := Time.get_ticks_usec()
 	units.set_selected(selected)
+	var t4 := Time.get_ticks_usec()
 	_update_overlays()
+	var t5 := Time.get_ticks_usec()
 	_update_hud()
+	var t6 := Time.get_ticks_usec()
 	_frames += 1
 	var args := _args()
+	if _profiling:
+		_profile_frame([step_us, snap_us, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t6 - t_frame])
 	if args.has("measure"):
 		_measure_frame(delta, step_us / 1000.0, steps)
 	if args.has("screenshot") and not args.has("selftest") and _frames == int(args.get("frames", "120")):
@@ -440,6 +524,13 @@ func _key(k: InputEventKey) -> void:
 			overlay.slots = not overlay.slots
 		KEY_F4:
 			overlay.hud = not overlay.hud
+		KEY_F6:
+			_apply_quality(QUALITIES[(QUALITIES.find(quality) + 1) % QUALITIES.size()])
+			if not _args().has("selftest"):
+				var cfg := ConfigFile.new()
+				cfg.load(SETTINGS_PATH)
+				cfg.set_value("graphics", "quality", quality)
+				cfg.save(SETTINGS_PATH)
 		_:
 			if k.keycode >= KEY_1 and k.keycode <= KEY_9:
 				var n := k.keycode - KEY_0
@@ -681,8 +772,9 @@ func _update_hud() -> void:
 		return
 	_hud_next_ms = now + 250
 	var lines_out: Array[String] = []
-	lines_out.append("tick %d  %s  x%s  %d fps  %d units%s" % [snap.get("tick", 0), "PAUSED" if paused else "", str(speed),
-		Engine.get_frames_per_second(), units.stats.units, "  (%d placeholders)" % units.stats.placeholders if units.stats.placeholders > 0 else ""])
+	lines_out.append("tick %d  %s  x%s  %d fps  %d units%s  quality %s" % [snap.get("tick", 0), "PAUSED" if paused else "",
+		str(speed), Engine.get_frames_per_second(), units.stats.units,
+		"  (%d placeholders)" % units.stats.placeholders if units.stats.placeholders > 0 else "", quality.capitalize()])
 	var shown := 0
 	for bits in _selected_ids():
 		if shown >= 6:
@@ -698,7 +790,7 @@ func _update_hud() -> void:
 		shown += 1
 	for e in events_log:
 		lines_out.append("  " + e)
-	lines_out.append("F1 cost  F2 paths  F3 slots  F4 HUD   Q/W/E formation  V division  S stop  Alt+RMB run  B blocker")
+	lines_out.append("F1 cost  F2 paths  F3 slots  F4 HUD  F6 quality   Q/W/E formation  V division  S stop  Alt+RMB run  B blocker")
 	var text := "\n".join(lines_out)
 	if hud3d != null:
 		_place_hud3d()
@@ -734,6 +826,57 @@ func _place_hud3d() -> void:
 	var px := 2.0 * half_h / size.y
 	hud3d.pixel_size = px
 	hud3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, half_h - 8.0 * px, -1.0)
+
+
+# ---------------------------------------------------------------- graphics quality
+
+func _initial_quality() -> String:
+	var q := str(_args().get("quality", ""))
+	if q == "":
+		var cfg := ConfigFile.new()
+		if cfg.load(SETTINGS_PATH) == OK:
+			q = str(cfg.get_value("graphics", "quality", ""))
+	if q in QUALITIES:
+		return q
+	# Godot fell back to GL Compatibility: no Vulkan / Direct3D 12, so an old or weak GPU.
+	return "low" if RenderingServer.get_current_rendering_method() == "gl_compatibility" else "medium"
+
+
+## Shadows, terrain shader and unit renderer for `q`; rebuilds the units when the quality changes.
+func _apply_quality(q: String) -> void:
+	var args := _args()
+	var was := quality
+	quality = q
+	sun.shadow_enabled = q != "low" and not args.has("no-shadows")
+	# Medium: one orthogonal shadow map over a shorter range, and only units cast (the terrain's
+	# shadow pass is most of the cost, and hills rarely shade much).
+	var high := q == "high"
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS if high \
+		else DirectionalLight3D.SHADOW_ORTHOGONAL
+	sun.directional_shadow_max_distance = 250.0 if high else 120.0
+	terrain.mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if high \
+		else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if not args.has("plain-terrain"):
+		terrain.set_low_quality(q == "low")
+	var want_batches := not high
+	if units != null and q == was:
+		return
+	if units != null:
+		remove_child(units)
+		units.queue_free()
+	units = UnitBatches.new() if want_batches else UnitViews.new()
+	units.name = "Units"
+	units.animate = not args.has("no-anim")
+	if want_batches:
+		units.vertex_lighting = q == "low"
+		units.anim_lod_distance = 60.0 if q == "low" else 150.0
+	add_child(units)
+	if want_batches:
+		units.setup(models, bridge, terrain)
+	else:
+		units.setup(models, terrain)
+	units.visible = not args.has("hide-units")
+	units.set_selected(selected)
 
 
 # ---------------------------------------------------------------- setup helpers
@@ -901,8 +1044,23 @@ func _selftest() -> void:
 	check.call("F3 shows slot targets", slot_marks.multimesh.instance_count > 0)
 	check.call("F2 draws the path", (lines.mesh as ImmediateMesh).get_surface_count() > 0)
 	# Interpolation: views sit between the previous and current tick.
-	var v: Dictionary = units.views.values()[0]
-	check.call("unit views exist for every unit", units.views.size() == units.stats.units and units.views.size() > 0)
+	var sim_units := 0
+	for k in (snap.kind as PackedByteArray):
+		if k == 0:
+			sim_units += 1
+	check.call("every unit is drawn (%d of %d, quality %s)" % [units.stats.units, sim_units, quality],
+		units.stats.units == sim_units and sim_units > 0)
+	# F6 cycles the graphics quality; every preset draws every unit.
+	var start_quality := quality
+	var seen: Array[String] = []
+	for i in QUALITIES.size():
+		await key.call(KEY_F6)
+		await settle.call(1)
+		await get_tree().process_frame
+		if units.stats.units == sim_units:
+			seen.append(quality)
+	check.call("F6 cycles quality, all units drawn (%s)" % ", ".join(seen),
+		seen.size() == QUALITIES.size() and quality == start_quality)
 	var shot := str(_args().get("screenshot", ""))
 	if shot != "":
 		await RenderingServer.frame_post_draw
@@ -913,4 +1071,4 @@ func _selftest() -> void:
 		if r.begins_with("FAIL"):
 			fails += 1
 	print("SELFTEST %s: %d checks, %d failed" % ["PASSED" if fails == 0 else "FAILED", results.size(), fails])
-	(v.node as Node3D).get_tree().quit(1 if fails > 0 else 0)
+	get_tree().quit(1 if fails > 0 else 0)

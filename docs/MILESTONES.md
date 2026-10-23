@@ -57,7 +57,7 @@ Carried over from M4:
 * TGI load time: 0.7 s in Release, so no DefSet cache is needed;
 * lazy path refinement;
 * real-map roads (objects, M10);
-* fps on the dev laptop's GPU (rendering, not the sim; the target PC isn't tested yet).
+* fps on the dev laptop's GPU: **done**. Low/Medium/High graphics presets; Low and Medium draw units as one MultiMesh per type with baked vertex animation. 500 units at 41 fps on Low at 1280×720 (was 8 fps with 70 units; ARCHITECTURE §4.4). The target PC isn't tested yet.
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.
