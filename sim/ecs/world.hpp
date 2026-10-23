@@ -86,9 +86,11 @@ struct Regiment {
     }
 };
 
-// Movement order state of an anchor: a regiment, or a division's Group entity.
+// Movement order state of an anchor: a regiment, or a division's Group entity. Engaged: the move
+// is on hold while the regiment fights (combat auto-engage, GAME_DESIGN §6.4); goal and facing are
+// kept, and the order resumes with a fresh path.
 struct Order {
-    enum class State : std::uint8_t { Idle = 0, WaitPath = 1, Moving = 2, Wheeling = 3, Arriving = 4, Following = 5 };
+    enum class State : std::uint8_t { Idle = 0, WaitPath = 1, Moving = 2, Wheeling = 3, Arriving = 4, Following = 5, Engaged = 6 };
     State state = State::Idle;
     bool needPath = false;      // the Orders stage requests a path next tick
     bool hasFacing = false;     // explicit facing on arrival
@@ -129,6 +131,66 @@ struct Group {
     }
 };
 
+// Combat state of anything that can fight or be shot: units and buildings (M5). Per weapon
+// (the def's WeaponDef order): its target and the ticks until it may fire; per turret: its yaw
+// relative to the body and the ticks it has had nothing to aim at.
+struct Combat {
+    std::uint8_t player = 0;
+    std::vector<EntityId> targets;
+    std::vector<std::uint16_t> cooldown;
+    std::vector<Angle> turretYaw;
+    std::vector<std::uint16_t> turretIdle;
+    EntityId faceTarget;          // a local gun's target: Movement turns the body to it
+    friend bool operator==(const Combat& a, const Combat& b) noexcept {
+        return a.player == b.player && a.targets == b.targets && a.cooldown == b.cooldown && a.turretYaw == b.turretYaw &&
+               a.turretIdle == b.turretIdle && a.faceTarget == b.faceTarget;
+    }
+};
+
+// A regiment's engagement state machine (GAME_DESIGN §6.6) and its attack orders.
+struct Engagement {
+    enum class State : std::uint8_t { Idle = 0, Engaging = 1, Stalemate = 2, Reform = 3, Regroup = 4, Retreating = 5, Routing = 6 };
+    enum class Mode : std::uint8_t { None = 0, Attack = 1, AttackMove = 2 };
+    State state = State::Idle;
+    Mode mode = Mode::None;
+    bool suspended = false;        // it put a move on hold: resume it (resume* below, or the division's)
+    bool closing = false;          // it is moving toward the enemy because no unit had a target
+    bool entrenched = false;       // infantry_entrench / vehicle_entrench apply (timer: M5 part 2)
+    std::uint16_t sampleTicks = 1; // ticks to the next ZOC sample (PrimarySampleTime)
+    std::uint16_t noTarget = 0;    // ticks in the fight with no unit having a target
+    std::uint32_t stateTicks = 0;
+    std::uint32_t lastCombat = 0;  // tick + 1 of the last hit it dealt or took (0: never)
+    std::uint32_t graceUntil = 0;  // no auto-engage before this tick (after a Move / Run)
+    EntityId target;               // Attack: regiment, unit or building
+    FVec2 goal;                    // AttackMove: destination
+    FVec2 resumeGoal;              // the regiment's own move that was put on hold
+    bool resumeHasFacing = false;
+    Angle resumeFacing;
+    friend bool operator==(const Engagement& a, const Engagement& b) noexcept {
+        return a.state == b.state && a.mode == b.mode && a.suspended == b.suspended && a.closing == b.closing &&
+               a.entrenched == b.entrenched && a.sampleTicks == b.sampleTicks && a.noTarget == b.noTarget &&
+               a.stateTicks == b.stateTicks && a.lastCombat == b.lastCombat && a.graceUntil == b.graceUntil &&
+               a.target == b.target && a.goal == b.goal && a.resumeGoal == b.resumeGoal &&
+               a.resumeHasFacing == b.resumeHasFacing && a.resumeFacing == b.resumeFacing;
+    }
+};
+
+// A shot in flight. It homes on its target and hits after `ticksLeft` ticks (at `aim` if the
+// target is gone); damage uses the shooter's attack multiplier at the moment it fired.
+struct Projectile {
+    EntityId shooter;
+    EntityId target;
+    FVec2 aim;
+    std::uint32_t ability = 0;     // DefSet::abilities index
+    std::uint8_t player = 0;
+    std::uint16_t ticksLeft = 1;
+    Fixed attackMultiplier;
+    friend bool operator==(const Projectile& a, const Projectile& b) noexcept {
+        return a.shooter == b.shooter && a.target == b.target && a.aim == b.aim && a.ability == b.ability && a.player == b.player &&
+               a.ticksLeft == b.ticksLeft && a.attackMultiplier == b.attackMultiplier;
+    }
+};
+
 struct World {
     EntityRegistry registry;
     Pool<Transform> transforms;
@@ -141,6 +203,9 @@ struct World {
     Pool<Order> orders;
     Pool<Mover> movers;
     Pool<Group> groups;
+    Pool<Combat> combats;
+    Pool<Engagement> engagements;
+    Pool<Projectile> projectiles;
 
     // Fixed pool order: serializer sections and component removal follow it.
     template <class F>
@@ -155,6 +220,9 @@ struct World {
         f(orders);
         f(movers);
         f(groups);
+        f(combats);
+        f(engagements);
+        f(projectiles);
     }
 
     // Runs the registry's deferred destruction and drops the dead entities' components.

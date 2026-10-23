@@ -31,6 +31,7 @@ std::vector<std::uint8_t> encodeReplay(const Replay& r) {
     w.u16(r.header.hashInterval);
     w.u32(static_cast<std::uint32_t>(r.header.players.size()));
     for (const auto& p : r.header.players) w.str(p);
+    w.str(r.header.tuning);
     w.tag("CMDS");
     w.u32(static_cast<std::uint32_t>(r.commands.size()));
     for (const Command& c : r.commands) {
@@ -75,6 +76,12 @@ bool decodeReplay(const std::vector<std::uint8_t>& bytes, Replay& out, std::stri
     rep.header.hashInterval = r.u16();
     const std::uint32_t np = r.count(4);
     for (std::uint32_t i = 0; i < np && r.ok; ++i) rep.header.players.push_back(r.str());
+    rep.header.tuning = r.str();
+    {
+        CombatTuning check;
+        std::string why;
+        if (!parseCombatTuning(check, rep.header.tuning, why)) return fail("bad combat tuning in header");
+    }
     if (!r.expectTag("CMDS")) return fail("missing CMDS");
     const std::uint32_t nc = r.count(10);
     for (std::uint32_t i = 0; i < nc && r.ok; ++i) {
@@ -101,7 +108,10 @@ bool decodeReplay(const std::vector<std::uint8_t>& bytes, Replay& out, std::stri
 
 RunResult runReplay(const Replay& replay, const DefSet* defs, const RunOptions& options) {
     RunResult res;
-    Sim sim({replay.header.matchSeed, defs, options.map});
+    CombatTuning tuning;
+    std::string tuningError;
+    parseCombatTuning(tuning, replay.header.tuning, tuningError);  // checked by decodeReplay
+    Sim sim({replay.header.matchSeed, defs, options.map, &tuning});
     CommandQueue queue;  // session side: delivers each tick's bundle, like the lockstep scheduler
     for (const Command& c : replay.commands) {
         if (!queue.schedule(c, 0)) ++res.rejectedSchedules;
@@ -229,10 +239,13 @@ bool resolveReplayMap(const ReplayHeader& header, const nav::MapDef* supplied, s
     }
     std::uint64_t seed = 0;
     std::uint32_t size = 0;
+    std::string terrain;
     if (supplied != nullptr) {
         out = *supplied;
     } else if (nav::parseGenSpec(header.mapSpec, seed, size)) {
         out = nav::generateTestMap(seed, size);
+    } else if (nav::parseArenaSpec(header.mapSpec, terrain, size)) {
+        out = nav::generateArenaMap(terrain, size);
     } else {
         error = "replay needs map '" + header.mapSpec + "' (pass it with --map)";
         return false;

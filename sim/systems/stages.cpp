@@ -26,8 +26,6 @@ void runPathfinding(Sim& sim) {
     }
 }
 void runVision(Sim&) {}
-void runEngagement(Sim&) {}
-void runAbilities(Sim&) {}
 void runMorale(Sim&) {}
 void runSupply(Sim&) {}
 void runCapture(Sim&) {}

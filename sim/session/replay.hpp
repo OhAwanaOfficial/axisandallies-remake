@@ -4,9 +4,10 @@
 //
 //   "CRPL" u16 formatVersion
 //   header: str simVersion, u16 protocolVersion, u64 dataHash, str mapSpec, u64 mapHash,
-//           u64 matchSeed, u32 tickCount, u16 hashInterval, u32 nPlayers, str player*
-//   (mapSpec: "" = no map, "gen:SEED:SIZE" = generated test map, else the map's name; the player
-//    supplies the map and mapHash proves it is the same one)
+//           u64 matchSeed, u32 tickCount, u16 hashInterval, u32 nPlayers, str player*, str tuning
+//   (mapSpec: "" = no map, "gen:SEED:SIZE" = generated test map, "arena:TERRAIN:SIZE" = duel
+//    arena, else the map's name; the player supplies the map and mapHash proves it is the same one.
+//    tuning: the CombatTuning fields that differ from the defaults, "name=value,...")
 //   "CMDS" u32 nCommands, (u32 tick, u16 seq, bytes encodedCommand)*  sorted by (tick, player, seq)
 //   "HASH" u32 n, (u32 tick, u64 hash)*      hash of the state after that tick completed
 //   u64 xxh3 of every preceding byte (integrity)
@@ -25,7 +26,7 @@
 
 namespace corps {
 
-constexpr std::uint16_t kReplayFormatVersion = 2;  // 2: mapSpec + mapHash (M4)
+constexpr std::uint16_t kReplayFormatVersion = 3;  // 2: mapSpec + mapHash (M4); 3: combat tuning (M5)
 constexpr std::uint16_t kProtocolVersion = 1;
 
 struct TickHash {
@@ -44,6 +45,7 @@ struct ReplayHeader {
     std::uint32_t tickCount = 0;
     std::uint16_t hashInterval = 10;
     std::vector<std::string> players;
+    std::string tuning;  // formatCombatTuning(); "" = the defaults
 };
 
 struct Replay {

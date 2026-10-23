@@ -11,6 +11,7 @@
 #include <memory>
 #include <vector>
 
+#include "combat/tuning.hpp"
 #include "core/command.hpp"
 #include "data/defs.hpp"
 #include "ecs/world.hpp"
@@ -24,6 +25,7 @@ struct NavWorld;
 namespace corps {
 
 struct MovementCache;
+class CombatRules;
 
 constexpr std::uint32_t kTicksPerSecond = 10;  // ARCHITECTURE §4.3 / NETCODE §2 (original: SVars 16)
 
@@ -48,17 +50,20 @@ const char* stageName(Stage s);
 
 struct SimEvent {
     // Arrived / Blocked: a regiment's (or division's) move order finished at, or short of, its goal.
-    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked };
+    // Fired: `entity` shot at `other` (M5). Died: unit or building `entity` was killed by `other`.
+    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died };
     Type type = Type::Spawned;
     EntityId entity;
     std::uint8_t player = 0;
     CommandType command = CommandType::Noop;
+    EntityId other;
 };
 
 struct SimConfig {
     std::uint64_t matchSeed = 0;
     const DefSet* defs = nullptr;  // shared, immutable; may be null for data-free tests
     const nav::MapDef* map = nullptr;  // shared, immutable; null = no nav (paths and blockers rejected)
+    const CombatTuning* tuning = nullptr;  // combat constants (null: the defaults); copied by the Sim
 };
 
 // Per-system RNG stream ids (Rng::derive(matchSeed, id)). Never renumber: replays depend on them.
@@ -94,6 +99,9 @@ public:
     std::uint32_t cellAt(FVec2 position) const;
     // Derived movement data (clearance); not state. Valid while a map is set.
     MovementCache& moveCache() noexcept { return *moveCache_; }
+    // Combat constants (config().tuning or the defaults) and lookups derived from defs + map.
+    const CombatTuning& tuning() const noexcept { return tuning_; }
+    const CombatRules& combatRules() const noexcept { return *combatRules_; }
 
     // Appends an output event (systems use it; the view drains events()).
     void emit(const SimEvent& e) { events_.push_back(e); }
@@ -112,6 +120,7 @@ private:
     void spawnRegiment(const Command& c, const SpawnRegimentPayload& p);
     void placeBlocker(const Command& c, const DebugPlaceBlockerPayload& p);
     void requestPath(const Command& c, const DebugRequestPathPayload& p);
+    void spawnBuilding(const Command& c, const DebugSpawnBuildingPayload& p);
     void cleanup();
 
     SimConfig config_;
@@ -121,6 +130,8 @@ private:
     std::vector<SimEvent> events_;
     std::unique_ptr<nav::NavWorld> nav_;
     std::unique_ptr<MovementCache> moveCache_;
+    CombatTuning tuning_;
+    std::unique_ptr<CombatRules> combatRules_;
 };
 
 }  // namespace corps

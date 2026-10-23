@@ -517,6 +517,11 @@ void moveUnits(Ctx& ctx, const std::vector<RegInfo>& infos) {
                 u.regimentMoving = movingState(o->state);
                 u.speedMult = formationSpeed(ctx.defs, *r);
                 u.restFacing = anchor->facing;
+                // A local gun's target: the body turns to it while the regiment holds (combat).
+                if (const Combat* cb = w.combats.get(u.id); cb != nullptr && !cb->faceTarget.isNull() && !u.regimentMoving) {
+                    const Transform* tt = w.registry.alive(cb->faceTarget) ? w.transforms.get(cb->faceTarget) : nullptr;
+                    if (tt != nullptr && !(tt->position - t->position).isZero()) u.restFacing = (tt->position - t->position).angle();
+                }
                 const auto [lo, hi] = membersOf(ctx, u.org);
                 for (std::size_t k = lo; k < hi; ++k) {
                     if (ctx.units[k].unit == u.id) {
@@ -831,7 +836,9 @@ void runMovement(Sim& sim) {
         const Group& grp = w.groups.data()[i];
         Order* go = w.orders.get(gid);
         Transform* ga = w.transforms.get(gid);
-        if (!grp.division || grp.members.empty() || go == nullptr || ga == nullptr || go->state == Order::State::Idle) continue;
+        if (!grp.division || grp.members.empty() || go == nullptr || ga == nullptr || go->state == Order::State::Idle ||
+            go->state == Order::State::Engaged)
+            continue;
         ++go->stateTicks;
         std::uint8_t cls = 0;
         bool any = false;
@@ -882,7 +889,7 @@ void runMovement(Sim& sim) {
         Order* o = w.orders.get(id);
         Transform* a = w.transforms.get(id);
         if (o == nullptr || a == nullptr) continue;
-        if (o->state == Order::State::Idle) {  // a halted regiment still widens out of a squeeze
+        if (o->state == Order::State::Idle || o->state == Order::State::Engaged) {  // halted (or fighting): still widens out of a squeeze
             if (r.compression != 0 && info.hi != info.lo) {
                 updateCompression(ctx, r, info, *a, *o);
                 if (r.compression == 0) computeOffsets(ctx, r, info);

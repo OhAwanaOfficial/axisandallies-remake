@@ -145,6 +145,46 @@ MapDef generateTestMap(std::uint64_t seed, std::uint32_t size) {
     return m;
 }
 
+MapDef generateArenaMap(std::string_view terrain, std::uint32_t size) {
+    size = std::clamp<std::uint32_t>(size, 32, 1024);
+    MapDef m;
+    const std::string name = terrain.empty() ? std::string("open") : std::string(terrain);
+    m.name = "arena:" + name + ":" + std::to_string(size);
+    m.width = m.height = size;
+    m.terrainNames = {name, "gen_border"};
+    const bool wooded = name.find("forest") != std::string::npos || name.find("jungle") != std::string::npos;
+    const std::size_t n = m.cellCount();
+    m.kind.assign(n, wooded ? TerrainKind::Forest : TerrainKind::Ground);
+    m.terrainId.assign(n, 0);
+    const auto S = static_cast<std::size_t>(size);
+    for (std::size_t i = 0; i < S; ++i) {  // blocked border ring
+        for (const std::size_t idx : {i, (S - 1) * S + i, i * S, i * S + S - 1}) {
+            m.kind[idx] = TerrainKind::Border;
+            m.terrainId[idx] = 1;
+        }
+    }
+    m.finalize();
+    return m;
+}
+
+bool parseArenaSpec(std::string_view spec, std::string& terrain, std::uint32_t& size) {
+    if (spec.substr(0, 6) != "arena:") return false;
+    spec.remove_prefix(6);
+    const std::size_t colon = spec.rfind(':');
+    if (colon == std::string_view::npos || colon == 0) return false;
+    const std::string_view digits = spec.substr(colon + 1);
+    if (digits.empty() || digits.size() > 4) return false;
+    std::uint32_t v = 0;
+    for (const char ch : digits) {
+        if (ch < '0' || ch > '9') return false;
+        v = v * 10 + static_cast<std::uint32_t>(ch - '0');
+    }
+    if (v > 1024) return false;
+    terrain = std::string(spec.substr(0, colon));
+    size = v;
+    return true;
+}
+
 bool parseGenSpec(std::string_view spec, std::uint64_t& seed, std::uint32_t& size) {
     if (spec.substr(0, 4) != "gen:") return false;
     spec.remove_prefix(4);

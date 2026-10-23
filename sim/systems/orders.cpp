@@ -5,6 +5,7 @@
 #include "core/ascii.hpp"
 #include "core/sim.hpp"
 #include "nav/nav_world.hpp"
+#include "systems/combat.hpp"
 #include "systems/movement.hpp"
 #include "systems/stages.hpp"
 
@@ -172,6 +173,7 @@ void applyMoveGroup(Sim& sim, const Command& c, const MoveGroupPayload& p, bool 
     World& w = sim.world();
     const FVec2 goal = clampToMap(sim, p.goal);
     for (const EntityId id : regs) {
+        clearEngagement(sim, id);
         Regiment& r = *w.regiments.get(id);
         if (run) {
             startRun(sim, r);
@@ -219,6 +221,7 @@ void applyStop(Sim& sim, const Command& c, const RegimentListPayload& p) {
     if (regs.empty()) return sim.reject(c);
     World& w = sim.world();
     for (const EntityId id : regs) {
+        clearEngagement(sim, id);
         Regiment& r = *w.regiments.get(id);
         const Group* g = r.group.isNull() ? nullptr : w.groups.get(r.group);
         if (g != nullptr && g->division) {
@@ -266,6 +269,110 @@ void applySetGroupBehaviour(Sim& sim, const Command& c, const SetGroupBehaviourP
     }
     computeSlotOrder(sim, g);
     g.groupFormation = groupFormationFor(sim, g);
+}
+
+void applyAttack(Sim& sim, const Command& c, const AttackPayload& p) {
+    if (sim.nav() == nullptr) return sim.reject(c);
+    World& w = sim.world();
+    // The target: a live regiment, unit or building of another player.
+    std::uint8_t owner = c.player;
+    if (w.registry.alive(p.target)) {
+        if (const Regiment* tr = w.regiments.get(p.target)) {
+            owner = tr->player;
+        } else if (const Combat* tc = w.combats.get(p.target); tc != nullptr && w.transforms.has(p.target)) {
+            owner = tc->player;
+        }
+    }
+    const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
+    if (owner == c.player || regs.empty()) return sim.reject(c);
+    for (const EntityId id : regs) {
+        // It stops what it was doing; the Engagement stage chases the target or engages at once.
+        clearEngagement(sim, id);
+        leaveGroup(sim, id);
+        cancelRun(*w.regiments.get(id));
+        setIdle(*w.orders.get(id));
+        Engagement* e = w.engagements.get(id);
+        if (e == nullptr) continue;
+        e->mode = Engagement::Mode::Attack;
+        e->target = p.target;
+        e->graceUntil = 0;
+    }
+}
+
+void applyAttackMove(Sim& sim, const Command& c, const MoveGroupPayload& p) {
+    if (sim.nav() == nullptr) return sim.reject(c);
+    const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
+    if (regs.empty()) return sim.reject(c);
+    applyMoveGroup(sim, c, p, false);
+    for (const EntityId id : regs) {
+        Engagement* e = sim.world().engagements.get(id);
+        if (e == nullptr) continue;
+        e->mode = Engagement::Mode::AttackMove;
+        e->goal = clampToMap(sim, p.goal);
+        e->graceUntil = 0;
+    }
+}
+
+void applySetEntrenched(Sim& sim, const Command& c, const DebugSetEntrenchedPayload& p) {
+    const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
+    if (regs.empty()) return sim.reject(c);
+    for (const EntityId id : regs) {
+        if (Engagement* e = sim.world().engagements.get(id)) e->entrenched = p.entrenched;
+    }
+}
+
+EntityId orderOwner(const Sim& sim, EntityId regiment) {
+    const World& w = sim.world();
+    const Regiment* r = w.regiments.get(regiment);
+    if (r != nullptr && !r->group.isNull()) {
+        const Group* g = w.groups.get(r->group);
+        if (g != nullptr && g->division) return r->group;
+    }
+    return regiment;
+}
+
+bool holdOrder(Sim& sim, EntityId owner) {
+    Order* o = sim.world().orders.get(owner);
+    if (o == nullptr) return false;
+    switch (o->state) {
+    case Order::State::WaitPath:
+    case Order::State::Moving:
+    case Order::State::Wheeling:
+    case Order::State::Arriving:
+        o->state = Order::State::Engaged;
+        o->needPath = false;
+        o->stateTicks = 0;
+        o->window = 0;
+        o->progress = Fixed{};
+        o->expected = Fixed{};
+        return true;
+    default:
+        return false;
+    }
+}
+
+void resumeOrder(Sim& sim, EntityId owner) {
+    Order* o = sim.world().orders.get(owner);
+    if (o == nullptr || o->state != Order::State::Engaged) return;
+    startOrder(*o, o->goal, o->hasFacing, o->facing);
+}
+
+void restartOrder(Sim& sim, EntityId owner, FVec2 goal, bool hasFacing, Angle facing) {
+    if (Order* o = sim.world().orders.get(owner)) startOrder(*o, clampToMap(sim, goal), hasFacing, facing);
+}
+
+void stopOrder(Sim& sim, EntityId owner) {
+    if (Order* o = sim.world().orders.get(owner)) setIdle(*o);
+}
+
+void chaseOrder(Sim& sim, EntityId regiment, FVec2 goal) {
+    World& w = sim.world();
+    Regiment* r = w.regiments.get(regiment);
+    Order* o = w.orders.get(regiment);
+    if (r == nullptr || o == nullptr) return;
+    leaveGroup(sim, regiment);
+    cancelRun(*r);
+    startOrder(*o, clampToMap(sim, goal), false, Angle{});
 }
 
 void onEntityDestroyed(Sim& sim, EntityId id) {

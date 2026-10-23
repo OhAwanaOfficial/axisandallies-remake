@@ -26,13 +26,17 @@ enum class CommandType : std::uint8_t {
     Stop = 4,               // stop the regiments (and their division)
     SetFormation = 5,       // choose a layout formation by IDS (regiment_aggressive / _defensive / _column)
     SetGroupBehaviour = 6,  // group behaviour on (division) / off for the regiments' group
-    // 7..199: gameplay commands, assigned when their systems land.
+    Attack = 7,             // 1..6 regiments attack a regiment, unit or building: chase, then engage (GAME_DESIGN §6.5)
+    AttackMove = 8,         // MoveGroup that engages anything met on the way, whatever the formation
+    // 9..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
     DebugSetTransform = 202,
     DebugRngDraw = 203,
     DebugPlaceBlocker = 204,  // building stand-in: an entity whose footprint blocks the nav grid
     DebugRequestPath = 205,   // queue a path request from an entity's position to a goal
+    DebugSpawnBuilding = 206, // place a building by IDS (duels, tests): blocks its cells, defends itself
+    DebugSetEntrenched = 207, // mark regiments entrenched (the entrenchment timer arrives in M5 part 2)
 };
 
 struct NoPayload {
@@ -117,10 +121,34 @@ struct SetGroupBehaviourPayload {
     }
 };
 
+struct AttackPayload {
+    std::vector<EntityId> regiments;
+    EntityId target;  // a regiment, unit or building of another player
+    friend bool operator==(const AttackPayload& a, const AttackPayload& b) noexcept {
+        return a.regiments == b.regiments && a.target == b.target;
+    }
+};
+struct DebugSpawnBuildingPayload {
+    std::string buildingIds;
+    FVec2 position;
+    Angle facing;
+    friend bool operator==(const DebugSpawnBuildingPayload& a, const DebugSpawnBuildingPayload& b) noexcept {
+        return a.buildingIds == b.buildingIds && a.position == b.position && a.facing == b.facing;
+    }
+};
+struct DebugSetEntrenchedPayload {
+    std::vector<EntityId> regiments;
+    bool entrenched = false;
+    friend bool operator==(const DebugSetEntrenchedPayload& a, const DebugSetEntrenchedPayload& b) noexcept {
+        return a.regiments == b.regiments && a.entrenched == b.entrenched;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
                                     DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
                                     DebugRequestPathPayload, MoveGroupPayload, RegimentListPayload, SetFormationPayload,
-                                    SetGroupBehaviourPayload>;
+                                    SetGroupBehaviourPayload, AttackPayload, DebugSpawnBuildingPayload,
+                                    DebugSetEntrenchedPayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -153,6 +181,11 @@ Command makeSetFormation(std::uint32_t tick, std::uint8_t player, std::uint16_t 
                          std::string formationIds);
 Command makeSetGroupBehaviour(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
                               bool division);
+Command makeAttack(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, EntityId target);
+Command makeAttackMove(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal);
+Command makeDebugSpawnBuilding(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string ids, FVec2 pos, Angle facing);
+Command makeDebugSetEntrenched(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
+                               bool entrenched);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

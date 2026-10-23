@@ -10,6 +10,9 @@ add_library(sim STATIC
   systems/stages.cpp
   systems/orders.cpp
   systems/movement.cpp
+  systems/combat.cpp
+  combat/tuning.cpp
+  combat/rules.cpp
   session/hash.cpp
   session/state_io.cpp
   session/replay.cpp

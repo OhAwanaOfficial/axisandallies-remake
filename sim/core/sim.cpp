@@ -2,7 +2,9 @@
 
 #include <algorithm>
 
+#include "combat/rules.hpp"
 #include "nav/nav_world.hpp"
+#include "systems/combat.hpp"
 #include "systems/movement.hpp"
 #include "systems/orders.hpp"
 #include "systems/stages.hpp"
@@ -37,6 +39,9 @@ Sim::Sim(const SimConfig& config)
     : config_(config), rng_(Rng::derive(config.matchSeed, static_cast<std::uint64_t>(RngStream::Match))) {
     if (config_.map != nullptr) nav_ = std::make_unique<nav::NavWorld>(*config_.map);
     moveCache_ = std::make_unique<MovementCache>();
+    if (config_.tuning != nullptr) tuning_ = *config_.tuning;
+    config_.tuning = nullptr;  // the Sim keeps its own copy; tuning() is the one to read
+    combatRules_ = std::make_unique<CombatRules>(config_.defs, config_.map, tuning_);
     refreshClearance(*this);  // part of map load, not of the first tick
 }
 
@@ -155,6 +160,18 @@ void Sim::apply(const Command& c) {
     case CommandType::SetGroupBehaviour:
         applySetGroupBehaviour(*this, c, std::get<SetGroupBehaviourPayload>(c.payload));
         return;
+    case CommandType::Attack:
+        applyAttack(*this, c, std::get<AttackPayload>(c.payload));
+        return;
+    case CommandType::AttackMove:
+        applyAttackMove(*this, c, std::get<MoveGroupPayload>(c.payload));
+        return;
+    case CommandType::DebugSpawnBuilding:
+        spawnBuilding(c, std::get<DebugSpawnBuildingPayload>(c.payload));
+        return;
+    case CommandType::DebugSetEntrenched:
+        applySetEntrenched(*this, c, std::get<DebugSetEntrenchedPayload>(c.payload));
+        return;
     }
     reject();
 }
@@ -202,6 +219,7 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
             world_.health.set(e, {hp, hp});
         }
         world_.members.set(e, {org, static_cast<std::uint16_t>(element)});
+        attachCombat(*this, e, c.player);
         events_.push_back({SimEvent::Type::Spawned, e, c.player, c.type});
         return true;
     };
@@ -225,6 +243,35 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     idle.facing = p.facing;
     idle.goal = p.position;
     world_.orders.set(org, idle);
+    attachEngagement(*this, org);
+}
+
+// A building on its own (duels, tests; base building arrives in M6): it blocks the cells under
+// its blocking radius and defends itself with its DefenderComponent weapons.
+void Sim::spawnBuilding(const Command& c, const DebugSpawnBuildingPayload& p) {
+    const auto reject = [&] { events_.push_back({SimEvent::Type::CommandRejected, EntityId{}, c.player, c.type}); };
+    if (config_.defs == nullptr || !nav_) return reject();
+    const std::uint32_t bi = config_.defs->buildingIndex(p.buildingIds);
+    if (bi == kNoDef) return reject();
+    const BuildingDef& b = config_.defs->buildings[bi];
+    const nav::NavGrid& g = nav_->grid;
+    const Fixed r = max(b.blockingRadius, 0.5_fx);
+    const std::int64_t x0 = std::max<std::int64_t>((p.position.x - r).floorInt(), 0);
+    const std::int64_t y0 = std::max<std::int64_t>((p.position.y - r).floorInt(), 0);
+    const std::int64_t x1 = std::min<std::int64_t>((p.position.x + r).ceilInt() - 1, g.width() - 1);
+    const std::int64_t y1 = std::min<std::int64_t>((p.position.y + r).ceilInt() - 1, g.height() - 1);
+    if (x1 < x0 || y1 < y0) return reject();
+    const EntityId id = world_.registry.create();
+    if (id.isNull()) return reject();
+    world_.transforms.set(id, {p.position, p.facing});
+    world_.defRefs.set(id, {DefRef::Kind::Building, bi});
+    world_.health.set(id, {b.health, b.health});
+    const Footprint fp{static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(x1),
+                       static_cast<std::int32_t>(y1)};
+    world_.footprints.set(id, fp);
+    nav_->grid.stamp({fp.x0, fp.y0, fp.x1, fp.y1});
+    attachCombat(*this, id, c.player);
+    events_.push_back({SimEvent::Type::Spawned, id, c.player, c.type});
 }
 
 void Sim::placeBlocker(const Command& c, const DebugPlaceBlockerPayload& p) {

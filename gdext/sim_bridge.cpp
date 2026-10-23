@@ -89,6 +89,8 @@ const char* eventName(corps::SimEvent::Type t) {
     case corps::SimEvent::Type::CommandRejected: return "rejected";
     case corps::SimEvent::Type::Arrived: return "arrived";
     case corps::SimEvent::Type::Blocked: return "blocked";
+    case corps::SimEvent::Type::Fired: return "fired";
+    case corps::SimEvent::Type::Died: return "died";
     }
     return "?";
 }
@@ -406,6 +408,7 @@ void SimBridge::step() {
         d["entity"] = static_cast<int64_t>(e.entity.bits);
         d["player"] = static_cast<int64_t>(e.player);
         d["command"] = static_cast<int64_t>(e.command);
+        d["other"] = static_cast<int64_t>(e.other.bits);  // fired: the target; died: the killer
         d["tick"] = static_cast<int64_t>(sim->tick() - 1);
         events.push_back(d);
     }

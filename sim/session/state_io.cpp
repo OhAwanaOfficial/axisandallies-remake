@@ -148,6 +148,84 @@ void get(ByteReader& r, Group& g) {
     getIds(r, g.slotOrder);
 }
 
+void put(ByteWriter& w, const Combat& c) {
+    w.u8(c.player);
+    putIds(w, c.targets);
+    w.u32(static_cast<std::uint32_t>(c.cooldown.size()));
+    for (const std::uint16_t v : c.cooldown) w.u16(v);
+    w.u32(static_cast<std::uint32_t>(c.turretYaw.size()));
+    for (const Angle a : c.turretYaw) w.angle(a);
+    w.u32(static_cast<std::uint32_t>(c.turretIdle.size()));
+    for (const std::uint16_t v : c.turretIdle) w.u16(v);
+    w.entity(c.faceTarget);
+}
+void get(ByteReader& r, Combat& c) {
+    c.player = r.u8();
+    getIds(r, c.targets);
+    std::uint32_t n = r.count(2);
+    c.cooldown.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) c.cooldown.push_back(r.u16());
+    n = r.count(2);
+    c.turretYaw.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) c.turretYaw.push_back(r.angle());
+    n = r.count(2);
+    c.turretIdle.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) c.turretIdle.push_back(r.u16());
+    c.faceTarget = r.entity();
+}
+void put(ByteWriter& w, const Engagement& e) {
+    w.u8(static_cast<std::uint8_t>(e.state));
+    w.u8(static_cast<std::uint8_t>(e.mode));
+    w.boolean(e.suspended);
+    w.boolean(e.closing);
+    w.boolean(e.entrenched);
+    w.u16(e.sampleTicks);
+    w.u16(e.noTarget);
+    w.u32(e.stateTicks);
+    w.u32(e.lastCombat);
+    w.u32(e.graceUntil);
+    w.entity(e.target);
+    w.vec2(e.goal);
+    w.vec2(e.resumeGoal);
+    w.boolean(e.resumeHasFacing);
+    w.angle(e.resumeFacing);
+}
+void get(ByteReader& r, Engagement& e) {
+    e.state = static_cast<Engagement::State>(r.u8());
+    e.mode = static_cast<Engagement::Mode>(r.u8());
+    e.suspended = r.boolean();
+    e.closing = r.boolean();
+    e.entrenched = r.boolean();
+    e.sampleTicks = r.u16();
+    e.noTarget = r.u16();
+    e.stateTicks = r.u32();
+    e.lastCombat = r.u32();
+    e.graceUntil = r.u32();
+    e.target = r.entity();
+    e.goal = r.vec2();
+    e.resumeGoal = r.vec2();
+    e.resumeHasFacing = r.boolean();
+    e.resumeFacing = r.angle();
+}
+void put(ByteWriter& w, const Projectile& p) {
+    w.entity(p.shooter);
+    w.entity(p.target);
+    w.vec2(p.aim);
+    w.u32(p.ability);
+    w.u8(p.player);
+    w.u16(p.ticksLeft);
+    w.fixed(p.attackMultiplier);
+}
+void get(ByteReader& r, Projectile& p) {
+    p.shooter = r.entity();
+    p.target = r.entity();
+    p.aim = r.vec2();
+    p.ability = r.u32();
+    p.player = r.u8();
+    p.ticksLeft = r.u16();
+    p.attackMultiplier = r.fixed();
+}
+
 template <class T>
 void putPool(ByteWriter& w, const Pool<T>& pool) {
     w.u32(static_cast<std::uint32_t>(pool.size()));
@@ -173,7 +251,8 @@ bool getPool(ByteReader& r, Pool<T>& pool, const EntityRegistry& reg) {
     return r.ok;
 }
 
-constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH", "REGT", "ORDR", "MOVR", "GRUP"};
+constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH", "REGT", "ORDR", "MOVR", "GRUP",
+                                    "COMB", "ENGT", "PROJ"};
 
 std::uint64_t mapHashOf(const Sim& sim) {
     return sim.config().map != nullptr ? sim.config().map->mapHash : 0;
@@ -199,6 +278,7 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
     w.u64(sim.config().matchSeed);
     w.u64(sim.config().defs != nullptr ? sim.config().defs->dataHash : 0);
     w.u64(mapHashOf(sim));
+    w.u64(combatTuningHash(sim.tuning()));
     w.u64(sim.rng().rawState());
     w.u64(sim.rng().rawInc());
 
@@ -243,6 +323,7 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     if (r.u64() != sim.config().matchSeed) return fail("match seed differs from this Sim's config");
     if (r.u64() != (sim.config().defs != nullptr ? sim.config().defs->dataHash : 0)) return fail("data hash differs (other TGI data)");
     if (r.u64() != mapHashOf(sim)) return fail("map hash differs (other map)");
+    if (r.u64() != combatTuningHash(sim.tuning())) return fail("combat tuning differs");
     const std::uint64_t rngState = r.u64();
     const std::uint64_t rngInc = r.u64();
 

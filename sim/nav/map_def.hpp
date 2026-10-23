@@ -58,6 +58,13 @@ MapDef generateTestMap(std::uint64_t seed, std::uint32_t sizeCells);
 // Parses a generated map's name "gen:SEED:SIZE" (decimal). false for anything else.
 bool parseGenSpec(std::string_view spec, std::uint64_t& seed, std::uint32_t& size);
 
+// Duel arena (simcli duel, docs/CALIBRATION.md): a square of one terrain inside a blocked border.
+// `terrain` names a Terrain or variation IDS (its properties apply to units on it) or "open";
+// names containing "forest" or "jungle" are TerrainKind::Forest, others Ground. Name
+// "arena:TERRAIN:SIZE".
+MapDef generateArenaMap(std::string_view terrain, std::uint32_t size);
+bool parseArenaSpec(std::string_view spec, std::string& terrain, std::uint32_t& size);
+
 // Loads tools/rmp.py map.json (needs its integer "vertex_height_mm" layers). Terrain kind per tile
 // comes from the class bits (mountain / water / border) and terrain-name keywords (shore/beach,
 // shallows, forest/jungle). Each tile becomes 2x2 cells. Returns false and sets `error` on failure.
