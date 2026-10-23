@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 
+#include "combat/rules.hpp"
 #include "core/ascii.hpp"
 #include "core/sim.hpp"
 #include "data/def_compiler.hpp"
@@ -532,4 +533,79 @@ TEST_CASE("golden spawn-test: regiment_per_infantry, 100 ticks, stable hash, rep
     rep.header.dataHash = defs.dataHash;
     rep.commands.push_back(makeSpawnRegiment(0, 0, 0, "regiment_per_infantry", {Fixed::fromInt(100), Fixed::fromInt(50)}, Angle{}));
     CHECK(runReplay(rep, &defs).finalHash == h);
+}
+
+// ------------------------------------------------------------------------------------- M5: combat data
+
+TEST_CASE("golden defs: combat data (turrets, weapons, projectiles, resistances, terrain, SVars)") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const UnitDef* tank = defs.unit("ger_tank_medium");
+    REQUIRE(tank != nullptr);
+    REQUIRE(tank->turrets.size() == 1);
+    CHECK(tank->turrets[0].yawRate == 37_fx);
+    CHECK(tank->turrets[0].resetTime == 10_fx);
+    REQUIRE(tank->weapons.size() == 1);
+    CHECK(tank->weapons[0].turret == 0);
+    CHECK(tank->weapons[0].priority == 20_fx);
+    CHECK(tank->weapons[0].fuzzyRange == 3_fx);
+    CHECK(tank->checkDamageResistance);
+    const AbilityDef& gun = defs.abilities[tank->weapons[0].ability];
+    CHECK(gun.projectileIds == "medium_tank_projectile");
+    REQUIRE(gun.projectileIndex != kNoDef);
+    CHECK(defs.projectiles[gun.projectileIndex].speed == 50_fx);
+    CHECK(defs.unit("usa_halftrack")->weapons[0].turret == WeaponDef::kNoTurret);  // a local gun
+    const BuildingDef* bunker = defs.building("ger_bunker");
+    REQUIRE(bunker != nullptr);
+    CHECK(bunker->controlRange == 20_fx);
+    REQUIRE(bunker->weapons.size() == 1);  // DefenderComponent
+    const AbilityDef& mg = defs.abilities[bunker->weapons[0].ability];
+    CHECK(mg.maxTargets == 4);
+    CHECK(mg.attenuationRangeMin == 0.5_fx);
+    CHECK(mg.attenuationFactorMax == 0.5_fx);
+    for (const char* dt : {"gunfire", "armor_piercing", "explosive", "flame"}) CHECK(defs.damageTypeIndex(dt) != kNoDef);
+    CHECK(defs.targetTypeIndex("air") != kNoDef);
+    CHECK(defs.targetTypeIndex("infantry") != kNoDef);
+    const PropertyDef& vehicle = defs.properties[defs.propertyIndex("vehicle")];
+    REQUIRE(vehicle.resist.size() == 2);
+    CHECK(vehicle.resist[0].first == "gunfire");
+    CHECK(vehicle.resist[0].second == 0.4_fx);
+    const PropertyDef& dug = defs.properties[defs.propertyIndex("infantry_entrench")];
+    CHECK(dug.defenseAdd == 4_fx);
+    CHECK(dug.requiredProperties == std::vector<std::string>{"infantry"});
+    const std::uint32_t forest = defs.terrainOfName("arctic_forest01");
+    REQUIRE(forest != kNoDef);
+    CHECK(defs.terrains[forest].properties == std::vector<std::string>{"terrain_forest_infantry", "terrain_forest_vehicles"});
+    // Resistances add up across properties: a tank resists gunfire 0.4 (vehicle) + 0.2 (tank).
+    const CombatRules rules(&defs, nullptr, CombatTuning{});
+    const CombatProfile& tp = *rules.unit(defs.unitIndex("ger_tank_medium"));
+    CHECK(tp.resist[defs.damageTypeIndex("gunfire")] == 0.4_fx + 0.2_fx);
+    CHECK(tp.defense == 7_fx);
+    CHECK(defs.svars.getFixed("PrimarySampleTime", {}) == 5_fx);
+    CHECK(defs.svars.getFixed("CAITargetInRangeZOCMultiplier", {}) == 0.6_fx);
+    CHECK(defs.svars.getBool("KillTargetIsHighestPriority", false));
+}
+
+TEST_CASE("golden duel: GER vs GBR rifle regiments on open ground fight to a finish, deterministically") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const nav::MapDef map = nav::generateArenaMap("open", 96);
+    std::uint64_t hashes[2] = {0, 0};
+    for (int run = 0; run < 2; ++run) {
+        Sim sim({1, &defs, &map});
+        sim.step({makeSpawnRegiment(0, 0, 0, "regiment_ger_infantry", {33_fx, 48_fx}, Angle{}),
+                  makeSpawnRegiment(0, 1, 0, "regiment_gbr_infantry", {63_fx, 48_fx}, Angle::fromUnits(Angle::kHalf))});
+        const std::vector<EntityId> regs = sim.world().regiments.ids();
+        REQUIRE(regs.size() == 2);
+        sim.step({makeAttack(1, 0, 1, {regs[0]}, regs[1]), makeAttack(1, 1, 1, {regs[1]}, regs[0])});
+        std::size_t deaths = 0;
+        while (sim.tick() < 6000 && sim.world().registry.alive(regs[0]) && sim.world().registry.alive(regs[1])) {
+            sim.step();
+            for (const SimEvent& e : sim.events()) deaths += e.type == SimEvent::Type::Died;
+        }
+        CHECK(sim.world().registry.alive(regs[0]) != sim.world().registry.alive(regs[1]));  // one side won
+        CHECK(deaths >= 9);
+        hashes[run] = stateHash(sim);
+    }
+    CHECK(hashes[0] == hashes[1]);
 }

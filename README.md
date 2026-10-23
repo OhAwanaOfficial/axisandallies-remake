@@ -103,6 +103,17 @@ stage. `--measure` makes the battle view print its fps (add `--pause-sim` to mea
 script, process and render time; `--no-anim`, `--hide-units`, `--no-shadows` and `--plain-terrain` remove one cost
 at a time (ARCHITECTURE §4.4).
 
+## Combat duels (M5)
+```bash
+build\windows\simcli\Release\simcli.exe duel regiment_ger_infantry regiment_gbr_infantry forest
+build\windows\simcli\Release\simcli.exe duel regiment_gbr_infantry ger_bunker --tune defenseK=12 --out duel.rpl
+```
+Two regiments (or a regiment and a building) fight on a flat arena of one terrain until one side is gone. It prints the
+time to kill, survivors, shots and damage per side. Options: `--distance`, `--formation-a/-b`, `--entrench-a/-b`,
+`--max-seconds`, `--tune name=value,...` (constants from `sim/combat/tuning.hpp`), `--out` (a replay for
+`determinism-check`) and `--verbose`. The calibration procedure and the ten scenarios to compare with the original
+are in [docs/CALIBRATION.md](docs/CALIBRATION.md).
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv

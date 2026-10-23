@@ -15,6 +15,8 @@
 //                    [--budget B] [--optimal]
 //   simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]
 //   simcli perf [--gen SEED --size N | --map F.json] [--regiments N] [--ticks N] [--out F.rpl]
+//   simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F] [--entrench-a]
+//               [--entrench-b] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -66,7 +68,10 @@ void usage() {
                  "  simcli nav-bench [--map F.json | --gen SEED [--size N]] [--queries N] [--class C|all]\n"
                  "                   [--seed S] [--budget B] [--optimal]\n"
                  "  simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]\n"
-                 "  simcli perf [--gen SEED --size N | --map F.json] [--regiments N] [--ticks N] [--out F.rpl]\n");
+                 "  simcli perf [--gen SEED --size N | --map F.json] [--regiments N] [--ticks N] [--out F.rpl]\n"
+                 "  simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F]\n"
+                 "              [--entrench-a] [--entrench-b] [--max-seconds S] [--size N] [--seed S]\n"
+                 "              [--tune name=value,...] [--out F.rpl]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -149,8 +154,9 @@ struct Args {
 
 const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-seed", "commands-per-tick", "regiments",
                                              "spawn", "at", "regiment", "facing",
-                                             "map", "gen", "size", "queries", "class", "budget"};
-const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why"};
+                                             "map", "gen", "size", "queries", "class", "budget",
+                                             "distance", "formation-a", "formation-b", "max-seconds", "tune"};
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
     Args a;
@@ -346,6 +352,7 @@ int main(int argc, char** argv) {
     if (args->command == "nav-bench") return simcli::cmdNavBench(sa);
     if (args->command == "scenario") return simcli::cmdScenario(sa);
     if (args->command == "perf") return simcli::cmdPerf(sa);
+    if (args->command == "duel") return simcli::cmdDuel(sa);
     usage();
     return kExitUsage;
 }

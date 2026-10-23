@@ -112,19 +112,38 @@ Income is applied **per sim tick, pro-rated** (income/min ÷ 600 ticks) using fi
 | Armour Div HQ (building) | 2000 | 5 | — | MG: Pierce 20, area 2, 4 targets, recharge 2 s, range 20 |
 
 ### 6.3 Damage model **[DATA structure][CALIBRATE formula]**
-Known from data:
-* Damage effects come in **types**: `PierceDamageEffect` (small arms), `APDamageEffect` (armour-piercing), `BlastDamageEffect` (explosive, `area` radius with `attenuation_range_min`/`attenuation_factor_max`).
-* Targets have **defense** and **properties** (`property_infantry_unit`, vehicle armour properties, etc.). `check_damage_resistance = true` makes the attacker consider resistances when choosing targets.
-* **Target types** (`air, tank, infantry, artillery, building, vehicle, engineer, commanding_officer, depot, routing, sabotaged, org_*`) are used for target priority and ability filters (e.g. the AA halftrack can only hit `air`).
-* `max_targets`, `area`, `range`, `recharge_time`, turrets with yaw rate and range.
+Known from data (compiled into the DefSet in M5 part 1):
+* **Damage types** (`Game/damage_types.tgi`): `gunfire` (small arms; the effect template is `PierceDamageEffect`), `armor_piercing` (`APDamageEffect`), `explosive` (`BlastDamageEffect`) and `flame`.
+  * An ability's `MAIN_DAMAGE` and `ADD_DAMAGE` effects each deal one type.
+  * `area` is the blast radius. `max_targets` caps how many units it hits (the GER bunker: 4). `attenuation_range_min` and `attenuation_factor_max` shape the falloff (bunker MG: 0.5 / 0.5).
+* **Resistances live on properties.** A `ResistDamageModifier` ignores a fraction of one damage type, and a unit's properties add up:
+  * `vehicle`: gunfire 0.4, explosive 0.2. `tank` adds gunfire 0.2 and explosive 0.2, so a tank ignores 60 % of small arms.
+  * `infantry`: armor_piercing 0.2. `bunker`: gunfire 0.2, explosive 0.2. `building`: armor_piercing 0.2.
+  * An `AddModifier` on attribute `DV` adds to defense.
+  * **Terrain:** Terrain records list properties, which apply only when the unit has their `required_properties`. `terrain_forest_infantry` and `terrain_jungle_infantry` give DV +4 and armor_piercing 0.2; `terrain_city_infantry` the same; vehicles in forest, jungle and city resist gunfire −0.2.
+  * **Entrenchment:** `infantry_entrench` gives DV +4, armor_piercing 0.4, explosive 0.4; `vehicle_entrench` DV +4, 0.2, 0.2.
+* **Target types** (`air, tank, infantry, artillery, building, vehicle, engineer, commanding_officer, depot, routing, sabotaged, mine, water, org_*`) come from each property's `enabled_target_flags`. Ability filters such as `+enemy, -air, -mine, -water` or the AA's `+enemy, +air` use them.
+* **Weapons:** a `PerformerComponent` (or a building's `DefenderComponent`) lists Ability slots, each with:
+  * an `AbilityDefinition`;
+  * `priority` (turret guns 20, local guns 1);
+  * `fuzzy_range` (extra acquisition range, usually 3);
+  * an optional `turret_ids`.
+  `check_damage_resistance = true` (tanks, AT infantry) makes the actor weigh resistances when choosing targets.
+* **Turrets:** `yaw_rotation_per_sec_degrees` (GER medium tank 37, bunker 90), yaw range, `reset_time` (10 s).
+* **Projectiles:** `projectile_speed` (medium tank shell 50, rocket 20).
 
-**Initial formula** (to be replaced by calibrated values):
+**Implemented formula** (placeholder until calibrated; every constant is in `sim/combat/tuning.hpp`):
 ```
-raw      = effect.amount × typeVsArmorMultiplier(effect.type, target.properties)
-mitig    = raw × K / (K + target.defense × D)         # K, D tuned
-final    = mitig × attackerCombatEfficiency × attackerXPMult × terrainDefenseMult(target) × entrenchMult(target)
+resist = clamp(Σ resistances of the target for the damage type, resistMin −1, resistMax 0.9)
+raw    = amount × (1 − resist)
+final  = max(minDamage 1, raw × K / (K + D × (defense + ΣDV))) × attack multiplier      # K 10, D 1
 ```
-**Calibration harness (M5):** build 10 duel scenarios in the original game's map editor (e.g. 1 rifle regiment vs 1 rifle regiment on open ground, rifle vs medium tank, MG bunker vs infantry, in jungle and entrenched). Record time-to-kill and survivors from films and video. Tune `K`, `D` and the type multipliers until our `simcli duel` results fall within ±10%.
+* **Where the data feeds in:** the target's own properties, the terrain under it and entrenchment give `resist` and `ΣDV`. The attack multiplier is the attacker's formation (`ATTACK_EFFICIENCY_DESIRED`: Assault 1, Normal 0.75, Column 0.5).
+* **Area shots** hit the nearest enemies within `area` of the impact, at most `max_targets`. Damage is full up to `attenuation_range_min` and falls linearly to `attenuation_factor_max` at the edge **[CALIBRATE: the data's exact meaning]**.
+* **No friendly fire, no hit chance.**
+* **Not yet:** XP multipliers (M5 part 2).
+
+**Calibration harness:** [CALIBRATION.md](CALIBRATION.md) lists 10 duel scenarios to build in the original (rifle vs rifle on open ground, in forest, entrenched and in Column; tank vs tank; AT vs tank; rifle vs tank; halftrack MG vs infantry; infantry vs bunker; jungle), with a results table. `simcli duel` runs the same fights here. Tune the constants until our results fall within ±10 % of the original's time to kill.
 
 ### 6.4 Formations & combat efficiency **[MANUAL p.36–38]**
 
@@ -139,9 +158,20 @@ In the data these are `regiment_aggressive` (Assault), `regiment_defensive` (Nor
 * **Efficiency blends gradually** to the new formation's level after a change (rate **[CALIBRATE]**).
 * **Run** [R] / Alt+right-click: temporary Column, then back to the previous formation on arrival.
 * Aggressive regiments **auto-engage** anything in their zone of control (ZOC). A tank regiment in Assault formation crossing an enemy base will stop and destroy every building on the way. That's intended.
+  * **Implemented (M5 part 1):**
+    * The ZOC is the RegimentDef's `control_range` around the anchor.
+    * Assault and Normal engage unless running; Column and Run never do.
+    * A regiment engages only enemies its weapons can target, so an unarmed regiment, or flak among tanks, passes by.
+    * The move goes on hold and resumes after the fight.
+    * After a Move or Run order, a regiment doesn't auto-engage for 5 s (`moveGraceSeconds`), so it can be ordered out of a fight.
+    * Efficiency doesn't blend between formations yet (part 2).
 
 ### 6.5 Orders **[MANUAL]**
 Move [M], Attack [A] (chases), Run [R], Stop [S], Guard [G] (follow/hold and engage nearby), plus Unpack/Pack [P], Deploy [D], Build (engineers), Repair, Group Behaviour [V].
+* **Implemented (M5 part 1):**
+  * **Attack** (command 7) takes 1–6 regiments and a regiment, unit or building of another player. Each regiment chases the target until its anchor is within `CAITargetInRangeZOCMultiplier` (0.6) × ZOC, then engages. While attacking, its units shoot the target's units first.
+  * **AttackMove** (command 8) is a MoveGroup that engages anything on the way, whatever the formation, then carries on.
+  * Move, Run and Stop end a fight.
 
 ### 6.6 Engagement state machine **[DATA `SVars_AA.tgi`; actor_states]**
 States: `Idle → Engaging → (Retreating | Routing | Stalemate) → Reform/Regroup → Idle`
@@ -150,6 +180,14 @@ States: `Idle → Engaging → (Retreating | Routing | Stalemate) → Reform/Reg
 * `CAITargetInRangeZOCMultiplier = 0.6`: when ordered to attack, move to 60% of ZOC radius before stopping.
 * `mind_retreating`: ordered retreat → RETREAT formation, PASSIVE, can still resupply.
 * `mind_exhausted`: BROKEN formation, removed from group, morale replenishes.
+* **Implemented (M5 part 1, `sim/systems/combat.*`):**
+  * **Sampling:** every PrimarySampleTime (staggered by entity) a regiment samples its ZOC; being hit also triggers a sample.
+  * **Idle → Engaging:** the move goes on hold.
+  * **Engaging → Stalemate:** no hit dealt or taken for StalemateTime. Stalemate → Reform after another StalemateTime, or as soon as the ZOC is clear.
+  * **Engaging → Reform** when a sample finds the ZOC clear. **Reform → Regroup** (in a group) **→ Idle**: the held move resumes. Each takes its SVars time. Units fire only while Engaging or Stalemate, or under an Attack order.
+  * **Closing in:** a fighting regiment with no unit in firing range for 2 s (`closeInSeconds`) moves toward the nearest enemy and stops once one is in range. Division members hold their slots instead.
+  * **Targets:** `KillTargetIsHighestPriority` keeps a valid target. Otherwise a unit takes the Attack target's units first, then (with check_damage_resistance) the most damage per hit, then the nearest.
+  * Retreating and Routing exist as states and arrive with morale (part 2).
 
 ### 6.7 Morale **[DATA SVars][MANUAL p.40]**
 * Blue bar with a **breaking point**. Below it, the regiment **routs**: Column formation, flees, uncontrollable until it stops (may run the wrong way).

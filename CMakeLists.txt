@@ -43,6 +43,12 @@ if(CORPS_BUILD_TESTS)
   add_test(NAME simcli_scenario_determinism
     COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/scenario.rpl --per-stage)
   set_tests_properties(simcli_scenario_determinism PROPERTIES FIXTURES_REQUIRED scenario_rpl)
+  # Combat (M5): a tank duel with a non-default tuning, then its film must replay identically.
+  add_test(NAME simcli_duel COMMAND simcli duel regiment_ger_tank_medium regiment_gbr_infantry_at forest
+    --tune defenseK=12 --out ${CMAKE_BINARY_DIR}/duel.rpl)
+  set_tests_properties(simcli_duel PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP duel_rpl)
+  add_test(NAME simcli_duel_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel.rpl --per-stage)
+  set_tests_properties(simcli_duel_determinism PROPERTIES FIXTURES_REQUIRED duel_rpl)
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

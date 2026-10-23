@@ -29,6 +29,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M2** | Done | v0.2 | `import_game.py` (static and skinned NIF → glb, KF → clips, textures) and the Godot Model Browser. |
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
+| **M5** | Part 1 done (sim) | — | See below. Part 2: morale and rout, XP, efficiency blending, the entrenchment timer, FXC events, the view, and the first calibration pass. |
 
 **M4 details:**
 * **Nav:**
@@ -58,6 +59,30 @@ Carried over from M4:
 * lazy path refinement;
 * real-map roads (objects, M10);
 * fps on the dev laptop's GPU: **done**. Low/Medium/High graphics presets; Low and Medium draw units as one MultiMesh per type with baked vertex animation. 500 units at 41 fps on Low at 1280×720 (was 8 fps with 70 units; ARCHITECTURE §4.4). The target PC isn't tested yet.
+
+**M5 part 1 details (sim only):**
+* **Data:**
+  * Weapons per Ability slot (priority, fuzzy range, turret) and turrets (yaw rate, range, reset) for units and buildings, including `DefenderComponent`.
+  * Projectiles, damage types, target types, properties (resistances, DV, target flags, required properties) and terrain properties.
+  * Attenuation and `max_targets` on abilities.
+* **Rules:**
+  * The placeholder damage formula, with every constant in `sim/combat/tuning.hpp` (`CombatTuning`, part of the Sim config and the state hash).
+  * Resistances from intrinsic, terrain and entrenchment properties.
+  * Target filters and target choice (KillTargetIsHighestPriority, check_damage_resistance, the Attack target first).
+* **Engagement:**
+  * ZOC auto-engage for aggressive formations, holding the move and resuming it.
+  * The state machine: Idle, Engaging, Stalemate, Reform, Regroup (Retreating and Routing wait for morale).
+  * Closing in when nothing is in range.
+* **Weapons:** turrets turning at their yaw rate, local guns facing the target, recharge and reload, homing projectiles, area damage with `max_targets` and attenuation, simultaneous instant hits.
+* **Deaths:** dead units and emptied regiments are destroyed, with Died events.
+* **Commands:** Attack (7), AttackMove (8), DebugSpawnBuilding (206), DebugSetEntrenched (207).
+* **Formats:** state v4, replay v3 (tuning, `arena:` maps).
+* **Tools:** `simcli duel` and [CALIBRATION.md](CALIBRATION.md) (10 scenarios, results table empty).
+* **Checks:**
+  * `test_combat.cpp` (formula, properties, filters, auto-engage, Attack, AttackMove, turrets, projectiles, area, target choice, buildings, formations, entrenchment, save/load mid-fight, command codec).
+  * Real-data golden tests (combat defs, a GER vs GBR duel).
+  * `simcli_duel` in CTest, with determinism-check of its replay.
+* **Numbers:** the 160-regiment perf run, now with the armies fighting, at 6.7 ms p99 per tick; combat stages about 0.7 ms on average.
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.
