@@ -328,7 +328,8 @@ int cmdSpawnTest(const SimArgs& a) {
     return kOk;
 }
 
-// simcli show-def IDS   - the compiled (typed) definition: unit, regiment, building or ability
+// simcli show-def IDS   - the compiled (typed) definition: unit, regiment, building, ability,
+//                         property, terrain, projectile, damage type, ...
 int cmdShowDef(const SimArgs& a) {
     if (a.positional.empty()) {
         std::fprintf(stderr, "usage: simcli show-def IDS\n");
@@ -349,9 +350,29 @@ int cmdShowDef(const SimArgs& a) {
                     formatFixed(ab.range).c_str(), formatFixed(ab.rechargeTime).c_str(), formatFixed(ab.area).c_str());
         for (const auto& t : ab.targets) std::printf(" %s", t.c_str());
         std::printf("\n");
+        if (ab.maxTargets != 0 || ab.attenuationRangeMin != Fixed::fromInt(1) || ab.attenuationFactorMax != Fixed::fromInt(1) ||
+            !ab.projectileIds.empty()) {
+            std::printf("    max targets %u attenuation range min %s factor max %s projectile %s%s\n", ab.maxTargets,
+                        formatFixed(ab.attenuationRangeMin).c_str(), formatFixed(ab.attenuationFactorMax).c_str(),
+                        ab.projectileIds.empty() ? "-" : ab.projectileIds.c_str(),
+                        !ab.projectileIds.empty() && ab.projectileIndex == kNoDef ? " (UNDEFINED)" : "");
+        }
         for (const EffectDef& e : ab.effects) {
             std::printf("    effect %s %s amount %s\n", e.type.c_str(), e.damageType.c_str(), formatFixed(e.amount).c_str());
         }
+    };
+    const auto combat = [&](const std::vector<WeaponDef>& weapons, const std::vector<TurretDef>& turrets, bool checkResist) {
+        for (const TurretDef& t : turrets) {
+            std::printf("  turret %s: yaw %s deg/s range %s start %s reset %s s%s\n", t.ids.c_str(), formatFixed(t.yawRate).c_str(),
+                        formatFixed(t.yawRange).c_str(), formatFixed(t.yawStart).c_str(), formatFixed(t.resetTime).c_str(),
+                        t.canReset ? "" : " (no reset)");
+        }
+        for (const WeaponDef& w : weapons) {
+            std::printf("  weapon %s: priority %s fuzzy %s reload %s %s\n", w.ability != kNoDef ? d.abilities[w.ability].ids.c_str() : "?",
+                        formatFixed(w.priority).c_str(), formatFixed(w.fuzzyRange).c_str(), formatFixed(w.reloadTime).c_str(),
+                        w.turret != WeaponDef::kNoTurret ? ("turret " + turrets[w.turret].ids).c_str() : "local");
+        }
+        if (checkResist) std::printf("  check_damage_resistance\n");
     };
     bool found = false;
     if (const UnitDef* u = d.unit(ids)) {
@@ -365,6 +386,7 @@ int cmdShowDef(const SimArgs& a) {
                     kTurn[static_cast<int>(u->turnType)], kClass[static_cast<int>(u->moveClass)], formatFixed(u->blockingRadius).c_str(),
                     formatFixed(u->detectionRange).c_str());
         for (const std::uint32_t i : u->abilities) ability(i);
+        combat(u->weapons, u->turrets, u->checkDamageResistance);
         std::printf("  properties:");
         for (const auto& p : u->properties) std::printf(" %s", p.c_str());
         std::printf("\n");
@@ -389,6 +411,8 @@ int cmdShowDef(const SimArgs& a) {
                     formatFixed(b->health).c_str(), formatFixed(b->defense).c_str());
         for (const auto& r : b->recruits) std::printf("  recruits %s\n", r.c_str());
         for (const std::uint32_t i : b->abilities) ability(i);
+        combat(b->weapons, b->turrets, b->checkDamageResistance);
+        if (b->controlRange > Fixed{}) std::printf("  control range %s\n", formatFixed(b->controlRange).c_str());
         res("cost", b->cost);
         res("production", b->production);
     }
@@ -433,6 +457,37 @@ int cmdShowDef(const SimArgs& a) {
         for (const auto& f : n->factions) std::printf(" %s", f.c_str());
         std::printf("\n");
         for (const auto& [p, t] : n->placeholders) std::printf("  %s -> %s\n", p.c_str(), t.c_str());
+    }
+    if (const std::uint32_t pi = d.propertyIndex(ids); pi != kNoDef) {
+        found = true;
+        const PropertyDef& p = d.properties[pi];
+        std::printf("PropertyDef %s DV %s", p.ids.c_str(), formatFixed(p.defenseAdd).c_str());
+        for (const auto& [t, amount] : p.resist) std::printf(" resist %s %s", t.c_str(), formatFixed(amount).c_str());
+        for (const auto& t : p.targetFlags) std::printf(" target-type %s", t.c_str());
+        for (const auto& r : p.requiredProperties) std::printf(" requires %s", r.c_str());
+        std::printf("\n");
+    }
+    if (const std::uint32_t ti = d.terrainOfName(ids); ti != kNoDef) {
+        found = true;
+        const TerrainDef& t = d.terrains[ti];
+        std::printf("TerrainDef %s group %s properties:", t.ids.c_str(), t.group.c_str());
+        for (const auto& p : t.properties) std::printf(" %s", p.c_str());
+        std::printf(" (%zu variations)\n", t.variations.size());
+    }
+    if (const std::uint32_t pj = d.projectileIndex(ids); pj != kNoDef) {
+        found = true;
+        static const char* kType[] = {"antigrav", "lob", "bomb"};
+        const ProjectileDef& p = d.projectiles[pj];
+        std::printf("ProjectileDef %s speed %s type %s life %s\n", p.ids.c_str(), formatFixed(p.speed).c_str(),
+                    kType[static_cast<int>(p.type)], formatFixed(p.life).c_str());
+    }
+    if (const std::uint32_t di = d.damageTypeIndex(ids); di != kNoDef) {
+        found = true;
+        std::printf("DamageTypeDef %s filter %d\n", d.damageTypes[di].ids.c_str(), d.damageTypes[di].damageFilter);
+    }
+    if (const std::uint32_t tt = d.targetTypeIndex(ids); tt != kNoDef) {
+        found = true;
+        std::printf("TargetTypeDef %s\n", d.targetTypes[tt].ids.c_str());
     }
     if (const SVar* v = d.svars.find(ids)) {
         found = true;

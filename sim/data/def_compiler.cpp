@@ -106,6 +106,10 @@ private:
         a.minRange = fx(def, "min_range");
         a.rechargeTime = fx(def, "recharge_time");
         a.area = fx(def, "area");
+        a.volleyArea = fx(def, "volley_area");
+        a.maxTargets = static_cast<std::uint32_t>(std::clamp<std::int64_t>(fx(def, "max_targets").floorInt(), 0, 1000000));
+        a.attenuationRangeMin = fx(def, "attenuation_range_min", Fixed::fromInt(1));
+        a.attenuationFactorMax = fx(def, "attenuation_factor_max", Fixed::fromInt(1));
         a.projectileIds = asciiLowerCopy(text(def, "projectile_ids"));
         const std::string targets = text(def, "targets");  // splitWordList returns views into it
         for (const std::string_view t : splitWordList(targets)) a.targets.emplace_back(asciiLowerCopy(t));
@@ -121,17 +125,54 @@ private:
         return a;
     }
 
-    // Inline abilities of a unit/building: PerformerComponent/Ability[i]/AbilityDefinition.
-    std::vector<std::uint32_t> inlineAbilities(const ResolvedNode* thing, const std::string& owner) {
-        std::vector<std::uint32_t> out;
-        const ResolvedNode* pc = childOf(thing, "PerformerComponent");
-        for (std::size_t i = 0; i < countOf(pc, "Ability"); ++i) {
-            const ResolvedNode* def = childOf(childOf(pc, "Ability", i), "AbilityDefinition");
-            if (def == nullptr) continue;
-            out.push_back(static_cast<std::uint32_t>(defs.abilities.size()));
-            defs.abilities.push_back(ability(def, owner + "#" + std::to_string(i), owner));
-        }
+    std::vector<std::string> words(const ResolvedNode* n, std::string_view key) const {
+        std::vector<std::string> out;
+        const std::string t = text(n, key);  // splitWordList returns views into it
+        for (const std::string_view w : splitWordList(t)) out.emplace_back(asciiLowerCopy(w));
         return out;
+    }
+
+    // Turret[i] of a PerformerComponent / DefenderComponent, appended to `out`.
+    void turretsOf(const ResolvedNode* comp, std::vector<TurretDef>& out) {
+        for (std::size_t i = 0; i < countOf(comp, "Turret"); ++i) {
+            const ResolvedNode* t = childOf(comp, "Turret", i);
+            TurretDef d;
+            d.ids = asciiLowerCopy(text(t, "turret_ids"));
+            d.yawRate = fx(t, "yaw_rotation_per_sec_degrees", Fixed::fromInt(360));
+            d.yawRange = fx(t, "yaw_rotation_range_degrees", Fixed::fromInt(360));
+            d.yawStart = fx(t, "yaw_start_degrees");
+            d.resetTime = fx(t, "reset_time");
+            d.canReset = flag(t, "can_reset", true);
+            d.canPreaim = flag(t, "can_preaim", true);
+            out.push_back(std::move(d));
+        }
+    }
+
+    // Inline abilities of a unit/building component: Ability[i]/AbilityDefinition, numbered
+    // "<owner>#<n>" from `next` on. Weapons get the abilities' pre-sort indexes (remapped later).
+    void weaponsOf(const ResolvedNode* comp, const std::string& owner, std::size_t& next, std::vector<std::uint32_t>& abilities,
+                   std::vector<WeaponDef>& weapons, const std::vector<TurretDef>& turrets) {
+        for (std::size_t i = 0; i < countOf(comp, "Ability"); ++i, ++next) {
+            const ResolvedNode* slot = childOf(comp, "Ability", i);
+            const ResolvedNode* def = childOf(slot, "AbilityDefinition");
+            if (def == nullptr) continue;
+            const auto index = static_cast<std::uint32_t>(defs.abilities.size());
+            defs.abilities.push_back(ability(def, owner + "#" + std::to_string(next), owner));
+            abilities.push_back(index);
+            WeaponDef w;
+            w.ability = index;
+            w.priority = fx(slot, "priority");
+            w.fuzzyRange = fx(slot, "fuzzy_range");
+            w.reloadTime = fx(slot, "reload_time");
+            const std::string turret = asciiLowerCopy(text(slot, "turret_ids"));
+            for (std::uint32_t k = 0; !turret.empty() && k < turrets.size(); ++k) {
+                if (turrets[k].ids == turret) {
+                    w.turret = k;
+                    break;
+                }
+            }
+            weapons.push_back(w);
+        }
     }
 
     void unit(const Record& r, const std::string& ids, const std::string& category) {
@@ -154,7 +195,11 @@ private:
         u.detectionRange = fx(det, "detection_range");
         u.remoteDetectionRange = fx(det, "remote_detection_range");
         u.blockingRadius = fx(childOf(t, "Size"), "blocking_radius");
-        u.abilities = inlineAbilities(t, ids);
+        const ResolvedNode* perf = childOf(t, "PerformerComponent");
+        turretsOf(perf, u.turrets);
+        std::size_t next = 0;
+        weaponsOf(perf, ids, next, u.abilities, u.weapons, u.turrets);
+        u.checkDamageResistance = flag(perf, "check_damage_resistance", false);
         u.properties = properties(t);
         const auto has = [&](std::string_view p) { return std::find(u.properties.begin(), u.properties.end(), p) != u.properties.end(); };
         u.moveClass = has("aircraft") ? UnitMoveClass::Air
@@ -208,7 +253,15 @@ private:
         b.health = fx(body, "health");
         b.defense = fx(body, "defense");
         b.blockingRadius = fx(childOf(t, "Size"), "blocking_radius");
-        b.abilities = inlineAbilities(t, ids);
+        const ResolvedNode* perf = childOf(t, "PerformerComponent");
+        const ResolvedNode* defender = childOf(t, "DefenderComponent");
+        turretsOf(perf, b.turrets);
+        turretsOf(defender, b.turrets);
+        std::size_t next = 0;
+        weaponsOf(perf, ids, next, b.abilities, b.weapons, b.turrets);
+        weaponsOf(defender, ids, next, b.abilities, b.weapons, b.turrets);
+        b.controlRange = fx(defender, "control_range");
+        b.checkDamageResistance = flag(perf, "check_damage_resistance", false) || flag(defender, "check_damage_resistance", false);
         const ResolvedNode* rc = childOf(t, "RecruitComponent");
         for (std::size_t i = 0; i < countOf(rc, "RecruitActor"); ++i) {
             const std::string a = asciiLowerCopy(text(childOf(rc, "RecruitActor", i), "actor_ids"));
@@ -326,6 +379,60 @@ private:
         defs.nations.push_back(std::move(n));
     }
 
+    void damageType(const Record& r, const std::string& ids) {
+        DamageTypeDef d;
+        d.ids = ids;
+        d.damageFilter = static_cast<std::int32_t>(fx(&r.tree, "damage_filter", Fixed::fromInt(-1)).floorInt());
+        defs.damageTypes.push_back(std::move(d));
+    }
+
+    void property(const Record& r, const std::string& ids) {
+        const ResolvedNode* t = &r.tree;
+        PropertyDef p;
+        p.ids = ids;
+        p.targetFlags = words(t, "enabled_target_flags");
+        p.requiredProperties = words(t, "required_properties");
+        for (std::size_t i = 0; i < countOf(t, "Modifier"); ++i) {
+            const ResolvedNode* m = childOf(t, "Modifier", i);
+            const std::string type = asciiUpperCopy(text(m, "type"));
+            if (type == "RESIST_DAMAGE") {
+                const std::string dt = asciiLowerCopy(text(m, "damage_type"));
+                if (!dt.empty()) p.resist.emplace_back(dt, fx(m, "amount"));
+            } else if (type == "ADD" && asciiUpperCopy(text(m, "attribute")) == "DV") {
+                p.defenseAdd = p.defenseAdd + fx(m, "amount");
+            }
+        }
+        defs.properties.push_back(std::move(p));
+    }
+
+    void terrain(const Record& r, const std::string& ids) {
+        const ResolvedNode* t = &r.tree;
+        TerrainDef d;
+        d.ids = ids;
+        d.group = asciiLowerCopy(text(t, "terrain_group"));
+        for (std::size_t i = 0; i < countOf(t, "Property"); ++i) {
+            const std::string p = asciiLowerCopy(text(childOf(t, "Property", i), "property_IDS"));
+            if (!p.empty()) d.properties.push_back(p);
+        }
+        for (std::size_t i = 0; i < countOf(t, "Variation"); ++i) {
+            const std::string v = asciiLowerCopy(text(childOf(t, "Variation", i), "IDS"));
+            if (!v.empty()) d.variations.push_back(v);
+        }
+        defs.terrains.push_back(std::move(d));
+    }
+
+    void projectile(const Record& r, const std::string& ids) {
+        const ResolvedNode* pc = childOf(&r.tree, "ProjectileComponent");
+        ProjectileDef p;
+        p.ids = ids;
+        p.speed = fx(pc, "projectile_speed");
+        const std::string type = asciiUpperCopy(text(pc, "projectile_type"));
+        p.type = type == "LOB" ? ProjectileType::Lob : type == "BOMB" ? ProjectileType::Bomb : ProjectileType::Antigrav;
+        p.life = fx(pc, "projectile_life");
+        p.spread = fx(pc, "projectile_spread");
+        defs.projectiles.push_back(std::move(p));
+    }
+
     void svars(const ResolvedNode& merged) {
         for (const ResolvedField& f : merged.fields) {
             if (!f.hasValue()) continue;
@@ -378,6 +485,10 @@ DefSet Compiler::run() {
     const Symbol layoutSym = sym("organizationlayout");
     const Symbol formationSym = sym("formation");
     const Symbol groupFormationSym = sym("groupformation");
+    const Symbol damageTypeSym = sym("damagetype");
+    const Symbol targetTypeSym = sym("targettype");
+    const Symbol propertySym = sym("property");
+    const Symbol terrainSym = sym("terrain");
     std::map<std::string, std::size_t> categories;
 
     // byIds is sorted by (type symbol, IDS), so this walk is deterministic.
@@ -391,6 +502,7 @@ DefSet Compiler::run() {
             if (category == "UNIT" || category == "TRUCK") unit(r, ids, category);
             else if (category == "ORGANIZATION") regiment(r, ids);
             else if (category == "BUILDING") building(r, ids);
+            else if (category == "PROJECTILE") projectile(r, ids);
             else ++stats.thingsSkipped;
         } else if (e.type == abilitySym) {
             defs.abilities.push_back(ability(&r.tree, ids, ""));
@@ -402,6 +514,14 @@ DefSet Compiler::run() {
             formation(r, ids);
         } else if (e.type == groupFormationSym) {
             groupFormation(r, ids);
+        } else if (e.type == damageTypeSym) {
+            damageType(r, ids);
+        } else if (e.type == targetTypeSym) {
+            defs.targetTypes.push_back({ids});
+        } else if (e.type == propertySym) {
+            property(r, ids);
+        } else if (e.type == terrainSym) {
+            terrain(r, ids);
         }
     }
     for (const DefIndex::Singleton& s : db.defs.singletons) {
@@ -420,6 +540,12 @@ DefSet Compiler::run() {
     sortByIds(defs.layouts);
     sortByIds(defs.formations);
     sortByIds(defs.groupFormations);
+    sortByIds(defs.damageTypes);
+    sortByIds(defs.targetTypes);
+    sortByIds(defs.properties);
+    sortByIds(defs.terrains);
+    sortByIds(defs.projectiles);
+    for (AbilityDef& a : defs.abilities) a.projectileIndex = a.projectileIds.empty() ? kNoDef : defs.projectileIndex(a.projectileIds);
     for (FormationDef& f : defs.formations) f.groupFormationIndex = defs.groupFormationIndex(f.groupFormationIds);
     for (LayoutDef& l : defs.layouts) {
         for (LayoutFormationDef& f : l.formations) f.formationIndex = defs.formationIndex(f.formationIds);
@@ -437,8 +563,20 @@ DefSet Compiler::run() {
             i = (it != abilityIndex.end() && it->first == key) ? it->second : kNoDef;
         }
     };
-    for (UnitDef& u : defs.units) remap(u.abilities);
-    for (BuildingDef& b : defs.buildings) remap(b.abilities);
+    const auto remapWeapons = [&](std::vector<WeaponDef>& weapons) {
+        std::vector<std::uint32_t> list;
+        for (const WeaponDef& w : weapons) list.push_back(w.ability);
+        remap(list);
+        for (std::size_t k = 0; k < weapons.size(); ++k) weapons[k].ability = list[k];
+    };
+    for (UnitDef& u : defs.units) {
+        remap(u.abilities);
+        remapWeapons(u.weapons);
+    }
+    for (BuildingDef& b : defs.buildings) {
+        remap(b.abilities);
+        remapWeapons(b.weapons);
+    }
 
     // Regiment slots -> unit (or truck) / building indexes. Empty (null) slots stay None.
     for (RegimentDef& g : defs.regiments) {

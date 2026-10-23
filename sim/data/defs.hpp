@@ -47,10 +47,80 @@ struct AbilityDef {
     Fixed range;
     Fixed minRange;
     Fixed rechargeTime;
-    Fixed area;
+    Fixed area;                       // blast radius (0: the target only)
+    Fixed volleyArea;
+    std::uint32_t maxTargets = 0;     // units an area attack may hit (0: no limit)
+    Fixed attenuationRangeMin = Fixed::fromInt(1);   // area attenuation (GAME_DESIGN §6.3)
+    Fixed attenuationFactorMax = Fixed::fromInt(1);
     std::string projectileIds;
+    std::uint32_t projectileIndex = kNoDef;  // into DefSet::projectiles
     std::vector<std::string> targets;  // "+enemy", "-air", ... as written
     std::vector<EffectDef> effects;
+};
+
+// [DamageType] (Game/damage_types.tgi): gunfire (the design's Pierce), armor_piercing (AP),
+// explosive (Blast) and flame.
+struct DamageTypeDef {
+    std::string ids;
+    std::int32_t damageFilter = -1;
+};
+
+// [TargetType] (Game/target_types_aa.tgi): air, tank, infantry, building, routing, ...
+struct TargetTypeDef {
+    std::string ids;
+};
+
+// [Property] records, with the modifiers combat reads: ResistDamageModifier (the fraction of one
+// damage type's damage ignored; fractions from all of a unit's properties add up) and AddModifier
+// DV (defense).
+struct PropertyDef {
+    std::string ids;
+    std::vector<std::string> targetFlags;         // enabled_target_flags: target types it grants
+    std::vector<std::string> requiredProperties;  // required_properties (terrain ones: infantry / vehicle)
+    Fixed defenseAdd;                             // AddModifier DV
+    std::vector<std::pair<std::string, Fixed>> resist;  // (damage type IDS, amount), data order
+};
+
+// [Terrain] (Terrain/<biome>/*.tgi): its group and the properties standing on it gives
+// (terrain_forest_infantry, ...). Map cells name the terrain or one of its variations.
+struct TerrainDef {
+    std::string ids;
+    std::string group;
+    std::vector<std::string> properties;
+    std::vector<std::string> variations;  // Variation IDS
+};
+
+// PROJECTILE things' ProjectileComponent.
+enum class ProjectileType : std::uint8_t { Antigrav = 0, Lob = 1, Bomb = 2 };
+struct ProjectileDef {
+    std::string ids;
+    Fixed speed;   // projectile_speed, units/s (0: CombatTuning::defaultProjectileSpeed)
+    ProjectileType type = ProjectileType::Antigrav;
+    Fixed life;    // projectile_life, s (0: until it arrives)
+    Fixed spread;  // view only
+};
+
+// PerformerComponent/Turret (yaw only: the sim is 2D).
+struct TurretDef {
+    std::string ids;
+    Fixed yawRate;      // degrees per second
+    Fixed yawRange;     // degrees (360: all round)
+    Fixed yawStart;     // degrees: rest yaw relative to the body
+    Fixed resetTime;    // seconds without a target before it turns back
+    bool canReset = true;
+    bool canPreaim = true;
+};
+
+// One Ability slot of a PerformerComponent or DefenderComponent: the AbilityDefinition it uses
+// and how the actor uses it. A weapon with a turret aims with it; without one it is a "local"
+// gun and the body has to face the target.
+struct WeaponDef {
+    static constexpr std::uint32_t kNoTurret = 0xFFFFFFFFu;
+    std::uint32_t ability = kNoDef;       // into DefSet::abilities
+    std::uint32_t turret = kNoTurret;     // into the owner's turrets
+    Fixed priority;                       // Ability priority (higher first)
+    Fixed fuzzyRange;                     // extra acquisition range
+    Fixed reloadTime;                     // added to the definition's recharge_time
 };
 
 // What a regiment slot holds: a unit (or truck), or a building (an unpacked HQ).
@@ -83,6 +153,9 @@ struct UnitDef {
     Fixed remoteDetectionRange;
     Fixed blockingRadius;
     std::vector<std::uint32_t> abilities;  // indexes into DefSet::abilities
+    std::vector<WeaponDef> weapons;        // PerformerComponent Ability slots
+    std::vector<TurretDef> turrets;
+    bool checkDamageResistance = false;    // weigh targets' resistances when choosing
     std::vector<std::string> properties;   // property_IDS, in resolved order
     std::string requiredStructures;
     ResourceAmounts cost;
@@ -121,6 +194,10 @@ struct BuildingDef {
     Fixed defense;
     Fixed blockingRadius;
     std::vector<std::uint32_t> abilities;
+    std::vector<WeaponDef> weapons;     // PerformerComponent, then DefenderComponent Ability slots
+    std::vector<TurretDef> turrets;
+    Fixed controlRange;                 // DefenderComponent control_range (its ZOC; 0: none)
+    bool checkDamageResistance = false;
     std::vector<std::string> recruits;  // RecruitComponent actor_ids (regiments it can recruit)
     std::vector<std::string> properties;
     ResourceAmounts cost;
@@ -224,6 +301,11 @@ struct DefSet {
     std::vector<LayoutDef> layouts;
     std::vector<FormationDef> formations;
     std::vector<GroupFormationDef> groupFormations;
+    std::vector<DamageTypeDef> damageTypes;
+    std::vector<TargetTypeDef> targetTypes;
+    std::vector<PropertyDef> properties;
+    std::vector<TerrainDef> terrains;
+    std::vector<ProjectileDef> projectiles;
     SVarsDef svars;
     std::uint64_t dataHash = 0;
     DefCompileStats stats;
@@ -240,6 +322,13 @@ struct DefSet {
     std::uint32_t unitIndex(std::string_view ids) const;
     std::uint32_t regimentIndex(std::string_view ids) const;
     std::uint32_t buildingIndex(std::string_view ids) const;
+    std::uint32_t damageTypeIndex(std::string_view ids) const;
+    std::uint32_t targetTypeIndex(std::string_view ids) const;
+    std::uint32_t propertyIndex(std::string_view ids) const;
+    std::uint32_t terrainIndex(std::string_view ids) const;
+    std::uint32_t projectileIndex(std::string_view ids) const;
+    // The terrain a map cell's name refers to: a Terrain IDS or one of its Variation IDS.
+    std::uint32_t terrainOfName(std::string_view name) const;
 };
 
 // Canonical bytes of a DefSet (fixed field order); dataHash = xxh3_64 of these bytes.

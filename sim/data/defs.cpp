@@ -43,6 +43,28 @@ void putIndexes(ByteWriter& w, const std::vector<std::uint32_t>& v) {
     for (const std::uint32_t i : v) w.u32(i);
 }
 
+void putCombat(ByteWriter& w, const std::vector<WeaponDef>& weapons, const std::vector<TurretDef>& turrets, bool checkResist) {
+    w.u32(static_cast<std::uint32_t>(weapons.size()));
+    for (const WeaponDef& x : weapons) {
+        w.u32(x.ability);
+        w.u32(x.turret);
+        w.fixed(x.priority);
+        w.fixed(x.fuzzyRange);
+        w.fixed(x.reloadTime);
+    }
+    w.u32(static_cast<std::uint32_t>(turrets.size()));
+    for (const TurretDef& t : turrets) {
+        w.str(t.ids);
+        w.fixed(t.yawRate);
+        w.fixed(t.yawRange);
+        w.fixed(t.yawStart);
+        w.fixed(t.resetTime);
+        w.boolean(t.canReset);
+        w.boolean(t.canPreaim);
+    }
+    w.boolean(checkResist);
+}
+
 }  // namespace
 
 const UnitDef* DefSet::unit(std::string_view ids) const { return findDef(units, ids); }
@@ -56,6 +78,22 @@ std::uint32_t DefSet::buildingIndex(std::string_view ids) const { return findInd
 std::uint32_t DefSet::layoutIndex(std::string_view ids) const { return findIndex(layouts, ids); }
 std::uint32_t DefSet::formationIndex(std::string_view ids) const { return findIndex(formations, ids); }
 std::uint32_t DefSet::groupFormationIndex(std::string_view ids) const { return findIndex(groupFormations, ids); }
+std::uint32_t DefSet::damageTypeIndex(std::string_view ids) const { return findIndex(damageTypes, ids); }
+std::uint32_t DefSet::targetTypeIndex(std::string_view ids) const { return findIndex(targetTypes, ids); }
+std::uint32_t DefSet::propertyIndex(std::string_view ids) const { return findIndex(properties, ids); }
+std::uint32_t DefSet::terrainIndex(std::string_view ids) const { return findIndex(terrains, ids); }
+std::uint32_t DefSet::projectileIndex(std::string_view ids) const { return findIndex(projectiles, ids); }
+
+std::uint32_t DefSet::terrainOfName(std::string_view name) const {
+    const std::uint32_t t = terrainIndex(name);
+    if (t != kNoDef) return t;
+    for (std::uint32_t i = 0; i < terrains.size(); ++i) {
+        for (const std::string& v : terrains[i].variations) {
+            if (iequals(v, name)) return i;
+        }
+    }
+    return kNoDef;
+}
 
 std::uint32_t LayoutDef::formation(std::string_view formationIds) const {
     for (std::uint32_t i = 0; i < formations.size(); ++i) {
@@ -88,7 +126,7 @@ bool SVarsDef::getBool(std::string_view name, bool fallback) const {
 std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     ByteWriter w;
     w.tag("DEFS");
-    w.u32(2);  // layout version (2: move class, turn type, layouts, formations, group formations)
+    w.u32(3);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat)
     w.u32(static_cast<std::uint32_t>(d.abilities.size()));
     for (const AbilityDef& a : d.abilities) {
         w.str(a.ids);
@@ -99,7 +137,12 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(a.minRange);
         w.fixed(a.rechargeTime);
         w.fixed(a.area);
+        w.fixed(a.volleyArea);
+        w.u32(a.maxTargets);
+        w.fixed(a.attenuationRangeMin);
+        w.fixed(a.attenuationFactorMax);
         w.str(a.projectileIds);
+        w.u32(a.projectileIndex);
         putStrings(w, a.targets);
         w.u32(static_cast<std::uint32_t>(a.effects.size()));
         for (const EffectDef& e : a.effects) {
@@ -126,6 +169,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(u.remoteDetectionRange);
         w.fixed(u.blockingRadius);
         putIndexes(w, u.abilities);
+        putCombat(w, u.weapons, u.turrets, u.checkDamageResistance);
         putStrings(w, u.properties);
         w.str(u.requiredStructures);
         put(w, u.cost);
@@ -168,6 +212,8 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(b.defense);
         w.fixed(b.blockingRadius);
         putIndexes(w, b.abilities);
+        putCombat(w, b.weapons, b.turrets, b.checkDamageResistance);
+        w.fixed(b.controlRange);
         putStrings(w, b.recruits);
         putStrings(w, b.properties);
         put(w, b.cost);
@@ -227,6 +273,40 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.str(g.ids);
         w.u32(static_cast<std::uint32_t>(g.offsets.size()));
         for (const FVec2 o : g.offsets) w.vec2(o);
+    }
+    w.u32(static_cast<std::uint32_t>(d.damageTypes.size()));
+    for (const DamageTypeDef& t : d.damageTypes) {
+        w.str(t.ids);
+        w.u32(static_cast<std::uint32_t>(t.damageFilter));
+    }
+    w.u32(static_cast<std::uint32_t>(d.targetTypes.size()));
+    for (const TargetTypeDef& t : d.targetTypes) w.str(t.ids);
+    w.u32(static_cast<std::uint32_t>(d.properties.size()));
+    for (const PropertyDef& p : d.properties) {
+        w.str(p.ids);
+        putStrings(w, p.targetFlags);
+        putStrings(w, p.requiredProperties);
+        w.fixed(p.defenseAdd);
+        w.u32(static_cast<std::uint32_t>(p.resist.size()));
+        for (const auto& [type, amount] : p.resist) {
+            w.str(type);
+            w.fixed(amount);
+        }
+    }
+    w.u32(static_cast<std::uint32_t>(d.terrains.size()));
+    for (const TerrainDef& t : d.terrains) {
+        w.str(t.ids);
+        w.str(t.group);
+        putStrings(w, t.properties);
+        putStrings(w, t.variations);
+    }
+    w.u32(static_cast<std::uint32_t>(d.projectiles.size()));
+    for (const ProjectileDef& p : d.projectiles) {
+        w.str(p.ids);
+        w.fixed(p.speed);
+        w.u8(static_cast<std::uint8_t>(p.type));
+        w.fixed(p.life);
+        w.fixed(p.spread);
     }
     w.u32(static_cast<std::uint32_t>(d.svars.vars.size()));
     for (const SVar& v : d.svars.vars) {
