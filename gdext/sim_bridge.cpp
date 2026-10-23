@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <map>
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/color.hpp>
@@ -119,6 +120,8 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("drain_events"), &SimBridge::drain_events);
     ClassDB::bind_method(D_METHOD("regiment_info", "regiment"), &SimBridge::regiment_info);
     ClassDB::bind_method(D_METHOD("cost_grid", "move_class"), &SimBridge::cost_grid);
+    ClassDB::bind_method(D_METHOD("set_view_heights", "heights", "verts_per_row", "tile"), &SimBridge::set_view_heights);
+    ClassDB::bind_method(D_METHOD("unit_instances", "alpha", "selected_orgs"), &SimBridge::unit_instances);
 }
 
 String SimBridge::hello() const {
@@ -486,6 +489,103 @@ Dictionary SimBridge::snapshot() const {
     out["cur_pos"] = curPos;
     out["prev_facing"] = prevFacing;
     out["cur_facing"] = curFacing;
+    return out;
+}
+
+// ------------------------------------------------------------------------------ batched units
+
+void SimBridge::set_view_heights(const PackedFloat32Array& heights, int64_t vertsPerRow, double tile) {
+    viewHeights.assign(heights.ptr(), heights.ptr() + heights.size());
+    viewRow = vertsPerRow;
+    viewTile = static_cast<float>(tile);
+}
+
+// Same bilinear lookup as BattleTerrain.height_at().
+float SimBridge::viewHeight(float x, float y) const {
+    if (viewRow < 2 || viewHeights.size() < static_cast<std::size_t>(viewRow) * 2) return 0.0f;
+    const int64_t tilesX = viewRow - 1;
+    const int64_t tilesY = static_cast<int64_t>(viewHeights.size()) / viewRow - 1;
+    const float fx = std::clamp(x / viewTile, 0.0f, static_cast<float>(tilesX) - 0.001f);
+    const float fy = std::clamp(y / viewTile, 0.0f, static_cast<float>(tilesY) - 0.001f);
+    const int64_t ix = static_cast<int64_t>(fx);
+    const int64_t iy = static_cast<int64_t>(fy);
+    const float tx = fx - static_cast<float>(ix);
+    const float ty = fy - static_cast<float>(iy);
+    const float* r0 = viewHeights.data() + iy * viewRow + ix;
+    const float* r1 = r0 + viewRow;
+    const float a = r0[0] + (r0[1] - r0[0]) * tx;
+    const float b = r1[0] + (r1[1] - r1[0]) * tx;
+    return a + (b - a) * ty;
+}
+
+Dictionary SimBridge::unit_instances(double alpha, const PackedInt64Array& selectedOrgs) const {
+    Dictionary out;
+    if (!sim) return out;
+    std::vector<uint32_t> selected;
+    selected.reserve(static_cast<std::size_t>(selectedOrgs.size()));
+    for (int64_t i = 0; i < selectedOrgs.size(); ++i) selected.push_back(static_cast<uint32_t>(selectedOrgs[i]));
+    std::sort(selected.begin(), selected.end());
+    struct Lists {
+        std::vector<float> units, rings;
+    };
+    std::map<int32_t, Lists> byDef;
+    const float a = static_cast<float>(std::clamp(alpha, 0.0, 1.0));
+    const corps::World& w = sim->world();
+    auto push = [](std::vector<float>& v, float c, float s, float x, float y, float z, float c0, float c1, float c2) {
+        // MultiMesh 3D layout: basis rows with the origin as the fourth column, then custom data.
+        const float row[16] = {c, 0, s, x, 0, 1, 0, y, -s, 0, c, z, c0, c1, c2, 0};
+        v.insert(v.end(), row, row + 16);
+    };
+    for (std::size_t i = 0; i < w.transforms.size(); ++i) {
+        const EntityId id = w.transforms.ids()[i];
+        const corps::Mover* mv = w.movers.get(id);
+        if (mv == nullptr) continue;
+        const corps::Transform& t = w.transforms.data()[i];
+        const corps::DefRef* dr = w.defRefs.get(id);
+        const corps::Member* m = w.members.get(id);
+        const corps::Regiment* r = w.regiments.get(m != nullptr ? m->organization : id);
+        float x1 = static_cast<float>(toF(t.position.x));
+        float y1 = static_cast<float>(toF(t.position.y));
+        float f1 = angleRad(t.facing);
+        float x0 = x1, y0 = y1, f0 = f1;
+        const auto it = std::lower_bound(prev.begin(), prev.end(), id.bits, [](const Snap& s, uint32_t b) {
+            return EntityId{s.bits}.index() < EntityId{b}.index();
+        });
+        if (it != prev.end() && it->bits == id.bits) {
+            x0 = it->x;
+            y0 = it->y;
+            f0 = it->facing;
+        }
+        const float x = x0 + (x1 - x0) * a;
+        const float y = y0 + (y1 - y0) * a;
+        float df = std::fmod(f1 - f0, static_cast<float>(kTwoPi));
+        df = std::fmod(2.0f * df, static_cast<float>(kTwoPi)) - df;  // shortest turn, as lerp_angle
+        const float yaw = -(f0 + df * a);
+        const float c = std::cos(yaw);
+        const float s = std::sin(yaw);
+        const float h = viewHeight(x, y);
+        const float moving = toF(mv->velocity.lengthSq()) > 0.0025 ? 1.0f : 0.0f;
+        const float phase = static_cast<float>((id.index() * 2654435761u) >> 8) / 16777216.0f;
+        const float player = static_cast<float>(r != nullptr ? r->player : 0);
+        Lists& l = byDef[dr != nullptr ? static_cast<int32_t>(dr->index) : -1];
+        push(l.units, c, s, x, h, y, moving, phase, player);
+        const uint32_t org = m != nullptr ? m->organization.bits : 0;
+        if (!selected.empty() && std::binary_search(selected.begin(), selected.end(), org))
+            push(l.rings, 1, 0, x, h + 0.08f, y, player, 0, 0);
+    }
+    for (const auto& [def, l] : byDef) {
+        PackedFloat32Array units, rings;
+        units.resize(static_cast<int64_t>(l.units.size()));
+        std::copy(l.units.begin(), l.units.end(), units.ptrw());
+        rings.resize(static_cast<int64_t>(l.rings.size()));
+        std::copy(l.rings.begin(), l.rings.end(), rings.ptrw());
+        Dictionary d;
+        d["count"] = static_cast<int64_t>(l.units.size() / 16);
+        d["units"] = units;
+        d["ring_count"] = static_cast<int64_t>(l.rings.size() / 16);
+        d["rings"] = rings;
+        out[def] = d;
+    }
     return out;
 }
 

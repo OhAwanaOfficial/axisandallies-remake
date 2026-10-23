@@ -15,6 +15,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int64_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector2.hpp>
@@ -73,6 +74,15 @@ public:
     Dictionary regiment_info(int64_t regiment) const;
     PackedByteArray cost_grid(int64_t move_class) const;
 
+    // --- batched unit rendering (view only) ---------------------------------------------------
+    // The terrain's vertex heights ((tiles + 1)^2, row-major, `tile` units apart), so instance
+    // transforms sit on the same ground the view draws.
+    void set_view_heights(const PackedFloat32Array& heights, int64_t verts_per_row, double tile);
+    // Per unit def: {"count", "units": 16 floats per unit (MultiMesh 3D transform + custom data:
+    // moving, animation phase 0..1, player, 0), "ring_count", "rings": the same for units whose
+    // organization is in `selected_orgs`}, placed at render interpolation `alpha`.
+    Dictionary unit_instances(double alpha, const PackedInt64Array& selected_orgs) const;
+
 private:
     struct Snap {
         uint32_t bits = 0;
@@ -81,6 +91,7 @@ private:
     void queue(corps::Command c);
     std::vector<corps::EntityId> regimentList(const PackedInt64Array& ids) const;
     std::vector<Snap> capture() const;
+    float viewHeight(float x, float y) const;
 
     struct Data;
     std::unique_ptr<Data> data;
@@ -88,6 +99,9 @@ private:
     std::unique_ptr<corps::Sim> sim;
     std::vector<corps::Command> pending;
     std::vector<Snap> prev;
+    std::vector<float> viewHeights;
+    int64_t viewRow = 0;
+    float viewTile = 2.0f;
     Array events;
     uint16_t seq[256] = {};
     std::string error;
