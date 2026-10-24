@@ -52,6 +52,18 @@ func sync(snap: Dictionary, alpha: float) -> void:
 	stats.units = views.size()
 
 
+## Plays one-shot clip `clip` (Recoil1) on unit `bits`; the move / idle clip resumes after it.
+func play_oneshot(bits: int, clip: String) -> bool:
+	var v: Dictionary = views.get(bits, {})
+	var ap: AnimationPlayer = v.get("anim")
+	if ap == null or not ap.has_animation(clip):
+		return false
+	ap.play(clip, 0.05)
+	ap.seek(0.0, true)
+	v.playing = clip
+	return true
+
+
 func set_selected(selected_orgs: Dictionary) -> void:
 	for bits in views:
 		var v: Dictionary = views[bits]
@@ -93,8 +105,10 @@ func _animate(v: Dictionary, moving: bool) -> void:
 	var ap: AnimationPlayer = v.anim
 	if ap == null:
 		return
+	if ap.is_playing() and ap.current_animation == "Recoil1":
+		return  # let the one-shot finish
 	var want := UnitModels.pick_clip(models.proto(v.def).anims, ["Walk", "Jog"] if moving else ["Idle", "Fidget1"])
-	if want != "" and want != v.playing:
+	if want != "" and (want != v.playing or not ap.is_playing()):
 		ap.play(want, 0.2)
 		v.playing = want
 

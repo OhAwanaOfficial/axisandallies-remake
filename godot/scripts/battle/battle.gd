@@ -1,11 +1,16 @@
 extends Node3D
-## Battle view (M4 part 3): the sim through SimBridge, terrain from the map, unit models with render
-## interpolation, RTS camera, selection and move orders. The view only ever *queues commands*.
+## Battle view (M4 part 3, M5 part 3): the sim through SimBridge, terrain from the map, unit models
+## with render interpolation, RTS camera, selection, move and attack orders, combat effects
+## (FxRunner), regiment banners (Banners) and the selected regiment's info panel. The view only
+## ever *queues commands*.
 ##
 ## Controls
 ##   Left click / drag: select regiments (click a unit, or box). Shift adds. Double-click: all
 ##     visible regiments of that type. Ctrl+1..9 saves the selection, 1..9 recalls it (twice: jump).
-##   Right click: move. Right drag: move and face the drag direction. Alt+right click: Run.
+##   Right click: move; on an enemy: attack it. Right drag: move and face the drag direction.
+##     Alt+right click: Run.
+##   A, then left click: attack-move to the ground clicked, or attack the enemy clicked (Shift
+##     keeps the mode; right click or Esc cancels). The cursor turns to the attack cursor.
 ##   Q / W / E: Assault / Normal / Column.  V: group behaviour (division) on/off.  S: stop.
 ##   B: drop a debug blocker at the cursor.  Space: pause.  + / -: sim speed.
 ##   Camera: arrows or screen edges pan, wheel zooms, middle drag or PgUp/PgDn rotates, Home resets.
@@ -14,13 +19,16 @@ extends Node3D
 ##
 ## Command line (after `--`): --map=PATH.json | --gen=SEED:SIZE, --seed=N, --cache=DIR,
 ##   --screenshot=PATH (renders after --frames=N frames and quits), --demo (orders a move at start),
+##   --fight (both sides attack-move into each other at start and the camera follows the first own
+##   regiment in a fight; with --regiments every group attack-moves), --speed=X (sim speed at start),
 ##   --zoom=DIST, --select-all, --cost / --paths / --slots (overlays on at start),
 ##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits),
 ##   --regiments=N (N mixed regiments, half per side, crossing the map in groups of six),
 ##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits),
 ##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone),
-##   --no-hud (hide the HUD label), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
+##   --no-hud (hide the HUD label), --no-fx (no combat effects or banners, for profiling), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
 ##   --profile=FRAMES (frame time split by cost; with --no-anim, --hide-units, --no-shadows, --plain-terrain),
+##   --warmup=FRAMES (frames --profile / --measure skip first; default 90 / 60),
 ##   --hud2d (draw the HUD as a 2D Label instead of a Label3D on the camera; crashes Godot 4.7.2, ARCHITECTURE §4.4).
 
 const TICK := 0.1
@@ -43,6 +51,9 @@ var loader: CacheLoader
 var terrain: BattleTerrain
 var units                    # UnitBatches (Low, Medium) or UnitViews (High)
 var models: UnitModels
+var fx: FxRunner
+var banners: Banners
+var info3d: Label3D          # the selected regiment's info panel (a Label3D, like the HUD)
 var quality := ""
 var sun: DirectionalLight3D
 var cam: RtsCamera
@@ -74,6 +85,11 @@ var _right_from_screen := Vector2.ZERO
 var _right_from_ground: Variant = null
 var _left_double := false  # the press was the second of an OS double-click
 var _frames := 0
+var _attack_mode := false  # A pressed: the next left click attack-moves / attacks
+var _cursor := ""          # "" (the system arrow) or "attack"
+var _cursor_check_ms := 0
+var _regiment_units := {}  # regiment bits -> most units it had (info panel)
+var _prewarmed := {}       # unit def -> true once FxRunner loaded its effects
 
 
 func _ready() -> void:
@@ -105,6 +121,7 @@ func _ready() -> void:
 	else:
 		_spawn_demo(args.has("demo"))
 	snap = bridge.snapshot()
+	speed = float(args.get("speed", "1"))
 	loading_layer.queue_free()
 	if args.has("profile"):
 		_profile_setup()
@@ -141,7 +158,16 @@ func _build_scene(map: Dictionary) -> void:
 		terrain.mesh_instance.material_override = plain
 
 	models = UnitModels.new(loader, bridge)
+	FxRunner.ensure_globals()
+	fx = FxRunner.new()
+	fx.name = "Fx"
+	add_child(fx)
+	fx.setup(bridge, models, terrain)
 	_apply_quality(_initial_quality())
+	banners = Banners.new()
+	banners.name = "Banners"
+	add_child(banners)
+	banners.setup(bridge, terrain)
 
 	overlay_root = Node3D.new()
 	overlay_root.name = "Overlays"
@@ -227,6 +253,14 @@ func _spawn_demo(order_move: bool) -> void:
 			if _player_of(bits) == PLAYER:
 				mine.append(bits)
 		bridge.queue_move(mine, (west + east) * 0.5, false, false, 0.0, PLAYER)
+	if args.has("fight"):
+		var sides := [PackedInt64Array(), PackedInt64Array()]
+		for bits in regiment_defs:
+			sides[0 if _player_of(bits) == PLAYER else 1].append(bits)
+		bridge.queue_attack_move(sides[0], east, PLAYER)
+		bridge.queue_attack_move(sides[1], west, 1)
+		cam.focus_on(west + (east - west) * 0.45)
+		cam.distance = float(args.get("zoom", "55"))
 
 
 const MANY_TYPES := ["regiment_ger_infantry", "regiment_ger_tank_medium", "regiment_usa_infantry",
@@ -278,7 +312,10 @@ func _spawn_many(n: int) -> void:
 		for s0 in range(0, mine.size(), 6):
 			var grp := mine.slice(s0, s0 + 6)
 			var a: Vector2 = bridge.regiment_info(grp[0]).anchor
-			bridge.queue_move(grp, Vector2(w - a.x, a.y), false, false, 0.0, p)
+			if _args().has("fight"):
+				bridge.queue_attack_move(grp, Vector2(w - a.x, a.y), p)
+			else:
+				bridge.queue_move(grp, Vector2(w - a.x, a.y), false, false, 0.0, p)
 	cam.setup(terrain, Vector2(w * 0.5, h * 0.5))
 	cam.distance = 160.0
 	print("spawned %d regiments" % regiment_defs.size())
@@ -291,7 +328,7 @@ func _spawn_many(n: int) -> void:
 		paused = true
 
 
-var _measure := {"frames": 0, "frame_ms": [], "step_ms": [], "steps": 0}
+var _measure := {"frames": 0, "last_us": 0, "frame_ms": [], "delta_ms": 0.0, "step_ms": [], "steps": 0}
 
 # ---------------------------------------------------------------- profiling (--profile=FRAMES)
 # Wall-clock frame time (Godot clamps `delta`, so delta-based fps can't go below ~7.5) split into
@@ -301,7 +338,7 @@ var _measure := {"frames": 0, "frame_ms": [], "step_ms": [], "steps": 0}
 var _profiling := false
 var _prof := {"n": 0, "last_us": 0, "sum": [], "frame": [], "process": 0.0, "render_cpu": 0.0, "render_gpu": 0.0,
 	"draws": 0.0, "objects": 0.0, "prims": 0.0}
-const PROF_NAMES := ["sim step", "snapshot", "view sync", "selection", "overlays", "hud", "our _process"]
+const PROF_NAMES := ["sim step", "snapshot+events", "view sync", "selection", "overlays", "hud", "fx+banners", "our _process"]
 
 
 func _profile_setup() -> void:
@@ -320,7 +357,7 @@ func _profile_frame(parts: Array) -> void:
 	var last: int = _prof.last_us
 	_prof.last_us = now
 	_measure.frames += 1
-	if _measure.frames <= 90 or last == 0:  # warm-up: shaders, first paths, animation start
+	if _measure.frames <= int(_args().get("warmup", "90")) or last == 0:  # warm-up: shaders, first paths, animation start
 		return
 	(_prof.frame as Array).append((now - last) / 1000.0)
 	for k in parts.size():
@@ -347,19 +384,25 @@ func _profile_frame(parts: Array) -> void:
 		for key in ["no-anim", "hide-units", "no-shadows", "plain-terrain", "quality"]:
 			if _args().has(key):
 				flags.append(key if key != "quality" else "quality=" + str(_args().quality))
-		print("PROFILE [%s] %d units, %d frames: frame %.1f ms = %.1f fps (p50 %.1f, p95 %.1f) | %s | godot process %.2f | render cpu %.2f gpu %.2f | draws %.0f objects %.0f prims %.0f" % [
+		print("PROFILE [%s] %d units, %d frames: frame %.1f ms = %.1f fps (p50 %.1f, p95 %.1f, p99 %.1f, max %.1f) | %s | godot process %.2f | render cpu %.2f gpu %.2f | draws %.0f objects %.0f prims %.0f" % [
 			",".join(flags) if not flags.is_empty() else "baseline", units.stats.units, f.size(), total / f.size(),
-			1000.0 / (total / f.size()), f[f.size() / 2], f[int(f.size() * 0.95)], ", ".join(parts_txt),
+			1000.0 / (total / f.size()), f[f.size() / 2], f[int(f.size() * 0.95)], f[int(f.size() * 0.99)], f.back(), ", ".join(parts_txt),
 			_prof.process / n, _prof.render_cpu / n, _prof.render_gpu / n, _prof.draws / n, _prof.objects / n, _prof.prims / n])
 		get_tree().quit()
 
 
+# Frames are timed by wall clock between calls: Godot clamps `delta` to about 8 physics ticks
+# (133 ms), so delta-based fps can't go below ~7.5. The clamped `delta` average is printed too.
 func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
 	var want := int(_args().measure)
+	var now := Time.get_ticks_usec()
+	var last: int = _measure.last_us
+	_measure.last_us = now
 	_measure.frames += 1
-	if _measure.frames <= 60:  # warm-up: shaders, first paths
+	if _measure.frames <= int(_args().get("warmup", "60")) or last == 0:  # warm-up: shaders, first paths
 		return
-	(_measure.frame_ms as Array).append(delta * 1000.0)
+	(_measure.frame_ms as Array).append((now - last) / 1000.0)
+	_measure.delta_ms += delta * 1000.0
 	if steps > 0:
 		(_measure.step_ms as Array).append(step_ms / steps)
 	if (_measure.frame_ms as Array).size() >= want:
@@ -373,10 +416,10 @@ func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
 		for x in st:
 			stotal += x
 		st.sort()
-		print("MEASURE %d regiments, %d units, %d frames: avg %.1f fps (frame %.1f ms, p95 %.1f ms); sim step avg %.2f ms, max %.2f ms; renderer %s" % [
+		print("MEASURE %d regiments, %d units, %d frames: avg %.1f fps (frame %.1f ms, p95 %.1f ms; clamped delta %.1f ms); sim step avg %.2f ms, max %.2f ms; renderer %s" % [
 			regiment_defs.size(), units.stats.units, f.size(), 1000.0 / (total / f.size()), total / f.size(),
-			f[int(f.size() * 0.95)], stotal / maxi(st.size(), 1), st.back() if not st.is_empty() else 0.0,
-			RenderingServer.get_video_adapter_name()])
+			f[int(f.size() * 0.95)], _measure.delta_ms / f.size(), stotal / maxi(st.size(), 1),
+			st.back() if not st.is_empty() else 0.0, RenderingServer.get_video_adapter_name()])
 		get_tree().quit()
 
 
@@ -399,9 +442,10 @@ func _process(delta: float) -> void:
 			steps += 1
 		if steps > 0:
 			var t1 := Time.get_ticks_usec()
+			var before := snap
 			snap = bridge.snapshot()
 			_learn_regiments()
-			_drain_events()
+			_drain_events(before)
 			snap_us = Time.get_ticks_usec() - t1
 		if steps == 8:
 			accum = 0.0
@@ -415,14 +459,42 @@ func _process(delta: float) -> void:
 	var t5 := Time.get_ticks_usec()
 	_update_hud()
 	var t6 := Time.get_ticks_usec()
+	var args_fx_off := _args().has("no-fx")
+	fx.update(delta, 0.0 if paused else speed, cam.global_position)
+	if units is UnitBatches:
+		units.update_corpses(fx.clock)
+	if not args_fx_off:
+		banners.set_selected(selected)
+		banners.sync(alpha)
+	var t7 := Time.get_ticks_usec()
 	_frames += 1
 	var args := _args()
 	if _profiling:
-		_profile_frame([step_us, snap_us, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t6 - t_frame])
+		_profile_frame([step_us, snap_us, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6, t7 - t_frame])
 	if args.has("measure"):
 		_measure_frame(delta, step_us / 1000.0, steps)
+	if args.has("fight") and not args.has("regiments") and _frames % 30 == 0:
+		_follow_fight()
 	if args.has("screenshot") and not args.has("selftest") and _frames == int(args.get("frames", "120")):
 		_save_screenshot(str(args.screenshot))
+
+
+## --fight: the camera on the first own regiment that is fighting (else the first own one).
+func _follow_fight() -> void:
+	var keys := regiment_defs.keys()
+	keys.sort()
+	var pick := -1
+	for bits in keys:
+		var info: Dictionary = bridge.regiment_info(bits)
+		if int(info.get("player", -1)) != PLAYER:
+			continue
+		if pick < 0:
+			pick = bits
+		if str(info.get("engagement", "idle")) == "engaging":
+			pick = bits
+			break
+	if pick >= 0:
+		cam.focus_on(bridge.regiment_info(pick).anchor)
 
 
 func _learn_regiments() -> void:
@@ -431,20 +503,33 @@ func _learn_regiments() -> void:
 		snap = bridge.snapshot()
 		ids = snap.id
 	var live := {}
+	var fresh := false
 	for i in ids.size():
 		if snap.kind[i] == 1:
 			live[ids[i]] = true
 			if not regiment_defs.has(ids[i]):
 				regiment_defs[ids[i]] = snap.def[i]
+				fresh = true
+	# New regiments: load their unit types' effects now, not at their first shot.
+	if fresh and fx != null:
+		for i in ids.size():
+			if snap.kind[i] == 0 and not _prewarmed.has(snap.def[i]):
+				_prewarmed[snap.def[i]] = true
+				fx.prewarm(snap.def[i])
 	for bits in regiment_defs.keys():
 		if not live.has(bits):
 			regiment_defs.erase(bits)
 			selected.erase(bits)
 
 
-func _drain_events() -> void:
-	for e in bridge.drain_events():
-		if e.type in ["arrived", "blocked", "rejected"]:
+## This frame's events: combat ones to the effects (`before`: the snapshot before these ticks,
+## which still has the units they killed), the rest to the HUD log.
+func _drain_events(before: Dictionary) -> void:
+	var events: Array = bridge.drain_events()
+	if not _args().has("no-fx"):
+		fx.handle(events, snap, before)
+	for e in events:
+		if e.type in ["arrived", "blocked", "rejected", "routed", "level_up"]:
 			var name: String = bridge.regiment_def(regiment_defs.get(e.entity, -1)).get("ids", "#%d" % e.entity) if e.type != "rejected" else "command %d" % e.command
 			events_log.append("t%d %s %s" % [e.tick, e.type, name])
 	while events_log.size() > 6:
@@ -458,7 +543,15 @@ func _unhandled_input(ev: InputEvent) -> void:
 		return  # still loading
 	if ev is InputEventMouseButton:
 		var mb := ev as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_LEFT:
+		if mb.button_index == MOUSE_BUTTON_LEFT and _attack_mode:
+			if not mb.pressed:
+				_order_attack_at(mb.position)
+				if not mb.shift_pressed:
+					_set_attack_mode(false)
+		elif mb.button_index == MOUSE_BUTTON_RIGHT and _attack_mode:
+			if not mb.pressed:
+				_set_attack_mode(false)
+		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
 				_left_down = true
 				_left_from = mb.position
@@ -479,7 +572,13 @@ func _unhandled_input(ev: InputEvent) -> void:
 				_right_from_ground = _ground_at(mb.position)
 			elif _right_down:
 				_right_down = false
-				_order_move(mb.position, mb.alt_pressed)
+				var enemy := _target_at(mb.position)
+				if enemy != 0 and mb.position.distance_to(_right_from_screen) <= DRAG_PX * 2:
+					_order_attack(enemy)
+				else:
+					_order_move(mb.position, mb.alt_pressed)
+	elif ev is InputEventMouseMotion and not _left_down:
+		_update_cursor((ev as InputEventMouseMotion).position)
 	elif ev is InputEventMouseMotion and _left_down:
 		var m := (ev as InputEventMouseMotion).position
 		if m.distance_to(_left_from) > DRAG_PX:
@@ -505,6 +604,11 @@ func _key(k: InputEventKey) -> void:
 		KEY_S:
 			if not regs.is_empty():
 				bridge.queue_stop(regs, PLAYER)
+		KEY_A:
+			if not regs.is_empty():
+				_set_attack_mode(true)
+		KEY_ESCAPE:
+			_set_attack_mode(false)
 		KEY_B:
 			var g: Variant = _ground_at(get_viewport().get_mouse_position())
 			if g != null:
@@ -581,6 +685,72 @@ func _select_box(r: Rect2, add: bool) -> void:
 		if r.has_point(p) and not cam.camera.is_position_behind(terrain.to_world(snap.cur_pos[i])):
 			selected[snap.org[i]] = true
 	units.set_selected(selected)
+
+
+## The enemy under the cursor: the regiment of the nearest enemy unit within 24 px, or an enemy
+## building within 40 px; 0 if none.
+func _target_at(at: Vector2) -> int:
+	var best := 1e9
+	var hit := 0
+	var ids: PackedInt64Array = snap.get("id", PackedInt64Array())
+	for i in ids.size():
+		var k: int = snap.kind[i]
+		if (k != 0 and k != 3) or snap.player[i] == PLAYER:
+			continue
+		var w := terrain.to_world(snap.cur_pos[i], 0.6 if k == 0 else 1.5)
+		if cam.camera.is_position_behind(w):
+			continue
+		var d := cam.camera.unproject_position(w).distance_to(at)
+		if d < (24.0 if k == 0 else 40.0) and d < best:
+			best = d
+			hit = snap.org[i] if k == 0 else ids[i]
+	return hit
+
+
+func _order_attack(target: int) -> void:
+	var regs := _selected_ids()
+	if not regs.is_empty() and target != 0:
+		bridge.queue_attack(regs, target, PLAYER)
+
+
+## Attack-move mode's click: attack the enemy under the cursor, or attack-move to the ground.
+func _order_attack_at(at: Vector2) -> void:
+	var regs := _selected_ids()
+	if regs.is_empty():
+		return
+	var enemy := _target_at(at)
+	if enemy != 0:
+		bridge.queue_attack(regs, enemy, PLAYER)
+		return
+	var g: Variant = _ground_at(at)
+	if g != null:
+		bridge.queue_attack_move(regs, g, PLAYER)
+
+
+func _set_attack_mode(on: bool) -> void:
+	_attack_mode = on
+	_update_cursor(get_viewport().get_mouse_position(), true)
+
+
+## The attack cursor (the original's Attack_0) in attack-move mode, or with a selection over an
+## enemy; the system arrow otherwise. The enemy test runs at most every 50 ms.
+func _update_cursor(at: Vector2, now := false) -> void:
+	var t := Time.get_ticks_msec()
+	if not now and t < _cursor_check_ms:
+		return
+	_cursor_check_ms = t + 50
+	var want := "attack" if _attack_mode or (not selected.is_empty() and _target_at(at) != 0) else ""
+	if want == _cursor:
+		return
+	_cursor = want
+	if want == "":
+		Input.set_custom_mouse_cursor(null)
+		return
+	var tex := loader.load_texture("Cursors/Cursors/Attack_0.tga")
+	if tex != null:
+		Input.set_custom_mouse_cursor(tex, Input.CURSOR_ARROW, tex.get_size() * 0.5)
+	else:
+		Input.set_default_cursor_shape(Input.CURSOR_CROSS)
 
 
 ## The own regiment whose unit is nearest the cursor (within 24 px), or 0.
@@ -761,10 +931,15 @@ func _update_hud() -> void:
 	hud.visible = overlay.hud and hud3d == null
 	if hud3d != null:
 		hud3d.visible = overlay.hud
+		if info3d == null:
+			info3d = _make_hud3d()
+			info3d.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		info3d.visible = overlay.hud and not selected.is_empty()
 	if not overlay.hud or _args().has("no-hud"):
 		hud.visible = false
 		if hud3d != null:
 			hud3d.visible = false
+			info3d.visible = false
 		return
 	# Rebuild the text at most 4 times a second, and only when it changes.
 	var now := Time.get_ticks_msec()
@@ -791,13 +966,48 @@ func _update_hud() -> void:
 	for e in events_log:
 		lines_out.append("  " + e)
 	lines_out.append("F1 cost  F2 paths  F3 slots  F4 HUD  F6 quality   Q/W/E formation  V division  S stop  Alt+RMB run  B blocker")
+	lines_out.append("RMB on enemy: attack   A + click: attack-move%s   fx: %d sprites, %d bodies, %d sounds" % [
+		"  [ATTACK-MOVE: click ground or enemy, Esc cancels]" if _attack_mode else "", fx.stats.sprites,
+		fx.stats.bodies + (units.stats.get("corpses", 0) if units is UnitBatches else 0), fx.stats.sounds])
 	var text := "\n".join(lines_out)
 	if hud3d != null:
 		_place_hud3d()
 		if text != hud3d.text:
 			hud3d.text = text
+		var info_text := _info_text()
+		if info_text != info3d.text:
+			info3d.text = info_text
 	elif text != hud.text:
 		hud.text = text
+
+
+## The info panel: the first selected regiment's strength, health, morale, efficiency, experience
+## and engagement.
+func _info_text() -> String:
+	var regs := _selected_ids()
+	if regs.is_empty():
+		return ""
+	var info: Dictionary = bridge.regiment_info(regs[0])
+	if info.is_empty() or not info.has("morale"):
+		return ""
+	var bits := regs[0]
+	var alive := int(info.units_alive)
+	_regiment_units[bits] = maxi(int(_regiment_units.get(bits, 0)), alive)
+	var lv := int(info.level)
+	var steps: PackedFloat32Array = info.get("level_xp", PackedFloat32Array())
+	# level_xp[0] is level 0 (0 XP); the next level's requirement follows the current one.
+	var next := "  next level at %d" % int(steps[lv + 1]) if lv + 1 < steps.size() else ("  top level" if steps.size() > 1 else "")
+	var state := str(info.engagement)
+	if str(info.mode) != "none":
+		state += "  (%s)" % str(info.mode).replace("_", "-")
+	var out: Array[String] = []
+	out.append("%s%s" % [bridge.regiment_def(int(info.def)).get("ids", "?"), "  +%d more selected" % (regs.size() - 1) if regs.size() > 1 else ""])
+	out.append("units %d / %d    health %d / %d" % [alive, _regiment_units[bits], roundi(info.health), roundi(info.health_max)])
+	out.append("morale %d / %d  (breaks at %d)    efficiency %d%%" % [roundi(info.morale), roundi(info.morale_max),
+		roundi(float(info.get("breakpoint", 0.0))), roundi(float(info.efficiency) * 100.0)])
+	out.append("level %d    xp %d%s" % [lv, roundi(info.xp), next])
+	out.append("%s  %s%s" % [FORMATION_LABELS.get(info.formation, info.formation), state, "  ENTRENCHED" if info.entrenched else ""])
+	return "\n".join(out)
 
 
 ## The HUD as a Label3D 1 m in front of the camera, sized so one font pixel is one screen pixel.
@@ -826,6 +1036,9 @@ func _place_hud3d() -> void:
 	var px := 2.0 * half_h / size.y
 	hud3d.pixel_size = px
 	hud3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, half_h - 8.0 * px, -1.0)
+	if info3d != null:
+		info3d.pixel_size = px
+		info3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, -half_h + 10.0 * px, -1.0)
 
 
 # ---------------------------------------------------------------- graphics quality
@@ -877,6 +1090,9 @@ func _apply_quality(q: String) -> void:
 		units.setup(models, terrain)
 	units.visible = not args.has("hide-units")
 	units.set_selected(selected)
+	if want_batches:
+		units.max_corpses = 60 if q == "low" else 200
+	fx.set_quality(q, units)
 
 
 # ---------------------------------------------------------------- setup helpers
@@ -991,6 +1207,7 @@ func _selftest() -> void:
 	check.call("double-click selects the type (%d)" % same, selected.size() == same and same >= 2)
 	# Box over the whole view.
 	var size := get_viewport().get_visible_rect().size
+	var sim_units := 0
 	for step in [[true, Vector2(5, 5)], [null, size - Vector2(5, 5)], [false, size - Vector2(5, 5)]]:
 		var ev: InputEvent
 		if step[0] == null:
@@ -1043,8 +1260,62 @@ func _selftest() -> void:
 	check.call("F1 shows the cost grid", cost_mesh != null and cost_mesh.visible)
 	check.call("F3 shows slot targets", slot_marks.multimesh.instance_count > 0)
 	check.call("F2 draws the path", (lines.mesh as ImmediateMesh).get_surface_count() > 0)
-	# Interpolation: views sit between the previous and current tick.
-	var sim_units := 0
+	for k in [KEY_F1, KEY_F2, KEY_F3]:
+		await key.call(k)
+	# Combat (M5 part 3). Right click on an enemy: Attack.
+	var enemies: Array = []
+	for bits in regiment_defs:
+		if _player_of(bits) != PLAYER:
+			enemies.append(bits)
+	enemies.sort()
+	var foe: int = enemies[0]
+	await click.call(screen_of.call(first))
+	cam.focus_on((bridge.regiment_info(foe).anchor as Vector2).lerp(bridge.regiment_info(first).anchor, 0.3))
+	await settle.call(1)
+	await click.call(screen_of.call(foe), MOUSE_BUTTON_RIGHT)
+	await settle.call(2)
+	var ri: Dictionary = bridge.regiment_info(first)
+	check.call("right click on an enemy attacks it (mode %s)" % ri.mode, ri.mode == "attack" and int(ri.attack_target) == foe)
+	# A: attack-move mode and its cursor; a click on the ground attack-moves there.
+	await key.call(KEY_A)
+	check.call("A enters attack-move mode with the attack cursor", _attack_mode and _cursor == "attack")
+	var ground := cam.camera.unproject_position(terrain.to_world((bridge.regiment_info(first).anchor as Vector2) + Vector2(6, 0)))
+	await click.call(ground)
+	await settle.call(2)
+	ri = bridge.regiment_info(first)
+	check.call("A + click on the ground attack-moves (mode %s)" % ri.mode, ri.mode == "attack_move" and not _attack_mode)
+	# A + click on an enemy: Attack, for every own regiment.
+	for bits in mine:
+		selected[bits] = true
+	await key.call(KEY_A)
+	await click.call(screen_of.call(foe))
+	await settle.call(2)
+	var attacking := 0
+	for bits in mine:
+		if bridge.regiment_info(bits).get("mode", "") == "attack":
+			attacking += 1
+	check.call("A + click on an enemy attacks (%d of %d)" % [attacking, mine.size()], attacking == mine.size())
+	check.call("banners: 4 per regiment (%d for %d)" % [banners.count, regiment_defs.size()], banners.count == 4 * regiment_defs.size())
+	# The fight: shots play sounds and sprites; deaths leave bodies.
+	speed = 8.0
+	var until: int = int(snap.tick) + 1500
+	while (fx.stats.sounds == 0 or fx.stats.hits == 0 or fx.stats.deaths == 0) and int(snap.tick) < until:
+		await get_tree().process_frame
+	speed = 1.0
+	await get_tree().process_frame
+	var corpses: int = units.stats.get("corpses", 0) if units is UnitBatches else 0
+	check.call("shots fire with sounds and sprites (%d fired, %d hits, %d sounds, %d sprites)" % [fx.stats.fired, fx.stats.hits,
+		fx.stats.sounds, fx.stats.sprites], fx.stats.fired > 0 and fx.stats.hits > 0 and fx.stats.sounds > 0 and fx.stats.sprites > 0)
+	check.call("deaths leave bodies (%d deaths, %d wrecks / corpse nodes, %d baked corpses)" % [fx.stats.deaths, fx.stats.bodies, corpses],
+		fx.stats.deaths > 0 and fx.stats.bodies + corpses > 0)
+	_hud_next_ms = 0
+	_update_hud()
+	check.call("the info panel shows the selected regiment", info3d != null and info3d.visible and info3d.text.contains("morale"))
+	await click.call(Vector2(size.x - 20, size.y * 0.5))
+	# Freeze the fight so the unit counts below hold while the presets rebuild.
+	paused = true
+	await get_tree().process_frame
+	sim_units = 0
 	for k in (snap.kind as PackedByteArray):
 		if k == 0:
 			sim_units += 1
@@ -1055,7 +1326,7 @@ func _selftest() -> void:
 	var seen: Array[String] = []
 	for i in QUALITIES.size():
 		await key.call(KEY_F6)
-		await settle.call(1)
+		await get_tree().process_frame  # the sim is paused: frames, not ticks
 		await get_tree().process_frame
 		if units.stats.units == sim_units:
 			seen.append(quality)

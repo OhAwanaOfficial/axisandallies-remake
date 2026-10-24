@@ -10,6 +10,11 @@ extends Node3D
 ## instance's custom data (moving, phase), so animation costs no CPU per frame. Instance buffers
 ## come from SimBridge.unit_instances(), which interpolates between ticks in C++.
 ##
+## Infantry also get a Die clip baked: corpses (add_corpse, from FxRunner) are a second MultiMesh
+## per def with the same mesh, in die mode (custom.x = 2), playing the clip from their death time
+## and sinking after rot_time, all in the shader from the fx_time global. Their buffer is rewritten
+## only when a corpse is added or removed.
+##
 ## Each batch rotates through BUFFERS MultiMeshes, showing the one written this frame: rewriting a
 ## buffer the GPU may still be drawing from makes the driver wait for it (ANGLE on an Intel HD
 ## 3000 lost ~10 ms a frame to that with 500 units).
@@ -19,15 +24,18 @@ const VAT_MAX_FRAMES := 40       # per clip; longer clips are sampled more coars
 const VAT_MAX_WIDTH := 8192      # texture width limit on Direct3D 10.1-class GPUs (ANGLE)
 const MOVE_CLIPS := ["Walk", "Jog"]
 const IDLE_CLIPS := ["Idle", "Fidget1"]
+const DIE_FRAMES := 24           # the die clip is sampled more coarsely (it plays once)
 const BUFFERS := 3
+const SINK_SPEED := 0.6          # m/s, unit_vat.gdshader sink_speed
 
 var models: UnitModels
 var bridge: SimBridge
 var animate := true              # false: static rest pose, no vertex animation (profiling)
 var vertex_lighting := false     # Low quality: light per vertex instead of per pixel
 var anim_lod_distance := 120.0   # beyond this camera distance animation steps frame by frame
-var batches := {}                # unit def index -> {units: [MultiMeshInstance3D], rings: [...], vat, placeholder}
-var stats := {"units": 0, "placeholders": 0, "batches": 0, "bake_ms": 0}
+var batches := {}                # unit def index -> {units: [MultiMeshInstance3D], rings: [...], vat, die, placeholder, corpses: [...]}
+var max_corpses := 200           # per def; the oldest go first
+var stats := {"units": 0, "placeholders": 0, "batches": 0, "bake_ms": 0, "corpses": 0}
 var _selected := PackedInt64Array()
 var _bounds := AABB()
 var _shaders := {}               # cull mode -> Shader
@@ -66,12 +74,51 @@ func set_selected(selected_orgs: Dictionary) -> void:
 	_selected = PackedInt64Array(selected_orgs.keys())
 
 
+## A corpse of unit def `def` at `pos` (Godot), `facing` (sim angle), dead at fx time `now`,
+## sinking after `rot_time` for `sink_time` s. False when the def has no baked die clip.
+func add_corpse(def: int, pos: Vector3, facing: float, _player: int, now: float, rot_time: float, sink_time: float) -> bool:
+	var b := _batch(def)
+	if not b.die:
+		return false
+	var list: Array = b.corpse_list
+	if list.size() >= max_corpses:
+		list.pop_front()
+	var c := cos(-facing)
+	var s := sin(-facing)
+	# Same basis as SimBridge.unit_instances: rotation about Y by -facing.
+	list.append({"row": PackedFloat32Array([c, 0, s, pos.x, 0, 1, 0, pos.y, -s, 0, c, pos.z, 2.0, now, 0.0, now + rot_time]),
+		"gone": now + rot_time + sink_time})
+	b.corpses_dirty = true
+	return true
+
+
+## Drops corpses that have sunk and rewrites the corpse buffers that changed.
+func update_corpses(now: float) -> void:
+	var total := 0
+	for def in batches:
+		var b: Dictionary = batches[def]
+		var list: Array = b.corpse_list
+		while not list.is_empty() and list[0].gone <= now:
+			list.pop_front()
+			b.corpses_dirty = true
+		if b.corpses_dirty:
+			b.corpses_dirty = false
+			b.corpse_turn += 1
+			var buf := PackedFloat32Array()
+			for c in list:
+				buf.append_array(c.row)
+			_fill(b.corpses, list.size(), buf, b.corpse_turn)
+		total += list.size()
+	stats.corpses = total
+
+
 var _syncs := 0
 
 
-## Writes the instances into this frame's MultiMesh of `ring` and shows only that one.
-func _fill(ring: Array, count: int, buf: PackedFloat32Array) -> void:
-	var k := _syncs % BUFFERS
+## Writes the instances into this frame's MultiMesh of `ring` and shows only that one. `turn`
+## picks the MultiMesh (default: this frame's).
+func _fill(ring: Array, count: int, buf: PackedFloat32Array, turn := -1) -> void:
+	var k := (_syncs if turn < 0 else turn) % BUFFERS
 	for i in ring.size():
 		var mmi: MultiMeshInstance3D = ring[i]
 		mmi.visible = i == k and count > 0
@@ -96,8 +143,15 @@ func _batch(def: int) -> Dictionary:
 		"units": _multimesh(mesh, "Units_%d" % def, true),
 		"rings": _multimesh(_ring_mesh(proto.radius), "Rings_%d" % def, false),
 		"vat": built.get("vat", false),
+		"die": built.get("die", false),
 		"placeholder": placeholder,
+		"corpses": [],
+		"corpse_list": [],
+		"corpses_dirty": false,
+		"corpse_turn": 0,  # corpse buffers change on their own schedule: they turn their own ring
 	}
+	if b.die:
+		b.corpses = _multimesh(mesh, "Corpses_%d" % def, true)
 	batches[def] = b
 	stats.batches = batches.size()
 	stats.bake_ms += Time.get_ticks_msec() - t0
@@ -133,6 +187,9 @@ func _build_mesh(proto: Dictionary) -> Dictionary:
 		for n in [UnitModels.pick_clip(anims, MOVE_CLIPS), UnitModels.pick_clip(anims, IDLE_CLIPS)]:
 			if n != "":
 				clips.append({"name": n})
+		var die_name := UnitModels.pick_clip(anims, UnitModels.DIE_CLIPS)
+		if not clips.is_empty() and die_name != "":
+			clips.append({"name": die_name, "die": true})
 	var rig := _rig(proto)
 	var parts := _parts(rig)
 	if parts.is_empty():
@@ -146,22 +203,28 @@ func _build_mesh(proto: Dictionary) -> Dictionary:
 	for c in clips:
 		var a: Animation = anims[c.name]
 		var length := maxf(a.length, 0.05)
-		var n := clampi(ceili(length * VAT_FPS), 2, VAT_MAX_FRAMES)
+		var die: bool = c.get("die", false)
+		var n := clampi(ceili(length * VAT_FPS), 2, DIE_FRAMES if die else VAT_MAX_FRAMES)
+		if die:
+			n += 1  # one-shot: the last frame is the end pose
 		c.row = frames.size()
 		c.frames = n
 		c.fps = n / length
 		var r := _rig(proto)
 		var rp := _parts(r)
 		for k in n:
-			_apply_clip(r, a, length * k / n)
+			_apply_clip(r, a, length * k / (n - 1 if die else n))
 			frames.append(_pose(r, rp))
 		r.free()
 	var rest: Array = frames[0] if not frames.is_empty() else _pose(rig, parts)
 	var vert_count: int = (rest[0] as PackedVector3Array).size()
 	var vat := not frames.is_empty() and vert_count <= VAT_MAX_WIDTH
 	var vat_tex: ImageTexture = _vat_texture(frames, vert_count) if vat else null
+	var has_die: bool = vat and clips[clips.size() - 1].get("die", false)
+	var loops := clips.size() - (1 if has_die else 0)
 	var clip_move: Vector4 = _clip_vec(clips[0]) if vat else Vector4.ZERO
-	var clip_idle: Vector4 = _clip_vec(clips[clips.size() - 1]) if vat else Vector4.ZERO  # one clip: both use it
+	var clip_idle: Vector4 = _clip_vec(clips[loops - 1]) if vat else Vector4.ZERO  # one clip: both use it
+	var clip_die: Vector4 = _clip_vec(clips[clips.size() - 1]) if has_die else Vector4.ZERO
 
 	# Surfaces grouped by material.
 	var groups := {}  # material key -> {material, verts, normals, uvs, uv2, indices}
@@ -221,7 +284,7 @@ func _build_mesh(proto: Dictionary) -> Dictionary:
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		var mat: Material = g.material
 		if vat:
-			mat = _vat_material(g.material, vat_tex, clip_move, clip_idle)
+			mat = _vat_material(g.material, vat_tex, clip_move, clip_idle, clip_die)
 		elif vertex_lighting and mat is BaseMaterial3D:
 			mat = mat.duplicate()
 			(mat as BaseMaterial3D).shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
@@ -232,7 +295,7 @@ func _build_mesh(proto: Dictionary) -> Dictionary:
 		for v in f[0]:
 			box = box.expand(v)
 	mesh.custom_aabb = box.grow(0.1)
-	return {"mesh": mesh, "vat": vat}
+	return {"mesh": mesh, "vat": vat, "die": has_die}
 
 
 func _rig(proto: Dictionary) -> Node3D:
@@ -450,7 +513,7 @@ static func _pack_normal(n: Vector3) -> float:
 	return float(u * 4096 + v)
 
 
-func _vat_material(orig: Material, vat: ImageTexture, clip_move: Vector4, clip_idle: Vector4) -> ShaderMaterial:
+func _vat_material(orig: Material, vat: ImageTexture, clip_move: Vector4, clip_idle: Vector4, clip_die: Vector4) -> ShaderMaterial:
 	var sm := orig as StandardMaterial3D
 	var cull := sm.cull_mode if sm else BaseMaterial3D.CULL_BACK
 	var m := ShaderMaterial.new()
@@ -462,6 +525,8 @@ func _vat_material(orig: Material, vat: ImageTexture, clip_move: Vector4, clip_i
 	m.set_shader_parameter("vat", vat)
 	m.set_shader_parameter("clip_move", clip_move)
 	m.set_shader_parameter("clip_idle", clip_idle)
+	m.set_shader_parameter("clip_die", clip_die)
+	m.set_shader_parameter("sink_speed", SINK_SPEED)
 	m.set_shader_parameter("anim_lod_distance", anim_lod_distance)
 	return m
 

@@ -1,6 +1,8 @@
 // Batched units (UnitBatches): a MultiMesh instance per unit, animated from a vertex animation
 // texture. VAT row = frame, column = vertex (UV2.x); RGB = position in unit space, A = the
 // octahedral normal as two 12-bit halves. INSTANCE_CUSTOM: x = moving, y = phase 0..1.
+// Corpses (x = 2): the die clip from its start, y = death time, w = sink start (fx_time); it
+// holds the last frame, then sinks.
 // Beyond anim_lod_distance from the camera the animation steps frame by frame (one fetch per
 // vertex instead of two). UnitBatches swaps the render mode below for the original material's cull
 // mode, plus vertex_lighting on Low.
@@ -13,6 +15,9 @@ uniform bool use_tex = true;
 uniform sampler2D vat : filter_nearest, repeat_disable;
 uniform vec4 clip_move = vec4(0.0, 1.0, 1.0, 0.0);  // first row, frames, frames per second
 uniform vec4 clip_idle = vec4(0.0, 1.0, 1.0, 0.0);
+uniform vec4 clip_die = vec4(0.0, 1.0, 1.0, 0.0);
+uniform float sink_speed = 0.6;
+global uniform float fx_time;
 uniform float anim_lod_distance = 120.0;
 
 vec3 unpack_normal(float w) {
@@ -27,12 +32,14 @@ vec3 unpack_normal(float w) {
 
 void vertex() {
 	int col = int(UV2.x + 0.5);
-	vec4 clip = INSTANCE_CUSTOM.x > 0.5 ? clip_move : clip_idle;
-	float fr = mod(TIME * clip.z + INSTANCE_CUSTOM.y * clip.y, clip.y);
+	bool dead = INSTANCE_CUSTOM.x > 1.5;
+	vec4 clip = dead ? clip_die : (INSTANCE_CUSTOM.x > 0.5 ? clip_move : clip_idle);
+	float fr = dead ? clamp((fx_time - INSTANCE_CUSTOM.y) * clip.z, 0.0, clip.y - 1.0)
+		: mod(TIME * clip.z + INSTANCE_CUSTOM.y * clip.y, clip.y);
 	int f0 = int(fr);
 	vec4 a = texelFetch(vat, ivec2(col, int(clip.x) + f0), 0);
 	if (length(MODEL_MATRIX[3].xyz - CAMERA_POSITION_WORLD) < anim_lod_distance) {
-		int f1 = f0 + 1 < int(clip.y) ? f0 + 1 : 0;
+		int f1 = f0 + 1 < int(clip.y) ? f0 + 1 : (dead ? f0 : 0);
 		vec4 b = texelFetch(vat, ivec2(col, int(clip.x) + f1), 0);
 		float k = fr - float(f0);
 		VERTEX = mix(a.xyz, b.xyz, k);
@@ -40,6 +47,9 @@ void vertex() {
 	} else {
 		VERTEX = a.xyz;
 		NORMAL = unpack_normal(a.w);
+	}
+	if (dead) {
+		VERTEX.y -= max(fx_time - INSTANCE_CUSTOM.w, 0.0) * sink_speed;
 	}
 }
 
