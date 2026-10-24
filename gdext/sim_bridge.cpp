@@ -22,6 +22,7 @@
 #include "data/tgi/pipeline.hpp"
 #include "nav/nav_world.hpp"
 #include "session/state_io.hpp"
+#include "systems/morale.hpp"
 #include "systems/movement.hpp"
 #include "vfs/path.hpp"
 #include "vfs/vfs.hpp"
@@ -78,6 +79,7 @@ const char* stateName(corps::Order::State s) {
     case corps::Order::State::Wheeling: return "wheeling";
     case corps::Order::State::Arriving: return "arriving";
     case corps::Order::State::Following: return "following";
+    case corps::Order::State::Engaged: return "engaged";
     }
     return "?";
 }
@@ -93,6 +95,7 @@ const char* eventName(corps::SimEvent::Type t) {
     case corps::SimEvent::Type::Died: return "died";
     case corps::SimEvent::Type::Routed: return "routed";
     case corps::SimEvent::Type::LevelUp: return "level_up";
+    case corps::SimEvent::Type::Hit: return "hit";
     }
     return "?";
 }
@@ -126,6 +129,14 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("cost_grid", "move_class"), &SimBridge::cost_grid);
     ClassDB::bind_method(D_METHOD("set_view_heights", "heights", "verts_per_row", "tile"), &SimBridge::set_view_heights);
     ClassDB::bind_method(D_METHOD("unit_instances", "alpha", "selected_orgs"), &SimBridge::unit_instances);
+    ClassDB::bind_method(D_METHOD("banner_instances", "alpha", "lift", "selected_orgs"), &SimBridge::banner_instances);
+    ClassDB::bind_method(D_METHOD("record", "type", "ids"), &SimBridge::record);
+    ClassDB::bind_method(D_METHOD("ability_record", "ability"), &SimBridge::ability_record);
+    ClassDB::bind_method(D_METHOD("unit_record", "unit_def"), &SimBridge::unit_record);
+    ClassDB::bind_method(D_METHOD("read_file", "path"), &SimBridge::read_file);
+    ClassDB::bind_method(D_METHOD("queue_attack", "regiments", "target", "player"), &SimBridge::queue_attack);
+    ClassDB::bind_method(D_METHOD("queue_attack_move", "regiments", "goal", "player"), &SimBridge::queue_attack_move);
+    ClassDB::bind_method(D_METHOD("queue_retreat", "regiments", "goal", "player"), &SimBridge::queue_retreat);
 }
 
 String SimBridge::hello() const {
@@ -280,6 +291,11 @@ Dictionary SimBridge::unit_visual(int64_t unitDef) const {
         dir = p.substr(0, p.find_last_of('/') == std::string::npos ? 0 : p.find_last_of('/'));
     }
     out["model"] = u.resourcePrefix.empty() ? String() : str((dir.empty() ? "" : dir + "/") + u.resourcePrefix + ".glb");
+    PackedInt32Array abilities;  // its weapons' DefSet abilities (FxRunner preloads their effects)
+    for (const corps::WeaponDef& wd : u.weapons) {
+        if (wd.ability != corps::kNoDef) abilities.push_back(static_cast<int32_t>(wd.ability));
+    }
+    out["abilities"] = abilities;
     return out;
 }
 
@@ -379,6 +395,28 @@ void SimBridge::queue_group_behaviour(const PackedInt64Array& regiments, bool di
     queue(corps::makeSetGroupBehaviour(0, static_cast<uint8_t>(player), 0, regimentList(regiments), division));
 }
 
+void SimBridge::queue_attack(const PackedInt64Array& regiments, int64_t target, int64_t player) {
+    for (int64_t s = 0; s < regiments.size(); s += static_cast<int64_t>(corps::kMaxCommandRegiments)) {
+        queue(corps::makeAttack(0, static_cast<uint8_t>(player), 0,
+                                regimentList(regiments.slice(s, s + static_cast<int64_t>(corps::kMaxCommandRegiments))),
+                                EntityId{static_cast<uint32_t>(target)}));
+    }
+}
+
+void SimBridge::queue_attack_move(const PackedInt64Array& regiments, const Vector2& goal, int64_t player) {
+    for (int64_t s = 0; s < regiments.size(); s += static_cast<int64_t>(corps::kMaxCommandRegiments)) {
+        queue(corps::makeAttackMove(0, static_cast<uint8_t>(player), 0,
+                                    regimentList(regiments.slice(s, s + static_cast<int64_t>(corps::kMaxCommandRegiments))), fromV(goal)));
+    }
+}
+
+void SimBridge::queue_retreat(const PackedInt64Array& regiments, const Vector2& goal, int64_t player) {
+    for (int64_t s = 0; s < regiments.size(); s += static_cast<int64_t>(corps::kMaxCommandRegiments)) {
+        queue(corps::makeRetreat(0, static_cast<uint8_t>(player), 0,
+                                 regimentList(regiments.slice(s, s + static_cast<int64_t>(corps::kMaxCommandRegiments))), fromV(goal)));
+    }
+}
+
 void SimBridge::queue_blocker(const Vector2& pos, const Vector2& half, int64_t player) {
     queue(corps::makeDebugPlaceBlocker(0, static_cast<uint8_t>(player), 0, fromV(pos), fromV(half)));
 }
@@ -410,8 +448,11 @@ void SimBridge::step() {
         d["entity"] = static_cast<int64_t>(e.entity.bits);
         d["player"] = static_cast<int64_t>(e.player);
         d["command"] = static_cast<int64_t>(e.command);
-        d["other"] = static_cast<int64_t>(e.other.bits);  // fired: the target; died: the killer
         d["tick"] = static_cast<int64_t>(sim->tick() - 1);
+        d["other"] = static_cast<int64_t>(e.other.bits);  // fired: the target; died: the killer; hit: the shooter
+        d["detail"] = static_cast<int64_t>(e.detail);     // fired / hit: the DefSet ability
+        d["at"] = toV(e.at);
+        d["facing"] = angleRad(e.facing);
         events.push_back(d);
     }
 }
@@ -594,6 +635,134 @@ Dictionary SimBridge::unit_instances(double alpha, const PackedInt64Array& selec
     return out;
 }
 
+PackedFloat32Array SimBridge::banner_instances(double alpha, double lift, const PackedInt64Array& selectedOrgs) const {
+    PackedFloat32Array out;
+    if (!sim) return out;
+    std::vector<uint32_t> selected;
+    for (int64_t i = 0; i < selectedOrgs.size(); ++i) selected.push_back(static_cast<uint32_t>(selectedOrgs[i]));
+    std::sort(selected.begin(), selected.end());
+    const corps::World& w = sim->world();
+    const float a = static_cast<float>(std::clamp(alpha, 0.0, 1.0));
+    // Per regiment: living units' interpolated centroid and health.
+    struct Acc {
+        float x = 0, y = 0, hp = 0, hpMax = 0;
+        int n = 0;
+    };
+    std::map<uint32_t, Acc> acc;
+    for (std::size_t i = 0; i < w.members.size(); ++i) {
+        const EntityId u = w.members.ids()[i];
+        const corps::Health* h = w.health.get(u);
+        const corps::Transform* t = w.transforms.get(u);
+        if (h == nullptr || t == nullptr || h->current <= Fixed{} || !w.registry.alive(u)) continue;
+        float x1 = static_cast<float>(toF(t->position.x)), y1 = static_cast<float>(toF(t->position.y));
+        float x0 = x1, y0 = y1;
+        const auto it = std::lower_bound(prev.begin(), prev.end(), u.bits,
+                                         [](const Snap& s, uint32_t b) { return EntityId{s.bits}.index() < EntityId{b}.index(); });
+        if (it != prev.end() && it->bits == u.bits) {
+            x0 = it->x;
+            y0 = it->y;
+        }
+        Acc& r = acc[w.members.data()[i].organization.bits];
+        r.x += x0 + (x1 - x0) * a;
+        r.y += y0 + (y1 - y0) * a;
+        r.hp += static_cast<float>(toF(h->current));
+        r.hpMax += static_cast<float>(toF(h->max));
+        ++r.n;
+    }
+    for (const auto& [bits, r] : acc) {
+        const EntityId id{bits};
+        const corps::Regiment* reg = w.registry.alive(id) ? w.regiments.get(id) : nullptr;
+        const corps::Engagement* e = w.engagements.get(id);
+        if (reg == nullptr || e == nullptr || r.n == 0) continue;
+        float& top = regimentHealthMax[bits];
+        top = std::max(top, r.hpMax);
+        const float cx = r.x / static_cast<float>(r.n), cy = r.y / static_cast<float>(r.n);
+        const float h = viewHeight(cx, cy) + static_cast<float>(lift);
+        const float moraleMax = static_cast<float>(toF(corps::moraleMaxOf(*sim, id)));
+        const float fills[4] = {1.0f, top > 0 ? r.hp / top : 0.0f, moraleMax > 0 ? static_cast<float>(toF(e->morale)) / moraleMax : 0.0f,
+                                static_cast<float>(toF(e->efficiency))};
+        float flags = 0;
+        if (e->state == corps::Engagement::State::Routing) flags += 1;
+        if (e->entrenched) flags += 2;
+        if (std::binary_search(selected.begin(), selected.end(), bits)) flags += 4;
+        for (int k = 0; k < 4; ++k) {
+            const float row[16] = {1, 0, 0, cx, 0, 1, 0, h, 0, 0, 1, cy, std::clamp(fills[k], 0.0f, 1.0f), static_cast<float>(k),
+                                   static_cast<float>(reg->player), flags};
+            for (const float v : row) out.push_back(v);
+        }
+    }
+    return out;
+}
+
+// ------------------------------------------------------------------------------ records for the view
+
+Dictionary SimBridge::nodeDict(const void* p) const {
+    const auto& n = *static_cast<const corps::tgi::ResolvedNode*>(p);
+    Dictionary d;
+    d["_name"] = str(corps::asciiLowerCopy(n.spelling));
+    for (const corps::tgi::ResolvedField& f : n.fields) {
+        if (f.hasValue()) d[str(corps::asciiLowerCopy(f.spelling))] = str(corps::trimAscii(f.text()));
+    }
+    Array children;
+    for (const corps::tgi::NodeRef& c : n.children) {
+        if (c) children.push_back(nodeDict(c.get()));
+    }
+    d["_children"] = children;
+    return d;
+}
+
+Dictionary SimBridge::record(const String& type, const String& ids) const {
+    if (!data || !data->db) return Dictionary();
+    const corps::tgi::TgiDatabase& db = *data->db;
+    const corps::tgi::Symbol t = db.symbols.find(corps::asciiLowerCopy(utf8(type)));
+    if (t == corps::tgi::kNoSymbol) return Dictionary();
+    const auto* e = db.defs.find(t, corps::asciiLowerCopy(utf8(ids)));
+    return e != nullptr ? nodeDict(&db.records[e->record].tree) : Dictionary();
+}
+
+Dictionary SimBridge::unit_record(int64_t unitDef) const {
+    if (!data || unitDef < 0 || static_cast<std::size_t>(unitDef) >= data->defs.units.size()) return Dictionary();
+    return record("thing", str(data->defs.units[static_cast<std::size_t>(unitDef)].ids));
+}
+
+Dictionary SimBridge::ability_record(int64_t ability) const {
+    if (!data || !data->db || ability < 0 || static_cast<std::size_t>(ability) >= data->defs.abilities.size()) return Dictionary();
+    const corps::AbilityDef& ab = data->defs.abilities[static_cast<std::size_t>(ability)];
+    const std::size_t hash = ab.ids.find('#');
+    if (hash == std::string::npos) return record("abilitydefinition", str(ab.ids));
+    // Inline: the n-th Ability slot of the owner's PerformerComponent, then DefenderComponent
+    // (numbered as the def compiler numbers them).
+    const corps::tgi::TgiDatabase& db = *data->db;
+    const auto* e = db.defs.find(db.symbols.find("thing"), corps::asciiLowerCopy(ab.ownerIds));
+    if (e == nullptr) return Dictionary();
+    const std::size_t want = static_cast<std::size_t>(std::strtoul(ab.ids.c_str() + hash + 1, nullptr, 10));
+    std::size_t k = 0;
+    const corps::tgi::ResolvedNode& thing = db.records[e->record].tree;
+    for (const char* comp : {"performercomponent", "defendercomponent"}) {
+        const corps::tgi::Symbol cs = db.symbols.find(comp);
+        const corps::tgi::Symbol as = db.symbols.find("ability");
+        const corps::tgi::Symbol ds = db.symbols.find("abilitydefinition");
+        const corps::tgi::ResolvedNode* cn = cs != corps::tgi::kNoSymbol ? thing.child(cs) : nullptr;
+        if (cn == nullptr || as == corps::tgi::kNoSymbol) continue;
+        for (std::size_t i = 0; i < cn->childCount(as); ++i, ++k) {
+            if (k != want) continue;
+            const corps::tgi::ResolvedNode* def = cn->child(as, i)->child(ds);
+            return def != nullptr ? nodeDict(def) : Dictionary();
+        }
+    }
+    return Dictionary();
+}
+
+PackedByteArray SimBridge::read_file(const String& path) const {
+    PackedByteArray out;
+    if (!data) return out;
+    std::string bytes;
+    if (!data->vfs.read(utf8(path), bytes)) return out;
+    out.resize(static_cast<int64_t>(bytes.size()));
+    std::copy(bytes.begin(), bytes.end(), out.ptrw());
+    return out;
+}
+
 Dictionary SimBridge::regiment_info(int64_t regimentBits) const {
     Dictionary out;
     if (!sim) return out;
@@ -642,6 +811,42 @@ Dictionary SimBridge::regiment_info(int64_t regimentBits) const {
     const corps::Transform* anchor = w.transforms.get(id);
     out["anchor"] = anchor != nullptr ? toV(anchor->position) : Vector2();
     out["facing"] = anchor != nullptr ? angleRad(anchor->facing) : 0.0f;
+    // Combat (M5): health, morale, efficiency, experience, engagement.
+    float hp = 0, hpMax = 0;
+    int64_t alive = 0;
+    for (std::size_t i = 0; i < w.members.size(); ++i) {
+        if (w.members.data()[i].organization != id) continue;
+        const corps::Health* h = w.health.get(w.members.ids()[i]);
+        if (h == nullptr || h->current <= Fixed{}) continue;
+        hp += static_cast<float>(toF(h->current));
+        hpMax += static_cast<float>(toF(h->max));
+        ++alive;
+    }
+    float& top = regimentHealthMax[id.bits];
+    top = std::max(top, hpMax);
+    out["units_alive"] = alive;
+    out["health"] = hp;
+    out["health_max"] = top;
+    if (const corps::Engagement* e = w.engagements.get(id)) {
+        static const char* kEngagement[] = {"idle", "engaging", "stalemate", "reform", "regroup", "retreating", "routing", "exhausted"};
+        static const char* kMode[] = {"none", "attack", "attack_move"};
+        out["engagement"] = kEngagement[static_cast<int>(e->state)];
+        out["mode"] = kMode[static_cast<int>(e->mode)];
+        out["morale"] = toF(e->morale);
+        out["morale_max"] = toF(corps::moraleMaxOf(*sim, id));
+        out["efficiency"] = toF(e->efficiency);
+        out["xp"] = toF(e->xp);
+        out["level"] = static_cast<int64_t>(e->level);
+        out["entrenched"] = e->entrenched;
+        out["attack_target"] = static_cast<int64_t>(e->target.bits);
+    }
+    if (dr != nullptr && dr->index < data->defs.regiments.size()) {
+        const corps::RegimentDef& rd = data->defs.regiments[dr->index];
+        out["breakpoint"] = toF(rd.moraleBreakpoint);
+        PackedFloat32Array levels;
+        for (const corps::ExperienceLevelDef& l : rd.experienceLevels) levels.push_back(static_cast<float>(toF(l.required)));
+        out["level_xp"] = levels;
+    }
     return out;
 }
 

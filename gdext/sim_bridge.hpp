@@ -6,6 +6,7 @@
 // the bridge: everything handed to the sim is Fixed.
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -64,6 +65,9 @@ public:
     void queue_formation(const PackedInt64Array& regiments, const String& formation_ids, int64_t player);
     void queue_group_behaviour(const PackedInt64Array& regiments, bool division, int64_t player);
     void queue_blocker(const Vector2& pos, const Vector2& half_extent, int64_t player);
+    void queue_attack(const PackedInt64Array& regiments, int64_t target, int64_t player);
+    void queue_attack_move(const PackedInt64Array& regiments, const Vector2& goal, int64_t player);
+    void queue_retreat(const PackedInt64Array& regiments, const Vector2& goal, int64_t player);
 
     // --- stepping and reading ----------------------------------------------------------------
     void step();
@@ -82,6 +86,21 @@ public:
     // moving, animation phase 0..1, player, 0), "ring_count", "rings": the same for units whose
     // organization is in `selected_orgs`}, placed at render interpolation `alpha`.
     Dictionary unit_instances(double alpha, const PackedInt64Array& selected_orgs) const;
+    // Regiment banners: 4 instances per regiment with living units (flag, health, morale,
+    // efficiency bars), MultiMesh 3D transform (position only, `lift` above the ground) + custom
+    // data (fill 0..1, kind 0..3, player, flags: 1 routing, 2 entrenched, 4 selected).
+    PackedFloat32Array banner_instances(double alpha, double lift, const PackedInt64Array& selected_orgs) const;
+
+    // --- view data for effects and panels (M5 part 3) ----------------------------------------
+    // A resolved TGI record as nested Dictionaries: field (lower case) -> text, "_name" -> the node
+    // name, "_children" -> Array of child Dictionaries. {} if there is none.
+    Dictionary record(const String& type, const String& ids) const;
+    // The AbilityDefinition node of a DefSet ability (inline ones from their owner's record).
+    Dictionary ability_record(int64_t ability) const;
+    // A unit def's Thing record.
+    Dictionary unit_record(int64_t unit_def) const;
+    // Raw bytes of a file in the game's VFS (sounds); empty if missing.
+    PackedByteArray read_file(const String& path) const;
 
 private:
     struct Snap {
@@ -92,6 +111,7 @@ private:
     std::vector<corps::EntityId> regimentList(const PackedInt64Array& ids) const;
     std::vector<Snap> capture() const;
     float viewHeight(float x, float y) const;
+    Dictionary nodeDict(const void* resolvedNode) const;
 
     struct Data;
     std::unique_ptr<Data> data;
@@ -102,6 +122,7 @@ private:
     std::vector<float> viewHeights;
     int64_t viewRow = 0;
     float viewTile = 2.0f;
+    mutable std::map<uint32_t, float> regimentHealthMax;  // most health each regiment had (banner / panel)
     Array events;
     uint16_t seq[256] = {};
     std::string error;

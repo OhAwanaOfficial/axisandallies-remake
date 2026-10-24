@@ -593,7 +593,7 @@ void kill(Ctx& c, const Fighter& v, EntityId killer) {
     World& w = c.w;
     w.health.get(v.id)->current = Fixed{};
     w.registry.destroyLater(v.id);
-    c.sim.emit({SimEvent::Type::Died, v.id, v.player, CommandType::Noop, killer});
+    c.sim.emit({SimEvent::Type::Died, v.id, v.player, CommandType::Noop, killer, 0, v.pos, v.facing});
     moraleOnKill(c.sim, v.id, killer);
     if (v.org.isNull()) return;
     for (const Fighter& f : c.field.fs) {
@@ -633,6 +633,7 @@ void impact(Ctx& c, std::uint32_t ability, EntityId shooter, std::uint8_t player
         if (ab.maxTargets != 0 && victims.size() > ab.maxTargets) victims.resize(ab.maxTargets);
     }
     const Fighter* from = c.field.find(shooter);
+    c.sim.emit({SimEvent::Type::Hit, primary, player, CommandType::Noop, shooter, ability, point, Angle{}});
     for (const auto& [key, t] : victims) {
         const TargetStats s = statsOf(c, *t);
         Fixed dmg;
@@ -676,7 +677,7 @@ void moveProjectiles(Ctx& c) {
 void fire(Ctx& c, const Fighter& f, const WeaponDef& wd, const Fighter& t) {
     const AbilityDef& ab = c.defs.abilities[wd.ability];
     const Fixed mult = shooterMultiplier(c, f);
-    c.sim.emit({SimEvent::Type::Fired, f.id, f.player, CommandType::Noop, t.id});
+    c.sim.emit({SimEvent::Type::Fired, f.id, f.player, CommandType::Noop, t.id, wd.ability, f.pos, f.facing});
     markCombat(c, f.org);
     if (ab.projectileIndex == kNoDef) {
         c.hits.push_back({wd.ability, f.id, f.player, t.id, t.pos, mult});  // lands with the others (simultaneous)
