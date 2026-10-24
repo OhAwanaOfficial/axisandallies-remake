@@ -155,7 +155,7 @@ final  = max(minDamage 1, raw × K / (K + D × (defense + ΣDV))) × attack mult
 
 In the data these are `regiment_aggressive` (Assault), `regiment_defensive` (Normal/Aggressive) and `regiment_column` (Column) in `Organizations/Formations/regiment_formations.tgi`. The speed and efficiency numbers above come from their modifiers.
 
-* **Efficiency blends gradually** to the new formation's level after a change (rate **[CALIBRATE]**).
+* **Efficiency blends gradually** to the new formation's level after a change. The data gives the rate: SVars `AttackEfficiencyPointsPerSecondClimbing = 0.01` and `...Falling = 0.02`. Assault → Column takes 25 s to settle at 0.5; going back takes 50 s. **Implemented (M5 part 2):** the regiment's actual efficiency is its damage multiplier; a routing regiment aims at 0.
 * **Run** [R] / Alt+right-click: temporary Column, then back to the previous formation on arrival.
 * Aggressive regiments **auto-engage** anything in their zone of control (ZOC). A tank regiment in Assault formation crossing an enemy base will stop and destroy every building on the way. That's intended.
   * **Implemented (M5 part 1):**
@@ -164,7 +164,6 @@ In the data these are `regiment_aggressive` (Assault), `regiment_defensive` (Nor
     * A regiment engages only enemies its weapons can target, so an unarmed regiment, or flak among tanks, passes by.
     * The move goes on hold and resumes after the fight.
     * After a Move or Run order, a regiment doesn't auto-engage for 5 s (`moveGraceSeconds`), so it can be ordered out of a fight.
-    * Efficiency doesn't blend between formations yet (part 2).
 
 ### 6.5 Orders **[MANUAL]**
 Move [M], Attack [A] (chases), Run [R], Stop [S], Guard [G] (follow/hold and engage nearby), plus Unpack/Pack [P], Deploy [D], Build (engineers), Repair, Group Behaviour [V].
@@ -172,6 +171,12 @@ Move [M], Attack [A] (chases), Run [R], Stop [S], Guard [G] (follow/hold and eng
   * **Attack** (command 7) takes 1–6 regiments and a regiment, unit or building of another player. Each regiment chases the target until its anchor is within `CAITargetInRangeZOCMultiplier` (0.6) × ZOC, then engages. While attacking, its units shoot the target's units first.
   * **AttackMove** (command 8) is a MoveGroup that engages anything on the way, whatever the formation, then carries on.
   * Move, Run and Stop end a fight.
+* **Implemented (M5 part 2): Retreat** (command 9) moves 1–6 regiments to a point, each on its own:
+  * in the layout's retreat formation (`retreat_formation_IDS`, or the data's rule "last organized formation if not specified", which is Column);
+  * passive: it neither auto-engages nor fires;
+  * it costs `MoraleRetreatPenalty` once (0 in A&A).
+  * On arrival, and after at least `RetreatingTime`, it reforms and gets its formation back.
+  * A retreating regiment can still rout if its morale breaks.
 
 ### 6.6 Engagement state machine **[DATA `SVars_AA.tgi`; actor_states]**
 States: `Idle → Engaging → (Retreating | Routing | Stalemate) → Reform/Regroup → Idle`
@@ -187,12 +192,31 @@ States: `Idle → Engaging → (Retreating | Routing | Stalemate) → Reform/Reg
   * **Engaging → Reform** when a sample finds the ZOC clear. **Reform → Regroup** (in a group) **→ Idle**: the held move resumes. Each takes its SVars time. Units fire only while Engaging or Stalemate, or under an Attack order.
   * **Closing in:** a fighting regiment with no unit in firing range for 2 s (`closeInSeconds`) moves toward the nearest enemy and stops once one is in range. Division members hold their slots instead.
   * **Targets:** `KillTargetIsHighestPriority` keeps a valid target. Otherwise a unit takes the Attack target's units first, then (with check_damage_resistance) the most damage per hit, then the nearest.
-  * Retreating and Routing exist as states and arrive with morale (part 2).
+  * **Retreating** (ordered, above) and **Routing** / **Exhausted** (morale, §6.7) are run by the Morale stage (M5 part 2, `sim/systems/morale.*`). Routing and retreating regiments are passive. Routing ones are deaf to orders and get the `routing` target type.
 
 ### 6.7 Morale **[DATA SVars][MANUAL p.40]**
 * Blue bar with a **breaking point**. Below it, the regiment **routs**: Column formation, flees, uncontrollable until it stops (may run the wrong way).
 * Loss: being engaged (`MoraleEngagementLoss = 0.5`/sample, scaled up to ×3), unit deaths (`MoraleDeathFactor = 0.25`), "breaker" attacks (flamethrowers, `MoraleBreakerBase = 3.0` ×0.5–2), fear enchantments.
 * Gain: time out of combat (`MoraleReplenish = 2.0`), supply (`+MoraleSupplyBonus = 1.0`), killing enemies ("slayer", `MoraleSlayerBase = 0.5` ×0.5–3), courage enchantments, officers.
+* **Implemented (M5 part 2, `sim/systems/morale.*`).** The data fixes the sizes; how the factors scale is our reading **[CALIBRATE]**.
+  * **Ceiling:** morale is "defined by elements". The ceiling is the sum of the living units' ElementComponent `morale_value` (infantry 5, so a 9-man regiment has 45; tanks 20), plus the level's MORALE per unit. It starts full.
+  * **Breaking point:** the organization's `morale_breakpoint` (infantry 20, armour 15).
+  * **Per sample** (`PrimarySampleTime`, staggered by entity):
+    * Engaged: − `MoraleEngagementLoss` × clamp(enemy health in its zone / its own health, 1, `MoraleEngagementLossFactorMax`).
+    * Idle, reforming, regrouping or exhausted: + `MoraleReplenish` × the level's `MORALE_RECOVERY_RATE`.
+    * Retreating and routing don't replenish (actor_states `morale_replenish = false`).
+    * The supply bonus arrives with supply (M6).
+  * **A unit dies:** its regiment loses `morale_value` × `MoraleDeathFactor`. The killer's regiment gains `MoraleSlayerBase` × clamp(victim `morale_value` / killer `morale_value`, `MoraleSlayerFactorMin`, `Max`), so infantry killing a tank gains the most.
+  * **Breakers:** in the data these are abilities with a `MoraleLossEffect` (mortars 0.75, artillery, bombers 0.5, battleships 1.5), not flamethrowers. A hit costs `MoraleBreakerBase` × clamp(effect amount, `MoraleBreakerFactorMin`, `Max`).
+  * **Loss rate:** losses are multiplied by `MORALE_LOSS_RATE` modifiers. Entrenchment's says `MultiplyModifier 0.5`, which by the data's own convention (× (1 + amount)) means × 1.5 **[CALIBRATE: it may mean "half"]**.
+  * **Rout:** a fighting or retreating regiment at or below its breaking point routs. It:
+    * leaves its group and drops its orders;
+    * takes its retreat formation;
+    * runs `fleeDistance` (40) away from its last attacker, ± `fleeSpread` (45°) at random (the sim RNG: it may run the wrong way);
+    * is deaf to commands for `RoutingTime`;
+    * gives its last attacker rout XP.
+  * **Exhausted:** after the rout the regiment is exhausted (mind_exhausted): passive, still controllable, replenishing. Once morale is `rallyFraction` (half) of the way from the breaking point to full, it reforms and returns to Idle.
+  * Courage and fear enchantments, officers' bonuses and supply wait for their systems (M6, M9).
 
 ### 6.8 Experience **[MANUAL p.40]**
 
@@ -205,11 +229,32 @@ States: `Idle → Engaging → (Retreating | Routing | Stalemate) → Reform/Reg
 
 Replacement units from resupply keep the regiment's XP. A whole new regiment starts as Recruit. Bonuses per level: **[CALIBRATE]** (check unit tooltips in the original).
 
+* **Implemented (M5 part 2).** The data has the levels: each organization template has an `ExperienceComponent` with four `ExperienceLevel`s, and the data wins over the manual where they differ.
+  * **Infantry** needs **150 / 350 / 600** XP. Its levels give AV +4/+8/+16, DV +1/+2/+3, HEALTH × 1.05/1.1/1.2, MORALE +0/+0.5/+1 per unit, and MORALE_RECOVERY_RATE × 1.05/1.1/1.15.
+  * **Paratroopers** need 100 / 250 / 500, the manual's numbers.
+  * **Armour** has the same thresholds as infantry, with AV +10/+20/+40 and MORALE +1/+2/+4.
+  * **How each bonus applies:** DV adds to defense. AV multiplies damage by (1 + AV × `attackValueScale` 0.01) **[CALIBRATE]**. HEALTH scales the units' health when the level is reached. MORALE raises the ceiling.
+  * **XP (SVars "experience"):**
+    * A kill earns clamp(victim combat value, `ExperienceGainMinimum` 0, `Maximum` 10) × `ExperienceKillMultiplier`. Combat value = health_max × `xpPerHealth` 0.01 (infantry 2, tank 4) **[CALIBRATE: the original uses a combat value (CV) built from the `CombatValue*` SVars]**, or the regiment's `fake_cv_value`.
+    * Breaking an enemy earns the routed regiment's combat value × `ExperienceRoutMultiplier`.
+    * Every engaged sample earns `ExperienceDefaultValue` × `ExperienceEngageMultiplier`.
+    * Capture arrives in M6.
+  * **Army XP** (the player's, for generals and special ops, §9) is every XP its regiments earn × `ExperienceFactionGainMultiplier`, plus `ExperienceFactionGainPeriodic` (1) per second while the player has something on the map. The `StartingExperience` world rule (default 200) belongs to game setup (M6).
+
 ### 6.9 Entrenchment
-A regiment that stays still long enough becomes entrenched (sandbags on the banner) and gets the `infantry_entrench`/`vehicle_entrench` property bonuses **[DATA actor_states]**. Time to entrench: **[CALIBRATE]**.
+A regiment that stays still long enough becomes entrenched (sandbags on the banner) and gets the `infantry_entrench`/`vehicle_entrench` property bonuses **[DATA actor_states]**. Time to entrench: the organization's `entrenchment_time`, **30 s** for infantry, vehicle and armour regiments.
+* **Implemented (M5 part 2):**
+  * Ticks count while the regiment's move order is idle or on hold, and it isn't routing or retreating. At `entrenchment_time` it is entrenched.
+  * Entrenched infantry gets DV +4, armor_piercing and explosive resist 0.4 each, and morale loss × 1.5 (§6.7); vehicles get DV +4 and 0.2 resist.
+  * Any move resets it. An entrenched regiment without an Attack order doesn't close in: it holds its position.
 
 ### 6.10 Terrain
 Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from RMC). Each terrain gives per-movement-class **speed** and per-unit-type **defense** modifiers (e.g. jungle: big infantry defense bonus, big vehicle penalty, slow) **[MANUAL]**. Mountains and ocean block ground units.
+* **Defense (implemented in M5):** each `Terrain` record lists properties (`terrain_forest_infantry`, `terrain_city_vehicles`, ...) that apply to the units standing on it when they have the property's `required_properties`.
+  * Infantry in forest, jungle or city: DV +4 and armor_piercing resist 0.2.
+  * Vehicles there: gunfire resist −0.2, so they take more from small arms.
+  * Map cells name a terrain variation (`temperate_forest02`), which resolves to its Terrain; generated maps' forest cells use the forest properties. A golden test checks Golden Fields.
+  * The properties' `TerrainSpeedModifier`s aren't wired into movement yet (movement still uses the PATHFINDING §2 cost table).
 
 ### 6.11 Groups & divisions **[MANUAL p.38; DATA `group_formations.tgi`]**
 * Up to **6 regiments** per group. Ctrl+number saves it to the unit bar. (Movement commands carry at most 6 regiments; how the sim forms and dissolves groups is in PATHFINDING §10.)

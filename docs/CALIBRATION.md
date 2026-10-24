@@ -30,12 +30,18 @@ final  = max(minDamage, raw × defenseK / (defenseK + defenseD × (defense + ΣD
 | `chaseRepathDistance` | 3 | Attack re-paths when its target moved this far from the goal |
 | `moveGraceSeconds` | 5 | No auto-engage this long after a Move or Run |
 | `closeInSeconds` | 2 | A fighting regiment with no unit in range this long moves toward the enemy |
+| `attackValueScale` | 0.01 | Damage × (1 + AV × this), for experience levels' AV (+4 … +40) |
+| `xpPerHealth` | 0.01 | A unit's combat value for XP: health_max × this (infantry 2, tank 4) |
+| `fleeDistance` | 40 | How far a routing regiment runs |
+| `fleeSpread` | 45° | Random spread either side of straight away from its attacker |
+| `rallyFraction` | 0.5 | Exhausted until morale is this far from the breaking point to full |
 
-From the data, untouched by calibration: the attack multiplier (the formation's
-`ATTACK_EFFICIENCY_DESIRED`: Assault 1, Normal 0.75, Column 0.5), resistances (`vehicle`: gunfire
-0.4, explosive 0.2; `tank` adds gunfire 0.2, explosive 0.2; `infantry`: armor_piercing 0.2;
-terrain and entrenchment properties), defense and DV, turret yaw rates, projectile speeds, area,
-`max_targets`, attenuation, and the SVars engagement timers.
+From the data, untouched by calibration:
+* the attack efficiency (the formation's `ATTACK_EFFICIENCY_DESIRED`: Assault 1, Normal 0.75, Column 0.5), which blends at the SVars rates (0.01/s up, 0.02/s down);
+* resistances (`vehicle`: gunfire 0.4, explosive 0.2; `tank` adds gunfire 0.2, explosive 0.2; `infantry`: armor_piercing 0.2; terrain and entrenchment properties);
+* defense and DV, experience levels;
+* turret yaw rates, projectile speeds, area, `max_targets`, attenuation;
+* the SVars engagement timers and every morale and experience factor (GAME_DESIGN §6.7–6.8).
 
 Two readings of the data are guesses that calibration should also check:
 
@@ -43,22 +49,30 @@ Two readings of the data are guesses that calibration should also check:
   linear down to `attenuation_factor_max` at the edge of `area` (scenarios 8 and 9).
 * **Hit chance:** none; every shot hits. If the original's time to kill varies a lot between
   runs of the same scenario, it probably has one.
+* **Morale scaling** (GAME_DESIGN §6.7): which ratios the engagement, slayer and breaker factors
+  use, and whether entrenchment multiplies morale loss by 1.5 or halves it. The time to rout
+  (scenarios 1–4, 10) is where this shows.
 
 ## 2. Our side: `simcli duel`
 
 ```bash
-simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F] [--entrench-a] [--entrench-b] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl] [--verbose]
+simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F] [--entrench-a] [--entrench-b] [--xp-a N] [--xp-b N] [--retreat-a S] [--retreat-b S] [--until-wiped] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl] [--verbose]
 ```
 
 * The arena is a flat square (96 by default) of one terrain inside a blocked border. TERRAIN is
   `open`, `forest`, `jungle`, `city`, `sand`, `snow` (the first Terrain record whose properties
   include `terrain_<word>_infantry`), or any Terrain or variation IDS.
 * A spawns in the west facing east, B in the east facing west, `--distance` apart (30 by default).
-* On the next tick both get Attack on each other; a building just defends.
-* It runs until one side has no units left.
+* On the next tick both get Attack on each other. A building just defends; so does an entrenched
+  side (`--entrench-x`), which holds its ground.
+* `--xp-x N` starts a side with N experience (its level applies). `--retreat-x S` orders it to
+  retreat to its own edge S seconds in.
+* It runs until one side routs or has no units left (`--until-wiped`: until no units are left).
 * It prints:
-  * the winner and the time to kill (when the loser's last unit died);
-  * per side: survivors and their health, shots, damage dealt, and the time of its first loss.
+  * the winner and the time to rout or to kill (when the loser broke, or its last unit died);
+  * per side: survivors and their health, shots, damage dealt, and the time of its first loss;
+  * per side: morale (start, end, breaking point), state, XP and level, efficiency, entrenchment, rout time;
+  * the army XP of both players.
 * `--tune defenseK=12,defenseD=1.5` overrides constants for that run.
 * `--out` writes a replay that carries the tuning. `simcli determinism-check` verifies it.
 * `--verbose` dumps the engagement state and each unit's target, range and aim at the end.
@@ -86,8 +100,9 @@ opponent that is told not to move also works. For each scenario:
 
 **Repeat.** Run each scenario at least 3 times and note the spread.
 
-**Morale.** Morale isn't in our sim yet (M5 part 2). If a regiment routs in the original, note
-when, and count the scenario as ending there.
+**Morale.** If a regiment routs in the original, note when: the scenario ends there, as in
+`simcli duel` by default. Run it once more to the end for the time to kill (`--until-wiped` on
+our side).
 
 ## 4. The ten scenarios
 
@@ -109,18 +124,18 @@ when, and count the scenario as ending there.
 The original's columns are measured as described in §3. "Ours" is the `simcli duel` output with
 the tuning in the last column. Δ = (ours − original) / original, for the time to kill.
 
-| # | Original: first death A / B (s) | Original: time to kill (s) | Original: winner, survivors (units, health) | Runs, spread | Ours: time to kill (s) | Ours: winner, survivors | Δ | Tuning |
-|---|---|---|---|---|---|---|---|---|
-| 1 | | | | | | | | |
-| 2 | | | | | | | | |
-| 3 | | | | | | | | |
-| 4 | | | | | | | | |
-| 5 | | | | | | | | |
-| 6 | | | | | | | | |
-| 7 | | | | | | | | |
-| 8 | | | | | | | | |
-| 9 | | | | | | | | |
-| 10 | | | | | | | | |
+| # | Original: first death A / B (s) | Original: time to rout (s) | Original: time to kill (s) | Original: winner, survivors (units, health) | Runs, spread | Ours: time to rout / kill (s) | Ours: winner, survivors | Δ | Tuning |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | | | | | | | | | |
+| 2 | | | | | | | | | |
+| 3 | | | | | | | | | |
+| 4 | | | | | | | | | |
+| 5 | | | | | | | | | |
+| 6 | | | | | | | | | |
+| 7 | | | | | | | | | |
+| 8 | | | | | | | | | |
+| 9 | | | | | | | | | |
+| 10 | | | | | | | | | |
 
 ## 6. Tuning loop
 
@@ -137,20 +152,23 @@ the tuning in the last column. Δ = (ours − original) / original, for the time
 
 ## 7. Starting point (defaults, before calibration)
 
-For orientation only: `simcli duel` with the default tuning, M5 part 1.
+For orientation only: `simcli duel` with the default tuning, M5 part 2 (morale on). The winner
+is the same in every scenario whether it ends at the rout or runs to the end.
 
-| # | Ours: time to kill | Winner, survivors |
-|---|---|---|
-| 1 | 163.7 s | B: 3 of 9, 19 % health |
-| 2 | 227.6 s | B: 3 of 9, 24 % |
-| 3 | 130.2 s | B: 5 of 9, 44 % |
-| 4 | 154.0 s | B: 4 of 9, 39 % |
-| 5 | 102.9 s | B: 2 of 4, 33 % |
-| 6 | 85.8 s | B: 3 of 4, 59 % |
-| 7 | 79.8 s | B: 3 of 4, 74 % |
-| 8 | 108.5 s | A: 3 of 5, 40 % |
-| 9 | 163.2 s | B (bunker): 26 % |
-| 10 | 227.6 s | B: 3 of 9, 24 % |
+| # | Ours: time to rout | Ours: time to kill (`--until-wiped`) | Winner |
+|---|---|---|---|
+| 1 | 55.5 s | 98.5 s | B |
+| 2 | 77.0 s | 146.1 s | B |
+| 3 | 52.6 s | no kill in 600 s (A rallies out of reach) | B (entrenched, holds its ground) |
+| 4 | 49.3 s | 80.1 s | B |
+| 5 | 102.6 s | 130.0 s | B |
+| 6 | 65.1 s | 99.0 s | B |
+| 7 | 60.1 s | 95.1 s | B |
+| 8 | 64.7 s | 108.6 s | A |
+| 9 | 105.2 s | no kill in 600 s (the bunker can't chase) | B (bunker) |
+| 10 | 77.0 s | 146.1 s | B |
+
+M5 part 1, before morale, had times to kill of 130–228 s for the infantry scenarios.
 
 GER against GER rifle infantry ends with both sides wiped out at 187.9 s, as it should: instant
 hits land together at the end of each tick, so entity order gives no side an edge.

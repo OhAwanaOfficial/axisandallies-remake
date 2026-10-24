@@ -29,7 +29,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M2** | Done | v0.2 | `import_game.py` (static and skinned NIF → glb, KF → clips, textures) and the Godot Model Browser. |
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
-| **M5** | Part 1 done (sim) | — | See below. Part 2: morale and rout, XP, efficiency blending, the entrenchment timer, FXC events, the view, and the first calibration pass. |
+| **M5** | Parts 1–2 done (sim) | — | See below. Left: FXC events, combat in the view, and the first calibration pass against the original (CALIBRATION.md). |
 
 **M4 details:**
 * **Nav:**
@@ -83,6 +83,18 @@ Carried over from M4:
   * Real-data golden tests (combat defs, a GER vs GBR duel).
   * `simcli_duel` in CTest, with determinism-check of its replay.
 * **Numbers:** the 160-regiment perf run, now with the armies fighting, at 6.7 ms p99 per tick; combat stages about 0.7 ms on average.
+
+**M5 part 2 details (sim only):**
+* **Data:** unit `morale_value`, regiment experience levels (from each organization's ExperienceComponent: infantry 150/350/600, paratroopers 100/250/500) and `fake_cv_value`, the layouts' retreat formation, and property modifiers.
+* **Morale** (`sim/systems/morale.*`): every SVars factor (engagement loss with the ×3 factor, death, slayer, breaker, replenish, retreat penalty), entrenchment's loss rate, the breaking point, rout (flee from the last attacker with random spread, deaf to orders), exhaustion and rally.
+* **Experience:** kill, rout and engage XP; levels applying AV, DV, HEALTH, MORALE and MORALE_RECOVERY_RATE; army XP per player (`World::kingdoms`) with the faction multiplier and the periodic gain.
+* **Efficiency and entrenchment:** formation efficiency blending at the SVars rates; the entrenchment timer (`entrenchment_time` 30 s halted).
+* **Terrain:** terrain defense on real maps (variation names resolve to Terrain records), with a golden test on Golden Fields.
+* **Commands:** ordered Retreat (9), DebugSetExperience (208). Events: Routed, LevelUp.
+* **Formats:** state v5 (`KING`, morale fields).
+* **Duel:** ends at a rout (or `--until-wiped`); `--xp-a/-b`, `--retreat-a/-b`; prints morale, XP, levels and army XP. CTest `simcli_duel_morale` + determinism-check.
+* **Numbers:** the 160-regiment perf run with morale at 7.0 ms p99 per tick; the Morale stage 0.30 ms on average.
+* **Fixtures:** `sim/tests/fixtures/combat_m5.rpl`, a data-free combat film (3 routs, a level-up, 7 deaths) replayed by every CI job; the synthetic fixtures and the movement golden hash re-recorded.
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

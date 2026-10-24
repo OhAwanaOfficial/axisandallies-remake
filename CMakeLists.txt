@@ -49,6 +49,12 @@ if(CORPS_BUILD_TESTS)
   set_tests_properties(simcli_duel PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP duel_rpl)
   add_test(NAME simcli_duel_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel.rpl --per-stage)
   set_tests_properties(simcli_duel_determinism PROPERTIES FIXTURES_REQUIRED duel_rpl)
+  # Morale (M5 part 2): a veteran regiment against one that retreats, fought until wiped out.
+  add_test(NAME simcli_duel_morale COMMAND simcli duel regiment_ger_infantry regiment_gbr_infantry open
+    --xp-a 300 --retreat-b 25 --until-wiped --out ${CMAKE_BINARY_DIR}/duel_morale.rpl)
+  set_tests_properties(simcli_duel_morale PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP duel_morale_rpl)
+  add_test(NAME simcli_duel_morale_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel_morale.rpl --per-stage)
+  set_tests_properties(simcli_duel_morale_determinism PROPERTIES FIXTURES_REQUIRED duel_morale_rpl)
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

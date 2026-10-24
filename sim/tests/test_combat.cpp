@@ -1,13 +1,16 @@
-// M5 part 1: combat. Damage formula and tuning, resistances from properties, terrain and
+// M5: combat. Part 1: damage formula and tuning, resistances from properties, terrain and
 // entrenchment, target filters, ZOC auto-engage and the engagement states, Attack / AttackMove,
 // turrets, projectiles, area damage with max_targets and attenuation, target priority, deaths,
-// buildings, commands and determinism.
+// buildings, commands and determinism. Part 2: morale (losses, gains, breaking point, rout,
+// exhaustion, rally), experience levels and army XP, combat efficiency blending, the entrenchment
+// timer, ordered Retreat, and a committed combat replay fixture.
 //
 // Uses a small hand-built DefSet (no game data needed) shaped like the original's records.
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <fstream>
 
 #include "combat/rules.hpp"
 #include "combat/tuning.hpp"
@@ -17,6 +20,9 @@
 #include "session/bytes.hpp"
 #include "session/replay.hpp"
 #include "session/state_io.hpp"
+#include "systems/morale.hpp"
+#include "test_env.hpp"
+#include "vfs/path.hpp"
 
 using namespace corps;
 using namespace corps::fixed_literals;
@@ -85,10 +91,11 @@ LayoutFormationDef layoutFormation(std::string ids, std::vector<FVec2> offsets) 
 DefSet makeDefs() {
     DefSet d;
     d.damageTypes = {{"armor_piercing", 2}, {"explosive", 3}, {"gunfire", 0}};
-    d.targetTypes = {{"air"}, {"building"}, {"infantry"}, {"tank"}, {"vehicle"}};
+    d.targetTypes = {{"air"}, {"building"}, {"infantry"}, {"routing"}, {"tank"}, {"vehicle"}};
     d.properties = {property("building", {"building"}),
                     property("infantry", {"infantry"}, {{"armor_piercing", 0.2_fx}}),
                     property("infantry_entrench", {}, {{"armor_piercing", 0.4_fx}, {"explosive", 0.4_fx}}, 4_fx, {"infantry"}),
+                    property("routing", {"routing"}),
                     property("tank", {"tank"}, {{"gunfire", 0.2_fx}, {"explosive", 0.2_fx}}),
                     property("terrain_forest_infantry", {}, {{"armor_piercing", 0.2_fx}}, 4_fx, {"infantry"}),
                     property("vehicle", {"vehicle"}, {{"gunfire", 0.4_fx}, {"explosive", 0.2_fx}})};
@@ -199,6 +206,28 @@ DefSet makeDefs() {
                    regiment("reg_rifle", "rifle"),    regiment("reg_solo_post", "post", "solo"),
                    regiment("reg_solo_tank", "tank", "solo"), regiment("reg_tank", "tank"),
                    regiment("reg_unarmed", "unarmed")};
+    // Part 2: morale values, the entrenchment property's MORALE_LOSS_RATE (× 1.5 as in the data),
+    // and reg_brittle: rifles that break at 15 of 20 morale, entrench after 30 s, and have the
+    // manual's 0 / 100 / 250 / 500 levels.
+    for (UnitDef& u : d.units) u.moraleValue = u.moveClass == UnitMoveClass::Tracked ? 20_fx : 5_fx;
+    d.properties[d.propertyIndex("infantry_entrench")].modifiers = {{"MORALE_LOSS_RATE", ModifierDef::Op::Multiply, 0.5_fx}};
+    d.layouts[d.layoutIndex("lay")].retreatFormation = d.layouts[d.layoutIndex("lay")].formation("regiment_column");
+    RegimentDef brittle = regiment("reg_brittle", "rifle");
+    brittle.moraleBreakpoint = 15_fx;
+    brittle.entrenchmentTime = 30_fx;
+    const auto level = [](Fixed req, Fixed av, Fixed dv, Fixed health, Fixed morale, Fixed recovery) {
+        ExperienceLevelDef l;
+        l.required = req;
+        l.attack = av;
+        l.defense = dv;
+        l.healthMultiplier = health;
+        l.morale = morale;
+        l.moraleRecovery = recovery;
+        return l;
+    };
+    brittle.experienceLevels = {level(0_fx, 0_fx, 0_fx, 1_fx, 0_fx, 1_fx), level(100_fx, 4_fx, 1_fx, 1.05_fx, 0_fx, 1.05_fx),
+                                level(250_fx, 8_fx, 2_fx, 1.1_fx, 0.5_fx, 1.1_fx), level(500_fx, 16_fx, 3_fx, 1.2_fx, 1_fx, 1.15_fx)};
+    d.regiments.insert(d.regiments.begin(), brittle);  // "reg_brittle" sorts first
     d.dataHash = hashBytes(serializeDefs(d));
     return d;
 }
@@ -328,7 +357,7 @@ TEST_CASE("damage formula: resistances, defense, minimum damage, attack multipli
     CHECK_FALSE(parseCombatTuning(t, "defenseK", err));
     CHECK(combatTuningHash(t) != combatTuningHash(CombatTuning{}));
     // Every field is in the table (so --tune, the hash and the docs see it).
-    CHECK(combatTuningFields().size() == 11);
+    CHECK(combatTuningFields().size() == 16);
 }
 
 TEST_CASE("terrain and entrenchment properties apply only to units that have their required properties") {
@@ -587,19 +616,35 @@ TEST_CASE("buildings defend themselves without a regiment") {
     CHECK(r.hp(bunker) < 1000_fx);
 }
 
-TEST_CASE("formation attack multiplier: Column hits for half") {
+TEST_CASE("combat efficiency blends: down at 0.02/s, up at 0.01/s; a settled Column hits for half") {
     const nav::MapDef m = openMap(128);
     for (const bool column : {false, true}) {
         Run r(m);
         const EntityId rifles = r.spawn("reg_rifle", {30_fx, 40_fx}, kEast, 0);
-        const EntityId foes = r.spawn("reg_unarmed", {38_fx, 40_fx}, kWest, 1);
-        if (column) r.step({makeSetFormation(0, 0, r.seq(0), {rifles}, "regiment_column")});
-        r.step({makeStop(0, 1, r.seq(1), {foes})});
-        r.step({makeAttack(0, 0, r.seq(0), {rifles}, foes)});
-        for (int i = 0; i < 100 && r.count(SimEvent::Type::Fired) == 0; ++i) r.step();
+        CHECK(r.eng(rifles).efficiency == 1_fx);  // starts at its formation's
+        if (column) {
+            r.step({makeSetFormation(0, 0, r.seq(0), {rifles}, "regiment_column")});
+            Fixed want = 1_fx;
+            for (int i = 0; i < 100; ++i) want = want - 0.02_fx * 0.1_fx;  // the stage's own arithmetic
+            r.steps(99);
+            CHECK(r.eng(rifles).efficiency == want);  // 10 s later: 0.8
+            r.steps(200);
+            CHECK(r.eng(rifles).efficiency == 0.5_fx);  // settled
+        }
+        const EntityId foes = r.spawn("reg_unarmed", {38_fx, 40_fx}, kWest, 1);  // in range, after the blend
+        const std::size_t before = r.count(SimEvent::Type::Fired);
+        r.step({makeAttack(0, 0, r.seq(0), {rifles}, foes)});  // in range: it may fire this very tick
+        for (int i = 0; i < 100 && r.count(SimEvent::Type::Fired) == before; ++i) r.step();
         Fixed lost;
         for (const EntityId u : r.units(foes)) lost = lost + (100_fx - r.hp(u));
-        CHECK(lost == Fixed::fromInt(static_cast<std::int32_t>(r.count(SimEvent::Type::Fired))) * (column ? 5_fx : 10_fx));
+        CHECK_MESSAGE(lost == Fixed::fromInt(static_cast<std::int32_t>(r.count(SimEvent::Type::Fired) - before)) * (column ? 5_fx : 10_fx),
+                      "lost " << formatFixed(lost) << " shots " << (r.count(SimEvent::Type::Fired) - before) << " eff "
+                              << formatFixed(r.eng(rifles).efficiency));
+        if (column) {  // back to Assault: climbs at half the speed it fell
+            r.step({makeSetFormation(0, 0, r.seq(0), {rifles}, "regiment_aggressive")});
+            r.steps(9);
+            CHECK(r.eng(rifles).efficiency == 0.5_fx + (0.01_fx * 0.1_fx) * 10_fx);
+        }
     }
 }
 
@@ -626,7 +671,9 @@ TEST_CASE("combat commands round-trip through the replay codec") {
     const std::vector<Command> cmds = {makeAttack(3, 1, 2, {EntityId{5}, EntityId{9}}, EntityId{77}),
                                        makeAttackMove(4, 0, 1, {EntityId{5}}, {12.5_fx, 3_fx}),
                                        makeDebugSpawnBuilding(0, 1, 0, "bunker", {60_fx, 40_fx}, kNorth),
-                                       makeDebugSetEntrenched(7, 0, 3, {EntityId{5}}, true)};
+                                       makeDebugSetEntrenched(7, 0, 3, {EntityId{5}}, true),
+                                       makeRetreat(8, 1, 4, {EntityId{5}, EntityId{6}}, {1_fx, 2.5_fx}),
+                                       makeDebugSetExperience(9, 0, 5, {EntityId{5}}, 250.5_fx)};
     for (const Command& c : cmds) {
         std::vector<std::uint8_t> bytes;
         encodeCommand(c, bytes);
@@ -648,13 +695,16 @@ TEST_CASE("save/load mid-fight continues identically; a replay with tuning repro
         const EntityId a = r.spawn("reg_rifle", {20_fx, 40_fx}, kEast, 0);
         const EntityId b = r.spawn("reg_mg", {50_fx, 42_fx}, kWest, 1);
         const EntityId c = r.spawn("reg_tank", {25_fx, 60_fx}, kEast, 0);
-        r.step({makeAttack(0, 0, r.seq(0), {a, c}, b), makeAttackMove(0, 1, r.seq(1), {b}, {10_fx, 40_fx})});
+        const EntityId d = r.spawn("reg_brittle", {60_fx, 70_fx}, kWest, 1);  // breaks: a rout mid-film
+        r.step({makeAttack(0, 0, r.seq(0), {a, c}, b), makeAttackMove(0, 1, r.seq(1), {b, d}, {10_fx, 40_fx}),
+                makeDebugSetExperience(0, 1, r.seq(1), {d}, 260_fx)});
     };
     Run ref(m, &tuning);
     script(ref);
     ref.steps(400);
     const std::uint64_t want = stateHash(ref.sim);
     CHECK(ref.count(SimEvent::Type::Died) > 0);
+    CHECK(ref.count(SimEvent::Type::LevelUp) > 0);
 
     Run a(m, &tuning);
     script(a);
@@ -672,4 +722,240 @@ TEST_CASE("save/load mid-fight continues identically; a replay with tuning repro
         CHECK_FALSE(loadState(other, saveState(a.sim), &err));
     }
     CHECK(stateHash(a.sim) == want);
+}
+
+// ------------------------------------------------------------------------------------- part 2: morale and experience
+
+namespace {
+
+// Steps until the regiment's next morale sample is the coming tick ((tick + index) % 50 == 0).
+void untilSample(Run& r, EntityId reg) {
+    while ((r.sim.tick() + reg.index()) % 50 != 0) r.step();
+}
+
+}  // namespace
+
+TEST_CASE("morale: starts full; deaths cost morale_value x MoraleDeathFactor; kills give the slayer bonus; idle regiments replenish") {
+    const nav::MapDef m = openMap(128);
+    Run r(m);
+    const EntityId a = r.spawn("reg_brittle", {20_fx, 40_fx}, kEast, 0);
+    const EntityId b = r.spawn("reg_rifle", {100_fx, 40_fx}, kWest, 1);
+    CHECK(moraleMaxOf(r.sim, a) == 20_fx);  // four riflemen, morale_value 5
+    CHECK(r.eng(a).morale == 20_fx);
+    Engagement& ea = *r.sim.world().engagements.get(a);
+    ea.morale = 12_fx;
+    // One of B's men killed by one of A's: B loses 5 x 0.25; A gains 0.5 x clamp(5 / 5, 0.5, 3).
+    moraleOnKill(r.sim, r.units(b)[0], r.units(a)[0]);
+    CHECK(r.eng(b).morale == 20_fx - 5_fx * 0.25_fx);
+    CHECK(ea.morale == 12_fx + 0.5_fx);
+    // Out of combat, every sample: + MoraleReplenish (2).
+    untilSample(r, a);
+    const Fixed before = ea.morale;
+    r.step();
+    CHECK(r.eng(a).morale == before + 2_fx);
+    // Never above the ceiling.
+    for (int i = 0; i < 400; ++i) r.step();
+    CHECK(r.eng(a).morale == moraleMaxOf(r.sim, a));
+}
+
+TEST_CASE("morale: engaged regiments lose per sample, scaled by enemy strength (x1..x3); entrenched lose x1.5") {
+    const nav::MapDef m = openMap(128);
+    for (const bool dug : {false, true}) {
+        CAPTURE(dug);
+        Run r(m);
+        const EntityId a = r.spawn("reg_brittle", {40_fx, 40_fx}, kEast, 0);
+        const EntityId hulks = r.spawn("reg_hulk", {50_fx, 40_fx}, kWest, 1);  // 4 x 400 health against 4 x 200
+        if (dug) r.step({makeDebugSetEntrenched(0, 0, r.seq(0), {a}, true)});
+        r.step({makeAttack(0, 0, r.seq(0), {a}, hulks)});
+        REQUIRE(r.eng(a).state == Engagement::State::Engaging);
+        untilSample(r, a);
+        const Fixed before = r.eng(a).morale;
+        r.step();
+        // factor = clamp(enemy health in its zone / its own, 1, 3): about 1600 / 800, measured after
+        // this tick's hits (Abilities runs before Morale).
+        Fixed enemy, own;
+        for (const EntityId u : r.units(hulks)) enemy = enemy + r.hp(u);
+        for (const EntityId u : r.units(a)) own = own + r.hp(u);
+        const Fixed factor = std::clamp(enemy / own, 1_fx, 3_fx);
+        CHECK(factor > 1.9_fx);
+        const Fixed loss = 0.5_fx * factor;
+        CHECK_MESSAGE(r.eng(a).morale == before - (dug ? loss * 1.5_fx : loss),
+                      "before " << formatFixed(before) << " after " << formatFixed(r.eng(a).morale));
+    }
+}
+
+TEST_CASE("rout: a fighting regiment at its breaking point runs from its attacker, ignores orders, then rallies; the attacker earns rout XP") {
+    const nav::MapDef m = openMap(128);
+    Run r(m);
+    const EntityId a = r.spawn("reg_brittle", {64_fx, 64_fx}, kEast, 0);
+    const EntityId b = r.spawn("reg_rifle", {75_fx, 64_fx}, kWest, 1);
+    r.step({makeAttack(0, 0, r.seq(0), {a}, b), makeAttack(0, 1, r.seq(1), {b}, a)});
+    r.steps(3);
+    REQUIRE(r.eng(a).state == Engagement::State::Engaging);
+    Engagement& ea = *r.sim.world().engagements.get(a);
+    ea.morale = 15_fx;  // at the breaking point
+    ea.lastAttacker = b;
+    const Fixed xpBefore = r.eng(b).xp;
+    r.step();
+    REQUIRE(r.eng(a).state == Engagement::State::Routing);
+    CHECK(r.first(SimEvent::Type::Routed, a) != UINT32_MAX);
+    // It runs away from B (to its west), 40 units, within ±45° of straight away.
+    const FVec2 from = r.sim.world().transforms.get(a)->position;
+    const FVec2 to = r.order(a).goal - from;
+    CHECK(distance(to, FVec2{}) > 30_fx);
+    CHECK(to.x < Fixed{});
+    CHECK(abs(to.y) <= abs(to.x) + 0.5_fx);
+    // B earns the rout: clamp(4 x 200 x 0.01, 0, 10) x 1.
+    CHECK(r.eng(b).xp >= xpBefore + 8_fx);
+    CHECK(r.eng(a).mode == Engagement::Mode::None);
+    // Deaf to orders while it routs; it doesn't fire.
+    const std::size_t rejected = r.count(SimEvent::Type::CommandRejected);
+    const std::size_t fired = r.log.size();
+    std::size_t firedByA = 0;
+    r.step({makeMoveGroup(0, 0, r.seq(0), {a}, {10_fx, 10_fx})});
+    CHECK(r.count(SimEvent::Type::CommandRejected) == rejected + 1);
+    for (int i = 0; i < 90; ++i) r.step();
+    for (std::size_t i = fired; i < r.log.size(); ++i) {
+        const Member* mm = r.log[i].type == SimEvent::Type::Fired ? r.sim.world().members.get(r.log[i].entity) : nullptr;
+        if (mm != nullptr && mm->organization == a) ++firedByA;
+    }
+    CHECK(firedByA == 0);
+    // After RoutingTime (10 s) it is exhausted; replenishing to the rally point it reforms, then is idle.
+    for (int i = 0; i < 30 && r.eng(a).state == Engagement::State::Routing; ++i) r.step();
+    if (!r.sim.world().registry.alive(a)) return;  // B may have caught it: fine, nothing more to see
+    CHECK(r.eng(a).state == Engagement::State::Exhausted);
+    r.step({makeStop(0, 1, r.seq(1), {b})});  // B leaves it alone
+    for (int i = 0; i < 2000 && r.eng(a).state != Engagement::State::Idle && r.sim.world().registry.alive(a); ++i) r.step();
+    if (r.sim.world().registry.alive(a)) {
+        CHECK(r.eng(a).state == Engagement::State::Idle);
+        CHECK(r.eng(a).morale >= 15_fx + (moraleMaxOf(r.sim, a) - 15_fx) * 0.5_fx);
+    }
+}
+
+TEST_CASE("experience: kills earn clamp(health_max x xpPerHealth); levels scale health and add DV, AV and morale; army XP") {
+    const nav::MapDef m = openMap(128);
+    Run r(m);
+    const EntityId a = r.spawn("reg_brittle", {20_fx, 40_fx}, kEast, 0);
+    const EntityId b = r.spawn("reg_rifle", {100_fx, 40_fx}, kWest, 1);
+    const Fixed army0 = r.sim.world().kingdoms[0].armyXp;
+    moraleOnKill(r.sim, r.units(b)[0], r.units(a)[0]);
+    CHECK(r.eng(a).xp == 200_fx * 0.01_fx);  // health_max x xpPerHealth (≈ 2)
+    CHECK(r.sim.world().kingdoms[0].armyXp == army0 + 200_fx * 0.01_fx);  // x ExperienceFactionGainMultiplier 1
+    CHECK(r.eng(a).level == 0);
+    const Fixed hp = r.hp(r.units(a)[0]);
+    r.step({makeDebugSetExperience(0, 0, r.seq(0), {a}, 260_fx)});  // Veteran (250)
+    CHECK(r.eng(a).level == 2);
+    CHECK(r.first(SimEvent::Type::LevelUp, a) != UINT32_MAX);
+    CHECK(r.hp(r.units(a)[0]) == hp * 1.1_fx / 1_fx);
+    CHECK(levelDefenseOf(r.sim, a) == 2_fx);
+    CHECK(attackMultiplierOf(r.sim, a) == r.eng(a).efficiency * (1_fx + 8_fx * 0.01_fx));
+    CHECK(moraleMaxOf(r.sim, a) == 4_fx * (5_fx + 0.5_fx));
+    // Army XP also grows by ExperienceFactionGainPeriodic (1/s) for every player with something on the map.
+    const Fixed p1 = r.sim.world().kingdoms[1].armyXp;
+    r.steps(10);
+    CHECK(r.sim.world().kingdoms[1].armyXp == p1 + (1_fx * 0.1_fx) * 10_fx);
+    CHECK(r.sim.world().kingdoms[5].armyXp == Fixed{});
+}
+
+TEST_CASE("entrenchment: halted for entrenchment_time entrenches; a move resets it") {
+    const nav::MapDef m = openMap(128);
+    Run r(m);
+    const EntityId a = r.spawn("reg_brittle", {20_fx, 40_fx}, kEast, 0);
+    r.steps(290);
+    CHECK_FALSE(r.eng(a).entrenched);
+    r.steps(20);
+    CHECK(r.eng(a).entrenched);  // 30 s halted
+    r.step({makeMoveGroup(0, 0, r.seq(0), {a}, {60_fx, 40_fx})});
+    r.steps(2);
+    CHECK_FALSE(r.eng(a).entrenched);
+    CHECK(r.eng(a).stillTicks == 0);
+}
+
+TEST_CASE("Retreat: the retreat formation, passive, MoraleRetreatPenalty; on arrival it reforms and gets its formation back") {
+    const nav::MapDef m = openMap(128);
+    Run r(m);
+    const EntityId a = r.spawn("reg_brittle", {60_fx, 40_fx}, kEast, 0);
+    const EntityId b = r.spawn("reg_post", {72_fx, 40_fx}, kWest, 1);
+    r.step({makeAttack(0, 0, r.seq(0), {a}, b)});
+    r.steps(5);
+    REQUIRE(r.eng(a).state == Engagement::State::Engaging);
+    const std::uint16_t formation = r.sim.world().regiments.get(a)->formation;
+    r.step({makeRetreat(0, 0, r.seq(0), {a}, {10_fx, 40_fx})});
+    CHECK(r.eng(a).state == Engagement::State::Retreating);
+    CHECK(r.eng(a).mode == Engagement::Mode::None);
+    const LayoutDef& lay = defs().layouts[defs().layoutIndex("lay")];
+    CHECK(r.sim.world().regiments.get(a)->formation == lay.retreatFormation);
+    const std::size_t fired = r.count(SimEvent::Type::Fired);
+    for (int i = 0; i < 2000 && r.eng(a).state != Engagement::State::Idle; ++i) r.step();
+    CHECK(r.eng(a).state == Engagement::State::Idle);
+    CHECK(r.count(SimEvent::Type::Fired) == fired);  // never fired while retreating, nor after (posts are far)
+    CHECK(distance(r.sim.world().transforms.get(a)->position, {10_fx, 40_fx}) < 2_fx);
+    CHECK(r.sim.world().regiments.get(a)->formation == formation);
+}
+
+TEST_CASE("committed combat replay plays identically on this compiler (fixture with morale, routs, XP, retreat)") {
+    // sim/tests/fixtures/combat_m5.rpl: these test defs, a 128 open map, 900 ticks of the scenario
+    // below, recorded with MSVC x64. CORPS_WRITE_FIXTURES=1 re-records it.
+    const nav::MapDef m = openMap(128);
+    Replay rep;
+    rep.header.simVersion = simVersion();
+    rep.header.dataHash = defs().dataHash;
+    rep.header.mapSpec = m.name;
+    rep.header.mapHash = m.mapHash;
+    rep.header.matchSeed = 9;
+    rep.header.tickCount = 900;
+    rep.header.players = {"A", "B"};
+    CombatTuning tuning;
+    tuning.defenseK = 11_fx;
+    rep.header.tuning = formatCombatTuning(tuning);
+    rep.commands = {makeSpawnRegiment(0, 0, 0, "reg_brittle", {30_fx, 40_fx}, kEast), makeSpawnRegiment(0, 0, 1, "reg_tank", {30_fx, 70_fx}, kEast),
+                    makeSpawnRegiment(0, 1, 0, "reg_rifle", {90_fx, 40_fx}, kWest), makeSpawnRegiment(0, 1, 1, "reg_mg", {95_fx, 70_fx}, kWest),
+                    makeDebugSpawnBuilding(0, 1, 2, "bunker", {110_fx, 55_fx}, kWest)};
+    {
+        Sim scratch({9, &defs(), &m, &tuning});
+        scratch.step(rep.commands);
+        const std::vector<EntityId> regs = scratch.world().regiments.ids();
+        REQUIRE(regs.size() == 4);
+        rep.commands.push_back(makeDebugSetExperience(1, 0, 2, {regs[0]}, 120_fx));  // reg_brittle: Regular
+        rep.commands.push_back(makeAttackMove(1, 0, 3, {regs[0], regs[1]}, {100_fx, 55_fx}));
+        rep.commands.push_back(makeAttackMove(1, 1, 3, {regs[2]}, {20_fx, 40_fx}));
+        rep.commands.push_back(makeAttack(1, 1, 4, {regs[3]}, regs[1]));
+        rep.commands.push_back(makeRetreat(400, 0, 4, {regs[0]}, {8_fx, 40_fx}));
+    }
+    RunOptions opt;
+    opt.map = &m;
+    const std::string path = CORPS_SOURCE_DIR "/sim/tests/fixtures/combat_m5.rpl";
+    std::ifstream in(vfs::pathFromUtf8(path), std::ios::binary);
+    if (testEnvSet("CORPS_WRITE_FIXTURES") || !in) {
+        rep.hashes = runReplay(rep, &defs(), opt).hashes;
+        std::ofstream out(vfs::pathFromUtf8(path), std::ios::binary);
+        const auto b = encodeReplay(rep);
+        out.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+        MESSAGE("wrote " << path);
+        return;
+    }
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    Replay recorded;
+    std::string err;
+    REQUIRE_MESSAGE(decodeReplay(bytes, recorded, &err), err);
+    CHECK(recorded.commands == rep.commands);  // the scenario above is what's on disk
+    const RunResult run = runReplay(recorded, &defs(), opt);
+    CHECK_FALSE(divergenceFromRecorded(recorded, run).found);
+    CHECK(run.finalHash == recorded.hashes.back().hash);
+    // The film has what part 2 is about.
+    Sim sim({9, &defs(), &m, &tuning});
+    CommandQueue q;
+    for (const Command& c : recorded.commands) q.schedule(c, 0);
+    std::size_t routs = 0, levels = 0, deaths = 0;
+    for (std::uint32_t t = 0; t < recorded.header.tickCount; ++t) {
+        sim.step(q.take(t));
+        for (const SimEvent& e : sim.events()) {
+            routs += e.type == SimEvent::Type::Routed;
+            levels += e.type == SimEvent::Type::LevelUp;
+            deaths += e.type == SimEvent::Type::Died;
+        }
+    }
+    CHECK(levels >= 1);
+    CHECK(deaths >= 1);
+    MESSAGE("combat fixture: " << routs << " routs, " << levels << " level-ups, " << deaths << " deaths");
 }

@@ -609,3 +609,62 @@ TEST_CASE("golden duel: GER vs GBR rifle regiments on open ground fight to a fin
     }
     CHECK(hashes[0] == hashes[1]);
 }
+
+TEST_CASE("golden defs: morale, experience levels, entrenchment, retreat formation") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    CHECK(defs.unit("ger_infantry")->moraleValue == 5_fx);
+    CHECK(defs.unit("ger_tank_medium")->moraleValue == 20_fx);
+    const RegimentDef* inf = defs.regiment("regiment_ger_infantry");
+    REQUIRE(inf != nullptr);
+    CHECK(inf->moraleBreakpoint == 20_fx);
+    CHECK(inf->entrenchmentTime == 30_fx);
+    REQUIRE(inf->experienceLevels.size() == 4);  // Recruit, Regular, Veteran, Elite
+    CHECK(inf->experienceLevels[1].required == 150_fx);
+    CHECK(inf->experienceLevels[3].required == 600_fx);
+    CHECK(inf->experienceLevels[3].attack == 16_fx);
+    CHECK(inf->experienceLevels[3].defense == 3_fx);
+    CHECK(inf->experienceLevels[2].morale == 0.5_fx);
+    const LayoutDef& lay = defs.layouts[inf->layoutIndex];
+    REQUIRE(lay.retreatFormation != kNoDef);
+    CHECK(lay.formations[lay.retreatFormation].formationIds == "regiment_column");  // the last organized one
+    const PropertyDef& dug = defs.properties[defs.propertyIndex("infantry_entrench")];
+    REQUIRE(dug.modifiers.size() == 2);
+    CHECK(dug.modifiers[1].attribute == "MORALE_LOSS_RATE");
+    CHECK(dug.modifiers[1].amount == 0.5_fx);
+    const AbilityDef* mortar = nullptr;
+    for (const std::uint32_t a : defs.unit("gbr_infantry_mortar")->abilities) mortar = &defs.abilities[a];
+    REQUIRE(mortar != nullptr);
+    const CombatRules rules(&defs, nullptr, CombatTuning{});
+    CHECK(rules.ability(static_cast<std::uint32_t>(mortar - defs.abilities.data()))->moraleLoss == 0.75_fx);  // a morale breaker
+    CHECK(defs.svars.getFixed("AttackEfficiencyPointsPerSecondFalling", {}) == 0.02_fx);
+    CHECK(defs.svars.getFixed("MoraleDeathFactor", {}) == 0.25_fx);
+}
+
+TEST_CASE("golden terrain defense on a real map: forest cells of Golden Fields give infantry DV +4") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const std::string path = CORPS_SOURCE_DIR "/cache/maps/golden_fields/map.json";
+    std::ifstream in(vfs::pathFromUtf8(path), std::ios::binary);
+    if (!in) {
+        MESSAGE("skipped: no " << path << " (tools/rmp.py output)");
+        return;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    nav::MapDef map;
+    std::string err;
+    REQUIRE_MESSAGE(nav::loadRmpJson(text, map, err), err);
+    const CombatRules rules(&defs, &map, CombatTuning{});
+    const CombatProfile& rifle = *rules.unit(defs.unitIndex("ger_infantry"));
+    std::uint32_t forest = 0xFFFFFFFFu, open = 0xFFFFFFFFu;
+    for (std::uint32_t i = 0; i < map.terrainNames.size(); ++i) {
+        const std::string& n = map.terrainNames[i];
+        if (forest == 0xFFFFFFFFu && n.find("forest") != std::string::npos && defs.terrainOfName(n) != kNoDef) forest = i;
+        if (open == 0xFFFFFFFFu && n.find("dirt0") != std::string::npos && defs.terrainOfName(n) != kNoDef) open = i;
+    }
+    REQUIRE(forest != 0xFFFFFFFFu);
+    REQUIRE(open != 0xFFFFFFFFu);
+    CHECK(rules.statsOf(rifle, forest, false).defense == rules.statsOf(rifle, open, false).defense + 4_fx);
+    const std::uint32_t ap = defs.damageTypeIndex("armor_piercing");
+    CHECK(rules.statsOf(rifle, forest, false).resist[ap] > rules.statsOf(rifle, open, false).resist[ap]);
+}

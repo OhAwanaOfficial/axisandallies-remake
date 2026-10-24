@@ -1,10 +1,12 @@
 // simcli duel (M5): two regiments (or a regiment and a building) fight on a flat arena of one
-// terrain until one side is wiped out. Prints time-to-kill and survivors; the calibration harness
-// for docs/CALIBRATION.md. Records the fight as a replay so `simcli determinism-check` can verify it.
+// terrain until one side routs or is wiped out (--until-wiped: wiped out). Prints the time to
+// rout / kill, survivors, morale, experience and army XP; the calibration harness for
+// docs/CALIBRATION.md. Records the fight as a replay so `simcli determinism-check` can verify it.
 //
 //   simcli duel <regA> <regB|building> [terrain] [--distance D] [--formation-a F] [--formation-b F]
-//               [--entrench-a] [--entrench-b] [--max-seconds S] [--size N] [--seed S]
-//               [--tune name=value,...] [--out F.rpl] [--game DIR]
+//               [--entrench-a] [--entrench-b] [--xp-a N] [--xp-b N] [--retreat-a S] [--retreat-b S]
+//               [--until-wiped] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...]
+//               [--out F.rpl] [--verbose] [--game DIR]
 //
 // terrain: open (default), forest, jungle, city, sand, snow (the first Terrain record whose
 // properties include terrain_<word>_infantry), or any Terrain / variation IDS.
@@ -91,6 +93,9 @@ struct Side {
     Fixed damageDealt;
     std::uint32_t firstLoss = 0;     // tick + 1 of its first death (0: none)
     std::uint32_t wipedAt = 0;       // tick + 1 when its last unit died (0: not wiped)
+    std::uint32_t routedAt = 0;      // tick + 1 when it first routed (0: never)
+    std::uint32_t levelUps = 0;
+    Fixed startMorale;
 };
 
 }  // namespace
@@ -99,8 +104,9 @@ int cmdDuel(const SimArgs& a) {
     constexpr int kSkipped = 77;
     if (a.positional.size() < 2) {
         std::fprintf(stderr, "usage: simcli duel <regA> <regB|building> [terrain] [--distance D] [--formation-a F] [--formation-b F]\n"
-                             "                   [--entrench-a] [--entrench-b] [--max-seconds S] [--size N] [--seed S]\n"
-                             "                   [--tune name=value,...] [--out F.rpl]\n");
+                             "                   [--entrench-a] [--entrench-b] [--xp-a N] [--xp-b N] [--retreat-a S] [--retreat-b S]\n"
+                             "                   [--until-wiped] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...]\n"
+                             "                   [--out F.rpl] [--verbose]\n");
         return 2;
     }
     if (!a.gameDir) {
@@ -185,17 +191,30 @@ int cmdDuel(const SimArgs& a) {
                     sides[s].startHp = sides[s].startHp + w.health.get(id)->current;
                 }
             }
+            if (const Engagement* e = w.engagements.get(sides[s].root)) sides[s].startMorale = e->morale;
         }
     }
-    // Tick 1: formations, entrenchment, and the attack orders.
+    // Tick 1: formations, entrenchment, experience, and the attack orders (an entrenched side holds
+    // its ground instead). --retreat-x S: that side retreats toward its own edge S seconds in.
     const char* formation[2] = {"formation-a", "formation-b"};
     const char* entrench[2] = {"entrench-a", "entrench-b"};
+    const char* xpArg[2] = {"xp-a", "xp-b"};
+    const char* retreatArg[2] = {"retreat-a", "retreat-b"};
     for (std::uint8_t s = 0; s < 2; ++s) {
         if (sides[s].building) continue;
         if (a.has(formation[s])) cmds.push_back(makeSetFormation(1, s, seq[s]++, {sides[s].root}, asciiLowerCopy(a.get(formation[s]))));
         if (a.has(entrench[s])) cmds.push_back(makeDebugSetEntrenched(1, s, seq[s]++, {sides[s].root}, true));
-        cmds.push_back(makeAttack(1, s, seq[s]++, {sides[s].root}, sides[1 - s].root));
+        if (a.has(xpArg[s])) cmds.push_back(makeDebugSetExperience(1, s, seq[s]++, {sides[s].root}, fixedArg(a, xpArg[s], {})));
+        // An entrenched side holds its ground (it auto-engages whatever comes into its zone).
+        if (!a.has(entrench[s])) cmds.push_back(makeAttack(1, s, seq[s]++, {sides[s].root}, sides[1 - s].root));
+        if (a.has(retreatArg[s])) {
+            const auto at = static_cast<std::uint32_t>(
+                std::clamp<std::int64_t>((fixedArg(a, retreatArg[s], {}) * Fixed::fromInt(kTicksPerSecond)).floorInt(), 2, 1000000));
+            const FVec2 edge{s == 0 ? 6_fx : Fixed::fromInt(static_cast<std::int32_t>(size)) - 6_fx, mid};
+            cmds.push_back(makeRetreat(at, s, seq[s]++, {sides[s].root}, edge));
+        }
     }
+    const bool untilWiped = a.has("until-wiped");
 
     Sim sim({seed, &defs, &map, &tuning});
     CommandQueue q;
@@ -236,12 +255,20 @@ int cmdDuel(const SimArgs& a) {
             if (e.type == SimEvent::Type::Fired) ++sides[s].shots;
             if (e.type == SimEvent::Type::Died && sides[s].firstLoss == 0) sides[s].firstLoss = t + 1;
         }
+        for (const SimEvent& e : sim.events()) {
+            for (int s = 0; s < 2; ++s) {
+                if (e.entity != sides[s].root) continue;
+                if (e.type == SimEvent::Type::Routed && sides[s].routedAt == 0) sides[s].routedAt = t + 1;
+                if (e.type == SimEvent::Type::LevelUp) ++sides[s].levelUps;
+            }
+        }
         bool over = false;
         for (int s = 0; s < 2; ++s) {
             if (alive[s] == 0 && sides[s].wipedAt == 0) {
                 sides[s].wipedAt = t + 1;
                 over = true;
             }
+            if (!untilWiped && sides[s].routedAt == t + 1) over = true;  // a rout ends the fight (CALIBRATION §3)
         }
         if (over) {
             ++t;
@@ -254,14 +281,23 @@ int cmdDuel(const SimArgs& a) {
                 formatFixed(dist).c_str(), static_cast<unsigned long long>(seed), a.has("tune") ? ", tuning " : "",
                 a.has("tune") ? formatCombatTuning(tuning).c_str() : "");
     const char* names[2] = {"A", "B"};
+    // A side is beaten when it was wiped out or (unless --until-wiped) routed; the earlier one loses.
+    const auto beatenAt = [&](const Side& sd) -> std::uint32_t {
+        std::uint32_t at = sd.wipedAt;
+        if (!untilWiped && sd.routedAt != 0) at = at == 0 ? sd.routedAt : std::min(at, sd.routedAt);
+        return at;
+    };
+    const std::uint32_t beaten[2] = {beatenAt(sides[0]), beatenAt(sides[1])};
     int winner = -1;
-    if (sides[0].wipedAt != 0 && sides[1].wipedAt == 0) winner = 1;
-    if (sides[1].wipedAt != 0 && sides[0].wipedAt == 0) winner = 0;
+    if (beaten[0] != 0 && (beaten[1] == 0 || beaten[0] < beaten[1])) winner = 1;
+    if (beaten[1] != 0 && (beaten[0] == 0 || beaten[1] < beaten[0])) winner = 0;
     if (winner >= 0) {
         const Side& loser = sides[1 - winner];
-        std::printf("  result: %s wins; %s wiped out at %s (time to kill)\n", names[winner], names[1 - winner], seconds(loser.wipedAt).c_str());
-    } else if (sides[0].wipedAt != 0) {
-        std::printf("  result: both wiped out at %s\n", seconds(sides[0].wipedAt).c_str());
+        const bool routed = !untilWiped && loser.routedAt != 0 && (loser.wipedAt == 0 || loser.routedAt <= loser.wipedAt);
+        std::printf("  result: %s wins; %s %s at %s (time to %s)\n", names[winner], names[1 - winner], routed ? "routed" : "wiped out",
+                    seconds(beaten[1 - winner]).c_str(), routed ? "rout" : "kill");
+    } else if (beaten[0] != 0) {
+        std::printf("  result: both beaten at %s\n", seconds(beaten[0]).c_str());
     } else {
         std::printf("  result: no winner after %s\n", seconds(ticks).c_str());
     }
@@ -283,8 +319,23 @@ int cmdDuel(const SimArgs& a) {
                     static_cast<long long>(pct), alive != 0 ? ":" : "", each.c_str(), sd.shots,
                     static_cast<long long>(sd.damageDealt.floorInt()), sd.firstLoss != 0 ? seconds(sd.firstLoss).c_str() : "-");
     }
+    {
+        static const char* kStateName[] = {"idle", "engaging", "stalemate", "reform", "regroup", "retreating", "routing", "exhausted"};
+        for (int s = 0; s < 2; ++s) {
+            const Engagement* e = sim.world().registry.alive(sides[s].root) ? sim.world().engagements.get(sides[s].root) : nullptr;
+            if (e == nullptr) continue;
+            std::printf("  %s morale %lld (started %lld, breaks at %lld), %s; XP %lld, level %u (%u level-ups); efficiency %s%%%s; routed %s\n",
+                        names[s], static_cast<long long>(e->morale.floorInt()), static_cast<long long>(sides[s].startMorale.floorInt()),
+                        static_cast<long long>(defs.regiment(sides[s].ids)->moraleBreakpoint.floorInt()), kStateName[static_cast<int>(e->state)],
+                        static_cast<long long>(e->xp.floorInt()), e->level, sides[s].levelUps,
+                        formatFixed(e->efficiency * Fixed::fromInt(100)).substr(0, 5).c_str(), e->entrenched ? ", entrenched" : "",
+                        sides[s].routedAt != 0 ? seconds(sides[s].routedAt).c_str() : "-");
+        }
+        std::printf("  army XP: player 0 %lld, player 1 %lld\n", static_cast<long long>(sim.world().kingdoms[0].armyXp.floorInt()),
+                    static_cast<long long>(sim.world().kingdoms[1].armyXp.floorInt()));
+    }
     if (a.has("verbose")) {  // why a fight ended where it did
-        static const char* kState[] = {"idle", "engaging", "stalemate", "reform", "regroup", "retreating", "routing"};
+        static const char* kState[] = {"idle", "engaging", "stalemate", "reform", "regroup", "retreating", "routing", "exhausted"};
         static const char* kMode[] = {"none", "attack", "attack-move"};
         static const char* kOrder[] = {"idle", "wait-path", "moving", "wheeling", "arriving", "following", "engaged"};
         const World& w = sim.world();

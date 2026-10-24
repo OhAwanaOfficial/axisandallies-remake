@@ -108,10 +108,11 @@ at a time (ARCHITECTURE §4.4).
 build\windows\simcli\Release\simcli.exe duel regiment_ger_infantry regiment_gbr_infantry forest
 build\windows\simcli\Release\simcli.exe duel regiment_gbr_infantry ger_bunker --tune defenseK=12 --out duel.rpl
 ```
-Two regiments (or a regiment and a building) fight on a flat arena of one terrain until one side is gone. It prints the
-time to kill, survivors, shots and damage per side. Options: `--distance`, `--formation-a/-b`, `--entrench-a/-b`,
-`--max-seconds`, `--tune name=value,...` (constants from `sim/combat/tuning.hpp`), `--out` (a replay for
-`determinism-check`) and `--verbose`. The calibration procedure and the ten scenarios to compare with the original
+Two regiments (or a regiment and a building) fight on a flat arena of one terrain until one side routs or is gone. It
+prints the time to rout or kill, survivors, shots and damage, morale, XP and levels per side, and both players' army
+XP. Options: `--distance`, `--formation-a/-b`, `--entrench-a/-b`, `--xp-a/-b N`, `--retreat-a/-b SECONDS`,
+`--until-wiped`, `--max-seconds`, `--tune name=value,...` (constants from `sim/combat/tuning.hpp`), `--out` (a replay
+for `determinism-check`) and `--verbose`. The calibration procedure and the ten scenarios to compare with the original
 are in [docs/CALIBRATION.md](docs/CALIBRATION.md).
 
 ## Import the original art and browse it (M2)

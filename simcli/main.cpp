@@ -16,7 +16,8 @@
 //   simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]
 //   simcli perf [--gen SEED --size N | --map F.json] [--regiments N] [--ticks N] [--out F.rpl]
 //   simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F] [--entrench-a]
-//               [--entrench-b] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl]
+//               [--entrench-b] [--xp-a N] [--xp-b N] [--retreat-a S] [--retreat-b S] [--until-wiped]
+//               [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl] [--verbose]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -70,8 +71,9 @@ void usage() {
                  "  simcli scenario [--gen SEED --size N | --map F.json] [--ticks N] [--seed S] [--out F.rpl]\n"
                  "  simcli perf [--gen SEED --size N | --map F.json] [--regiments N] [--ticks N] [--out F.rpl]\n"
                  "  simcli duel REG_A REG_B|BUILDING [TERRAIN] [--distance D] [--formation-a F] [--formation-b F]\n"
-                 "              [--entrench-a] [--entrench-b] [--max-seconds S] [--size N] [--seed S]\n"
-                 "              [--tune name=value,...] [--out F.rpl]\n");
+                 "              [--entrench-a] [--entrench-b] [--xp-a N] [--xp-b N] [--retreat-a S] [--retreat-b S]\n"
+                 "              [--until-wiped] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...]\n"
+                 "              [--out F.rpl] [--verbose]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -155,8 +157,10 @@ struct Args {
 const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-seed", "commands-per-tick", "regiments",
                                              "spawn", "at", "regiment", "facing",
                                              "map", "gen", "size", "queries", "class", "budget",
-                                             "distance", "formation-a", "formation-b", "max-seconds", "tune"};
-const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose"};
+                                             "distance", "formation-a", "formation-b", "max-seconds", "tune",
+                                             "xp-a", "xp-b", "retreat-a", "retreat-b"};
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose",
+                                            "until-wiped"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
     Args a;
