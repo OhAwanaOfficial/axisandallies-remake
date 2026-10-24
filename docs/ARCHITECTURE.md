@@ -204,8 +204,9 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
   * **Set-up and static data:** `start(game_dir, map_spec, seed)`, `map_info()` (size, view heights, terrain names and per-cell terrain/kind), `terrain_table(biome)`, `unit_visual(def)`, `regiment_def(def)`, `find_open_area()`.
     * `terrain_table` gives every TGI `Terrain` variation's texture (relative to its record's folder), data colour and repeat size.
     * `unit_visual` gives the cache model path: `resource_prefix` relative to the unit's TGI folder, `.glb`.
-  * **Commands:** `queue_*` for spawn, move (Run, explicit facing), stop, formation, group behaviour and debug blockers. Queued commands are applied by the next `step()`. Selections over six regiments are sent as several groups.
-  * **Reading:** `snapshot()` returns parallel packed arrays per entity: id, kind, def, organization, player, moving, and previous and current position and facing. `drain_events()`, and the debug queries `regiment_info()` (state, formation, compression, slot targets, path) and `cost_grid(class)`.
+  * **Commands:** `queue_*` for spawn, move (Run, explicit facing), stop, formation, group behaviour, debug blockers, and (M5) attack, attack-move and retreat. Queued commands are applied by the next `step()`. Selections over six regiments are sent as several groups.
+  * **Reading:** `snapshot()` returns parallel packed arrays per entity: id, kind, def, organization, player, moving, and previous and current position and facing. `drain_events()` (type, entity, player, tick, `other`, `detail`, `at`, `facing`; see M5 below), and the queries `regiment_info()` (state, formation, compression, slot targets, path; M5: health, morale and its maximum, breaking point, efficiency, XP, level and level thresholds, engagement state, mode, Attack target, entrenchment) and `cost_grid(class)`.
+  * **View data (M5):** `record(type, ids)` (a resolved TGI record as nested Dictionaries), `ability_record(ability)` (a DefSet ability's AbilityDefinition, inline ones from their owner's PerformerComponent / DefenderComponent slot), `unit_record(def)`, `read_file(path)` (raw bytes from the VFS: the sounds), `unit_visual(def).abilities`, and `banner_instances()` (below).
   * Floats exist only on the bridge's side. Everything handed to the sim is `Fixed`, and the view can't reach sim state except through commands.
 * **Loop:** `battle.gd` steps the sim at 10 Hz from an accumulator (up to 8 ticks per frame; Space pauses; +/- changes speed) and renders at `alpha = accum / 0.1` between the snapshot's previous and current transforms.
 * **Terrain** (`terrain.gd`, `terrain.gdshader`):
@@ -222,7 +223,8 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
     * `godot --path godot --script res://scripts/tools/vat_check.gd -- <model.glb> <clip>` compares the bake with Godot's own skinning (needs a renderer, not `--headless`). PERInfantry and GERInfantry, Walk and Idle: difference 0.0000.
   * `unit_views.gd` (High): a copy of the model and an AnimationPlayer per unit, blending between clips.
   * Facing: sim θ → `rotation.y = -θ`, and imported models face Godot +Z, so the model is turned by +90°.
-  * Not yet: biome and nation skins, death and attack animations, FXC.
+  * One-shot clips (M5): Recoil1 (named after the model, e.g. `GERTankMediumRecoil1`) and Die1..Die4 are loaded with the loops. Low and Medium bake one Die clip (at most 25 frames) into the VAT as a third clip; High plays them on the AnimationPlayer.
+  * Not yet: biome and nation skins, attack animations (units fire from their move / idle pose).
 * **Graphics quality** (F6 cycles it and saves it to `user://settings.cfg`; `--quality=low|medium|high` overrides it). The default is Low when Godot fell back to GL Compatibility (no Vulkan or D3D12), Medium otherwise.
 
   | | Low | Medium | High |
@@ -234,13 +236,17 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 * **Camera** (`rts_camera.gd`): pan with the arrows or the screen edges, zoom with the wheel, rotate with middle drag or PgUp/PgDn, Home resets. Fixed 52° pitch.
 * **Input:**
   * **Selection:** left click picks the regiment of the nearest own unit (24 px); box drag; Shift adds; double-click selects all visible own regiments of that RegimentDef (the OS times it and Godot flags the second press `double_click`, so it works at any frame rate); Ctrl+1..9 stores the selection, 1..9 recalls it (tap twice to jump the camera).
-  * **Orders:** right click moves, right drag moves with a facing, Alt+right click runs. Q/W/E set Assault/Normal/Column, V toggles group behaviour, S stops, B drops a debug blocker.
+  * **Orders:** right click moves, right drag moves with a facing, Alt+right click runs; right click on an enemy unit (24 px) or building (40 px) attacks it (its regiment, or the building). A, then left click: attack-move to the ground, or attack the enemy clicked; Shift keeps the mode, right click or Esc leaves it. Q/W/E set Assault/Normal/Column, V toggles group behaviour, S stops, B drops a debug blocker.
+  * **Cursor:** the original's `Cursors/Cursors/Attack_0.tga` in attack-move mode, or with a selection over an enemy (checked at most every 50 ms); the system arrow otherwise. It is an OS cursor (`Input.set_custom_mouse_cursor`), not a CanvasItem.
 * **Debug overlays:** F1 cost grid of the selected regiment's class (red blocked, green normal, blue roads, yellow/orange slower), F2 paths (remaining part bright), F3 slot targets with anchors and headings, F4 HUD (tick, fps, the selection's formation, state, group and compression, recent arrival/blocked events).
 * **Checks:** `godot --path godot -- --selftest` drives the controls with synthetic input events, prints PASS/FAIL and exits 1 if any check failed:
   * click, Shift-click, double-click, box, Ctrl+1/1;
   * Q/E formations, right-click move to the clicked ground point, Alt+right-click Run;
-  * F1–F3 overlays, every unit drawn, and F6 cycling through the three qualities with every unit drawn in each.
-  `--screenshot=PATH --frames=N` renders a frame and quits.
+  * F1–F3 overlays;
+  * (M5) right click on an enemy attacks it; A enters attack-move mode with the attack cursor; A + click on the ground attack-moves, on an enemy attacks (every selected regiment); 4 banner instances per regiment;
+  * (M5) the fight at 8× until there were shots and a death: shots played sounds and sprites, deaths left bodies, the info panel shows the selected regiment;
+  * every unit drawn, and F6 cycling through the three qualities with every unit drawn in each (the sim paused).
+  `--screenshot=PATH --frames=N` renders a frame and quits. `--fight` spawns the demo with both sides attack-moving into each other and the camera following the first own regiment in a fight (with `--regiments`, every group attack-moves); `--speed=X` sets the sim speed.
 * **Open:**
   * GDExtension builds, by Godot template kind:
     * The editor and `godot --path` load the template_debug library `bin/windows/debug/simbridge.dll`. Two configs write it: Debug (unoptimized) and RelWithDebInfo (optimized, with symbols; `windows-relwithdebinfo`). The battle view uses RelWithDebInfo. After a Debug build, delete the DLL before building RelWithDebInfo: MSBuild sees the newer Debug DLL as up to date and doesn't relink (a Debug DLL imports `MSVCP140D`/`VCRUNTIME140D`; its sim step is ~40× slower).
@@ -262,15 +268,15 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 
       So throttling the text doesn't help; only having no visible CanvasItem does. The box-select `ColorRect` is still 2D, so a crash during a long drag is possible.
     * Minimal repro (no GDExtension): a 3D scene with 1,060 instanced skinned, animated characters plus a 2D `Label` updated every frame. It crashed in 2 of 15 runs with the same backtrace; boxes instead of characters crashed 0 of 9, and 0 of 3 with the Label hidden. The project and a draft upstream issue are in the session notes (`canvas_crash_repro/`, `godot-canvas-crash-issue-draft.md`); the issue isn't filed yet.
-  * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was linked last (see above). The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at 7.6 fps, sim step 3.9 ms. Godot itself loads it only in exported release builds.
+  * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was linked last (see above). The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at a reported 7.6 fps (the old `delta`-based `--measure`, which can't go below ~7.5; not re-measured), sim step 3.9 ms. Godot itself loads it only in exported release builds.
   * **TGI load time (Release):** mounting the archives, loading and resolving the TGI and compiling the Defs takes 0.7 s from a cold process (`simcli show-def`; load and resolve alone, 0.46–0.54 s). That's under the 5 s threshold, so there is no binary DefSet cache.
-  * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024):
-    * 160 regiments (1,060 units): 9.3 fps with the sim paused (frame 108 ms; M4 close-out).
-    * 6 regiments (40 units): 13.1 fps (frame 76 ms; M4 close-out).
-    * Rendering the scene, not the units, dominates on this GPU; each unit adds about 0.03 ms.
-    * 160 regiments with the sim running, optimized (RelWithDebInfo) DLL: 7.5 fps (frame 133 ms, p95 144–147 ms). The sim takes 3.5–4.4 ms per tick (max 6–11 ms), so rendering bounds the frame.
-    * Caution: `--measure` times frames with `_process` `delta`, which Godot clamps to about 8 physics ticks (133 ms), so it can't report less than ~7.5 fps. The real rate is lower: 360 frames took 58–60 s (about 6 fps) in the Label3D runs. In a GDScript-only test scene, `delta` said 130 ms while frames took 1.1 s.
-    * The Debug DLL also gives 7.5 fps, but its sim takes about 146 ms per tick, so the sim falls behind real time.
+  * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024, optimized (RelWithDebInfo) DLL, V-Sync on, `--measure=300`):
+    * 160 regiments (1,060 units), Low: 23.4–23.6 fps (frame 42.4–42.7 ms, p95 43.4–44.5 ms). The sim takes 3.9–4.5 ms per tick (max 8.6–9.9 ms), so rendering bounds the frame.
+    * The same with the sim paused: 22.5–23.2 fps (frame 43.1–44.4 ms), so the sim costs no visible frame time.
+    * 160 regiments on Medium: 13.8 fps (frame 72.5 ms); on High: 6.7 fps (frame 150 ms, p95 169 ms).
+    * 6 regiments (40 units), Low: 48.1–49.9 fps (frame 20.0–20.8 ms). Each extra unit adds about 0.02 ms on Low.
+    * `--measure` times frames by wall clock. Godot clamps `_process` `delta` to about 8 physics ticks (133 ms), so the earlier `delta`-based figures (7.5 fps for 160 regiments, M4 close-out) couldn't go below ~7.5 fps. They match High (or the per-unit nodes from before the presets): on High, `delta` averages 127.7 ms while frames take 150 ms. The MEASURE line still prints the clamped `delta` average for comparison.
+    * The Debug DLL's sim takes about 146 ms per tick, so the sim falls behind real time.
     * This laptop is far below the §7 target PC.
   * Loading the TGI data and the gen:7:1024 map (`SimBridge.start`) takes 3.0 s on the dev laptop with the optimized GDExtension, 29 s with the Debug one.
   * The dev laptop's GPU (HD 3000) has no Vulkan or D3D12, so Godot runs the GL Compatibility renderer through ANGLE. It ran the battle view at about 8 fps with 70 units before the graphics presets; see **Rendering performance** below.
@@ -300,6 +306,31 @@ Where the time went: sim + GDScript about 2 ms (sim step 0.16, snapshot 0.12, vi
 | 1,060 units (`--regiments=160`), gen:7:1024 | 46.3 ms, 21.6 fps (p95 47.9 ms, 974k primitives; sim 1.5 ms a frame) | 87.7 ms, 11.4 fps | not measured |
 
 500 units on Low, step by step: MultiMesh + VAT with two RGBA32F texels per vertex 43.7 ms → position and normal in one texel, animation LOD and vertex lighting 34.3 ms → rotating the instance buffers 24.3 ms. With the units hidden the frame is 11.7 ms (terrain, HUD, sim), so the 500 units cost about 12 ms. The sim takes 0.4–0.7 ms per frame (about 4 ms per tick).
+
+**Combat in the view (M5 part 3).** The sim emits events; the view only reads them.
+
+* **Events.** `Fired` (shooter, target, DefSet ability, the shooter's position and facing), `Hit` (a shot of an ability landed at a point, on its primary target or on nothing; emitted when an instant shot or a projectile hits, before the damage) and `Died` (unit, killer, position, facing). They aren't state: the hashes and fixtures are unchanged.
+* **FXC runner** (`fx_runner.gd`), from `battle.gd` after each frame's ticks:
+  * `Fired`: the ability's WhenStart / WhenDo FXCs aimed at SELF. CREATE_VFX at the FXC's `location` bone (its rest position in the model, turned toward the target), PLAY_SFX, PLAY_OBJECT_ANIMATION (Recoil1, on High).
+  * `Hit`: the FXCs aimed at TARGET_THING / TARGET_HIT_POSITION / TARGET_GROUND, filtered by `target_flags` (+/-infantry, +/-building) against what was hit, plus the projectile Thing's View WhenDestroyed FXCs.
+  * `Died`: the unit's View WhenDestroyed PLAY_SFX and BodyComponent WhenHealth(0) CREATE_VFX, then its body. Vehicles get their `aspect_death` model (`%sDeath.nif` → `…Death.glb`), merged into one mesh per material. Infantry play a Die clip: on High a node with an AnimationPlayer, on Low and Medium a corpse in `UnitBatches` (a second MultiMesh per type with the same mesh and VAT, custom.x = 2: the shader plays the die clip from the death time, holds the last frame and sinks). Bodies stay BodyComponent `rot_time` s, then sink over `sink_time`.
+  * **Sounds:** the original WAVs. Audio records give `files` (under `Audio/`, one picked at random), `volume`, `pitch_adjust`, `range` and `simultaneous_limit`. `read_file` fetches them from the VFS and the runner decodes RIFF PCM (8 or 16 bit) into `AudioStreamWAV` once. A pool of `AudioStreamPlayer3D` voices (8 Low, 16 Medium, 24 High) plays them; the listener sits 12 m above the camera's focus point, and sounds beyond 1.2 × their range from it are skipped.
+  * **VFX:** not the original NIF particle systems. Each VFX record maps, by its model's name, to procedural sprites (`fx_sprite.gdshader`: muzzle flash, fireball, spark, smoke, dust). For example `Gunshot/RifleShot` → a small flash and puff, `TankShot/TankShotExplosion` → fireball, smoke and dust, `DeathDebris/*` → a large fireball, smoke and sparks. They are two MultiMeshes (additive, and alpha for smoke and dust), rings of 128 + 64 sprites on Low (256 + 128 Medium, 384 + 192 High), rewritten only on ticks that spawn something; the shader ages them from the `fx_time` global. Low skips the trailing smoke and dust.
+  * `fx_time` is a global shader uniform that advances with the sim speed and stops when paused (`FxRunner.ensure_globals()` registers it before the shaders compile).
+  * `prewarm(def)` loads a unit type's records, decoded sounds and death model when its first regiment appears, so a fight doesn't stall on the first shots and deaths. The sprite shaders are compiled at start by an expired sprite.
+  * Budgets: bodies (wrecks and corpse nodes) 16 Low, 48 Medium, 96 High; baked corpses 60 per type on Low, 200 otherwise. The oldest go first.
+* **Banners** (`banners.gd`, `banner.gdshader`): over each regiment, its player's flag and bars for health (of the most it had), morale (of its maximum; orange while routing) and attack efficiency. Routing flags blink, entrenched ones show sandbags, selected ones get a light border. `SimBridge.banner_instances(alpha, lift, selected)` builds them in C++: 4 instances per regiment with living units, at the interpolated centroid of those units, 3.2 m above the terrain. They are one MultiMesh of constant-pixel-size quads (clip-space offsets; the Compatibility renderer's flipped projection is accounted for), drawn over everything.
+* **Info panel:** a second `Label3D` on the camera (bottom left, like the HUD, no CanvasItem), refreshed with the HUD at most 4 times a second. It shows the first selected regiment: type, units alive of the most it had, health, morale with its maximum and breaking point, efficiency, level and XP with the next threshold, formation, engagement state and order mode, entrenchment.
+* `godot --headless --path godot --script res://scripts/tools/dump_record.gd -- TYPE IDS` prints a record as the view sees it.
+* **Cost on Low** (dev laptop, as above; `--profile` after a warm-up long enough for the fight, `--no-fx` turns effects and banners off, `--warmup=FRAMES`):
+
+  | Scene | Effects and banners on | Off |
+  |---|---|---|
+  | demo, both sides fighting (`--fight --speed=4`, ~66 units) | 10.2 ms (p50 10.0, p95 12.5, max 14.8; 42 draws) | 9.7 ms (p50 9.5, p95 11.5; 37 draws) |
+  | 160 regiments fighting (`--gen=7:1024 --regiments=160 --fight --speed=8`, ~655 units left) | 34.8 ms, 28.8 fps (p95 36.5) | 34.3 ms, 29.1 fps (p95 35.9) |
+
+  Effects and banners cost about 0.5 ms a frame (events 0.1–0.5 ms, sprites and banners 0.15–0.7 ms). Before prewarming and merged wrecks, the demo fight averaged 16.9 ms with stalls on first use.
+* Not yet: the original particle systems and their textures, projectiles in flight, tracks, scorch marks and other projected textures, smoke while damaged (WhenHealth above 0), ambient and movement sounds, the original banner and bar art.
 
 
 ### 4.5 Controllers

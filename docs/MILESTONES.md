@@ -29,7 +29,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M2** | Done | v0.2 | `import_game.py` (static and skinned NIF → glb, KF → clips, textures) and the Godot Model Browser. |
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
-| **M5** | Parts 1–2 done (sim) | — | See below. Left: FXC events, combat in the view, and the first calibration pass against the original (CALIBRATION.md). |
+| **M5** | Parts 1–3 done | — | See below. Left: the first calibration pass against the original (CALIBRATION.md). |
 
 **M4 details:**
 * **Nav:**
@@ -95,6 +95,15 @@ Carried over from M4:
 * **Duel:** ends at a rout (or `--until-wiped`); `--xp-a/-b`, `--retreat-a/-b`; prints morale, XP, levels and army XP. CTest `simcli_duel_morale` + determinism-check.
 * **Numbers:** the 160-regiment perf run with morale at 7.0 ms p99 per tick; the Morale stage 0.30 ms on average.
 * **Fixtures:** `sim/tests/fixtures/combat_m5.rpl`, a data-free combat film (3 routs, a level-up, 7 deaths) replayed by every CI job; the synthetic fixtures and the movement golden hash re-recorded.
+
+**M5 part 3 details (view; ARCHITECTURE §4.4 "Combat in the view"):**
+* **Events:** `Fired` and `Died` carry the ability, position and facing; new `Hit` (impact point, primary target, ability). Outputs only: hashes and fixtures unchanged.
+* **SimBridge:** event details; `record`, `ability_record`, `unit_record`, `read_file`; `regiment_info` with health, morale, efficiency, XP, level and engagement; `banner_instances`; `queue_attack`, `queue_attack_move`, `queue_retreat`.
+* **FXC runner** (`fx_runner.gd`): the abilities' and projectiles' CREATE_VFX / PLAY_SFX / PLAY_OBJECT_ANIMATION FXCs on Fired and Hit, with `target_flags`; death sounds and debris; the original WAVs (decoded from the VFS, per-record volume, range, pitch spread, simultaneous limit, pooled 3D voices); procedural sprites per VFX model; Recoil1 on High; vehicle death models and infantry Die clips (baked into the VAT on Low and Medium), rotting and sinking per BodyComponent.
+* **Banners:** flag plus health, morale and efficiency bars per regiment, one MultiMesh built in C++.
+* **Input:** right click on an enemy attacks; A + click attack-moves or attacks; the original attack cursor; the selected regiment's info panel.
+* **Checks:** 9 new self-test checks (23 in all); `--fight`, `--speed`, `--warmup`, `--no-fx` for screenshots and profiling.
+* **Numbers:** on Low, effects and banners cost about 0.5 ms a frame, in the 71-unit demo fight and with 160 regiments fighting (28.8 fps vs 29.1 off).
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

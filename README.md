@@ -84,6 +84,10 @@ test map), spawns six of your regiments and three enemy ones, and runs the sim a
 * Select with a click, a box or a double-click (same type). Ctrl+1..9 stores a selection and 1..9 recalls it.
 * Right click moves, right drag also sets the facing, Alt+right click runs. Q/W/E set the formation, V toggles a
   division, S stops.
+* Right click on an enemy attacks it. A, then a left click: attack-move to that point, or attack the enemy clicked
+  (Shift keeps the mode, Esc cancels). Banners show each regiment's health, morale and efficiency; the bottom-left
+  panel shows the selected regiment. Shots, hits and deaths play the original sounds with simple effects.
+* `--fight` makes both sides attack-move into each other at start, with the camera on the fight.
 * The camera pans with the arrows or the screen edges, zooms with the wheel and rotates with the middle button.
 * F1/F2/F3 toggle the cost-grid, path and slot overlays. F6 cycles the graphics quality (Low/Medium/High).
 
