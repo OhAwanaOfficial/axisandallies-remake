@@ -43,6 +43,15 @@ void putIndexes(ByteWriter& w, const std::vector<std::uint32_t>& v) {
     for (const std::uint32_t i : v) w.u32(i);
 }
 
+void putModifiers(ByteWriter& w, const std::vector<ModifierDef>& mods) {
+    w.u32(static_cast<std::uint32_t>(mods.size()));
+    for (const ModifierDef& m : mods) {
+        w.str(m.attribute);
+        w.u8(static_cast<std::uint8_t>(m.op));
+        w.fixed(m.amount);
+    }
+}
+
 void putCombat(ByteWriter& w, const std::vector<WeaponDef>& weapons, const std::vector<TurretDef>& turrets, bool checkResist) {
     w.u32(static_cast<std::uint32_t>(weapons.size()));
     for (const WeaponDef& x : weapons) {
@@ -126,7 +135,7 @@ bool SVarsDef::getBool(std::string_view name, bool fallback) const {
 std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     ByteWriter w;
     w.tag("DEFS");
-    w.u32(3);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat)
+    w.u32(4);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat; 4: morale, XP)
     w.u32(static_cast<std::uint32_t>(d.abilities.size()));
     for (const AbilityDef& a : d.abilities) {
         w.str(a.ids);
@@ -170,6 +179,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(u.blockingRadius);
         putIndexes(w, u.abilities);
         putCombat(w, u.weapons, u.turrets, u.checkDamageResistance);
+        w.fixed(u.moraleValue);
         putStrings(w, u.properties);
         w.str(u.requiredStructures);
         put(w, u.cost);
@@ -202,6 +212,16 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         putStrings(w, g.properties);
         put(w, g.cost);
         put(w, g.upkeep);
+        w.u32(static_cast<std::uint32_t>(g.experienceLevels.size()));
+        for (const ExperienceLevelDef& l : g.experienceLevels) {
+            w.fixed(l.required);
+            w.fixed(l.attack);
+            w.fixed(l.defense);
+            w.fixed(l.healthMultiplier);
+            w.fixed(l.morale);
+            w.fixed(l.moraleRecovery);
+        }
+        w.fixed(g.fakeCombatValue);
     }
     w.u32(static_cast<std::uint32_t>(d.buildings.size()));
     for (const BuildingDef& b : d.buildings) {
@@ -214,6 +234,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         putIndexes(w, b.abilities);
         putCombat(w, b.weapons, b.turrets, b.checkDamageResistance);
         w.fixed(b.controlRange);
+        w.fixed(b.moraleValue);
         putStrings(w, b.recruits);
         putStrings(w, b.properties);
         put(w, b.cost);
@@ -255,6 +276,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
             for (const FVec2 o : f.offsets) w.vec2(o);
             w.fixed(f.halfWidth);
         }
+        w.u32(l.retreatFormation);
     }
     w.u32(static_cast<std::uint32_t>(d.formations.size()));
     for (const FormationDef& f : d.formations) {
@@ -292,6 +314,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
             w.str(type);
             w.fixed(amount);
         }
+        putModifiers(w, p.modifiers);
     }
     w.u32(static_cast<std::uint32_t>(d.terrains.size()));
     for (const TerrainDef& t : d.terrains) {

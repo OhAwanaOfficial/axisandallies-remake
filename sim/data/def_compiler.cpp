@@ -200,6 +200,7 @@ private:
         std::size_t next = 0;
         weaponsOf(perf, ids, next, u.abilities, u.weapons, u.turrets);
         u.checkDamageResistance = flag(perf, "check_damage_resistance", false);
+        u.moraleValue = fx(childOf(t, "ElementComponent"), "morale_value");
         u.properties = properties(t);
         const auto has = [&](std::string_view p) { return std::find(u.properties.begin(), u.properties.end(), p) != u.properties.end(); };
         u.moveClass = has("aircraft") ? UnitMoveClass::Air
@@ -240,6 +241,26 @@ private:
         const ResolvedNode* econ = childOf(t, "EconomyComponent");
         g.cost = resources(childOf(econ, "Cost"));
         g.upkeep = resources(childOf(econ, "Upkeep"));
+        const ResolvedNode* xp = childOf(t, "ExperienceComponent");
+        g.fakeCombatValue = fx(xp, "fake_cv_value", Fixed::fromInt(-1));
+        for (std::size_t i = 0; i < countOf(xp, "ExperienceLevel"); ++i) {
+            const ResolvedNode* lv = childOf(xp, "ExperienceLevel", i);
+            ExperienceLevelDef l;
+            l.required = fx(lv, "experience_required");
+            const Fixed one = Fixed::fromInt(1);
+            for (const ModifierDef& m : modifiers(childOf(lv, "Property"))) {
+                if (m.attribute == "AV" && m.op == ModifierDef::Op::Add) l.attack = l.attack + m.amount;
+                if (m.attribute == "DV" && m.op == ModifierDef::Op::Add) l.defense = l.defense + m.amount;
+                if (m.attribute == "MORALE" && m.op == ModifierDef::Op::Add) l.morale = l.morale + m.amount;
+                if (m.attribute == "HEALTH" && m.op == ModifierDef::Op::Multiply) l.healthMultiplier = l.healthMultiplier * (one + m.amount);
+                if (m.attribute == "MORALE_RECOVERY_RATE" && m.op == ModifierDef::Op::Multiply) {
+                    l.moraleRecovery = l.moraleRecovery * (one + m.amount);
+                }
+            }
+            g.experienceLevels.push_back(l);
+        }
+        std::stable_sort(g.experienceLevels.begin(), g.experienceLevels.end(),
+                         [](const ExperienceLevelDef& a, const ExperienceLevelDef& b) { return a.required < b.required; });
         defs.regiments.push_back(std::move(g));
     }
 
@@ -261,6 +282,7 @@ private:
         weaponsOf(perf, ids, next, b.abilities, b.weapons, b.turrets);
         weaponsOf(defender, ids, next, b.abilities, b.weapons, b.turrets);
         b.controlRange = fx(defender, "control_range");
+        b.moraleValue = fx(childOf(t, "ElementComponent"), "morale_value");
         b.checkDamageResistance = flag(perf, "check_damage_resistance", false) || flag(defender, "check_damage_resistance", false);
         const ResolvedNode* rc = childOf(t, "RecruitComponent");
         for (std::size_t i = 0; i < countOf(rc, "RecruitActor"); ++i) {
@@ -386,6 +408,22 @@ private:
         defs.damageTypes.push_back(std::move(d));
     }
 
+    // AddModifier / MultiplyModifier children of a property node (ResistDamageModifier excluded).
+    std::vector<ModifierDef> modifiers(const ResolvedNode* prop) {
+        std::vector<ModifierDef> out;
+        for (std::size_t i = 0; i < countOf(prop, "Modifier"); ++i) {
+            const ResolvedNode* m = childOf(prop, "Modifier", i);
+            const std::string type = asciiUpperCopy(text(m, "type"));
+            if (type != "ADD" && type != "MULTIPLY") continue;
+            ModifierDef md;
+            md.attribute = asciiUpperCopy(text(m, "attribute"));
+            md.op = type == "ADD" ? ModifierDef::Op::Add : ModifierDef::Op::Multiply;
+            md.amount = fx(m, "amount");
+            if (!md.attribute.empty()) out.push_back(std::move(md));
+        }
+        return out;
+    }
+
     void property(const Record& r, const std::string& ids) {
         const ResolvedNode* t = &r.tree;
         PropertyDef p;
@@ -394,13 +432,13 @@ private:
         p.requiredProperties = words(t, "required_properties");
         for (std::size_t i = 0; i < countOf(t, "Modifier"); ++i) {
             const ResolvedNode* m = childOf(t, "Modifier", i);
-            const std::string type = asciiUpperCopy(text(m, "type"));
-            if (type == "RESIST_DAMAGE") {
-                const std::string dt = asciiLowerCopy(text(m, "damage_type"));
-                if (!dt.empty()) p.resist.emplace_back(dt, fx(m, "amount"));
-            } else if (type == "ADD" && asciiUpperCopy(text(m, "attribute")) == "DV") {
-                p.defenseAdd = p.defenseAdd + fx(m, "amount");
-            }
+            if (asciiUpperCopy(text(m, "type")) != "RESIST_DAMAGE") continue;
+            const std::string dt = asciiLowerCopy(text(m, "damage_type"));
+            if (!dt.empty()) p.resist.emplace_back(dt, fx(m, "amount"));
+        }
+        p.modifiers = modifiers(t);
+        for (const ModifierDef& m : p.modifiers) {
+            if (m.attribute == "DV" && m.op == ModifierDef::Op::Add) p.defenseAdd = p.defenseAdd + m.amount;
         }
         defs.properties.push_back(std::move(p));
     }
@@ -549,6 +587,12 @@ DefSet Compiler::run() {
     for (FormationDef& f : defs.formations) f.groupFormationIndex = defs.groupFormationIndex(f.groupFormationIds);
     for (LayoutDef& l : defs.layouts) {
         for (LayoutFormationDef& f : l.formations) f.formationIndex = defs.formationIndex(f.formationIds);
+        // retreat_formation_IDS, else "last organized formation if not specified" (the data's own rule).
+        l.retreatFormation = l.retreatFormationIds.empty() ? kNoDef : l.formation(l.retreatFormationIds);
+        for (std::uint32_t k = static_cast<std::uint32_t>(l.formations.size()); l.retreatFormation == kNoDef && k-- > 0;) {
+            const std::uint32_t fi = l.formations[k].formationIndex;
+            if (fi != kNoDef && defs.formations[fi].organized) l.retreatFormation = k;
+        }
     }
     for (RegimentDef& g : defs.regiments) g.layoutIndex = defs.layoutIndex(g.layoutIds);
     std::vector<std::pair<std::string, std::uint32_t>> abilityIndex;  // (lower IDS, new index), sorted

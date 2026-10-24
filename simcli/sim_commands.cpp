@@ -387,6 +387,7 @@ int cmdShowDef(const SimArgs& a) {
                     formatFixed(u->detectionRange).c_str());
         for (const std::uint32_t i : u->abilities) ability(i);
         combat(u->weapons, u->turrets, u->checkDamageResistance);
+        std::printf("  morale value %s\n", formatFixed(u->moraleValue).c_str());
         std::printf("  properties:");
         for (const auto& p : u->properties) std::printf(" %s", p.c_str());
         std::printf("\n");
@@ -404,6 +405,12 @@ int cmdShowDef(const SimArgs& a) {
         }
         res("cost", g->cost);
         res("upkeep", g->upkeep);
+        for (std::size_t k = 0; k < g->experienceLevels.size(); ++k) {
+            const ExperienceLevelDef& l = g->experienceLevels[k];
+            std::printf("  level %zu at %s XP: AV +%s DV +%s health x%s morale +%s recovery x%s\n", k, formatFixed(l.required).c_str(),
+                        formatFixed(l.attack).c_str(), formatFixed(l.defense).c_str(), formatFixed(l.healthMultiplier).c_str(),
+                        formatFixed(l.morale).c_str(), formatFixed(l.moraleRecovery).c_str());
+        }
     }
     if (const BuildingDef* b = d.building(ids)) {
         found = true;
@@ -424,8 +431,9 @@ int cmdShowDef(const SimArgs& a) {
     if (const std::uint32_t li = d.layoutIndex(ids); li != kNoDef) {
         found = true;
         const LayoutDef& l = d.layouts[li];
-        std::printf("LayoutDef %s default %s combat %s retreat %s, %zu elements\n", l.ids.c_str(), l.defaultFormationIds.c_str(),
-                    l.combatFormationIds.c_str(), l.retreatFormationIds.c_str(), l.elementSlot.size());
+        std::printf("LayoutDef %s default %s combat %s retreat %s (uses %s), %zu elements\n", l.ids.c_str(), l.defaultFormationIds.c_str(),
+                    l.combatFormationIds.c_str(), l.retreatFormationIds.c_str(),
+                    l.retreatFormation != kNoDef ? l.formations[l.retreatFormation].formationIds.c_str() : "-", l.elementSlot.size());
         for (std::size_t s = 0; s < l.slots.size(); ++s) {
             const LayoutSlotDef& sd = l.slots[s];
             std::printf("  slot %zu: %s x%u%s%s%s\n", s, sd.property.c_str(), sd.number, sd.primary ? " primary" : "",
@@ -465,6 +473,9 @@ int cmdShowDef(const SimArgs& a) {
         for (const auto& [t, amount] : p.resist) std::printf(" resist %s %s", t.c_str(), formatFixed(amount).c_str());
         for (const auto& t : p.targetFlags) std::printf(" target-type %s", t.c_str());
         for (const auto& r : p.requiredProperties) std::printf(" requires %s", r.c_str());
+        for (const ModifierDef& m : p.modifiers) {
+            std::printf(" %s %s %s", m.attribute.c_str(), m.op == ModifierDef::Op::Add ? "+" : "x(1+)", formatFixed(m.amount).c_str());
+        }
         std::printf("\n");
     }
     if (const std::uint32_t ti = d.terrainOfName(ids); ti != kNoDef) {

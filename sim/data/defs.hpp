@@ -73,12 +73,35 @@ struct TargetTypeDef {
 // [Property] records, with the modifiers combat reads: ResistDamageModifier (the fraction of one
 // damage type's damage ignored; fractions from all of a unit's properties add up) and AddModifier
 // DV (defense).
+// A Modifier of a property or experience level: AddModifier (ADD) or MultiplyModifier
+// (MULTIPLY: the value is multiplied by 1 + amount) on an attribute (DV, AV, HEALTH, MORALE,
+// MORALE_LOSS_RATE, MORALE_RECOVERY_RATE, SPEED_MAX, ...).
+struct ModifierDef {
+    enum class Op : std::uint8_t { Add = 0, Multiply = 1 };
+    std::string attribute;  // upper case
+    Op op = Op::Add;
+    Fixed amount;
+};
+
 struct PropertyDef {
     std::string ids;
     std::vector<std::string> targetFlags;         // enabled_target_flags: target types it grants
     std::vector<std::string> requiredProperties;  // required_properties (terrain ones: infantry / vehicle)
     Fixed defenseAdd;                             // AddModifier DV
     std::vector<std::pair<std::string, Fixed>> resist;  // (damage type IDS, amount), data order
+    std::vector<ModifierDef> modifiers;           // the attribute modifiers (ResistDamageModifier not included)
+};
+
+// ExperienceComponent/ExperienceLevel of an organization (Templates/template_component_aa.tgi):
+// Recruit, Regular, Veteran, Elite. Infantry needs 150 / 350 / 600 XP, paratroopers 100 / 250 /
+// 500. The level's property modifiers, summed / multiplied:
+struct ExperienceLevelDef {
+    Fixed required;
+    Fixed attack;                              // AV added
+    Fixed defense;                             // DV added
+    Fixed healthMultiplier = Fixed::fromInt(1);   // HEALTH: × (1 + amount)
+    Fixed morale;                              // MORALE added per unit
+    Fixed moraleRecovery = Fixed::fromInt(1);  // MORALE_RECOVERY_RATE: × (1 + amount)
 };
 
 // [Terrain] (Terrain/<biome>/*.tgi): its group and the properties standing on it gives
@@ -156,6 +179,7 @@ struct UnitDef {
     std::vector<WeaponDef> weapons;        // PerformerComponent Ability slots
     std::vector<TurretDef> turrets;
     bool checkDamageResistance = false;    // weigh targets' resistances when choosing
+    Fixed moraleValue;                     // ElementComponent morale_value: its share of the regiment's morale
     std::vector<std::string> properties;   // property_IDS, in resolved order
     std::string requiredStructures;
     ResourceAmounts cost;
@@ -184,6 +208,8 @@ struct RegimentDef {
     std::vector<std::string> properties;
     ResourceAmounts cost;
     ResourceAmounts upkeep;
+    std::vector<ExperienceLevelDef> experienceLevels;  // ascending; empty: no ExperienceComponent
+    Fixed fakeCombatValue = Fixed::fromInt(-1);        // ExperienceComponent fake_cv_value (-1: none)
 };
 
 struct BuildingDef {
@@ -198,6 +224,7 @@ struct BuildingDef {
     std::vector<TurretDef> turrets;
     Fixed controlRange;                 // DefenderComponent control_range (its ZOC; 0: none)
     bool checkDamageResistance = false;
+    Fixed moraleValue;                  // ElementComponent morale_value (HQ buildings in a regiment)
     std::vector<std::string> recruits;  // RecruitComponent actor_ids (regiments it can recruit)
     std::vector<std::string> properties;
     ResourceAmounts cost;
@@ -253,6 +280,7 @@ struct LayoutDef {
     std::vector<LayoutSlotDef> slots;
     std::vector<std::uint32_t> elementSlot;  // element -> layout slot
     std::vector<LayoutFormationDef> formations;
+    std::uint32_t retreatFormation = kNoDef;  // into `formations`: retreat_formation_IDS, else the last organized one
 
     // Index into `formations` of the formation with this IDS, or kNoDef.
     std::uint32_t formation(std::string_view formationIds) const;
