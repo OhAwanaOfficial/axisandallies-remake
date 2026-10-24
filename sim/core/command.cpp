@@ -189,6 +189,18 @@ Command makeDebugSetEntrenched(std::uint32_t tick, std::uint8_t player, std::uin
     return c;
 }
 
+Command makeRetreat(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal) {
+    Command c = base(tick, player, seq, CommandType::Retreat);
+    c.payload = MoveGroupPayload{std::move(regiments), goal, false, Angle{}};
+    return c;
+}
+
+Command makeDebugSetExperience(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, Fixed xp) {
+    Command c = base(tick, player, seq, CommandType::DebugSetExperience);
+    c.payload = DebugSetExperiencePayload{std::move(regiments), xp};
+    return c;
+}
+
 void putVarint(std::vector<std::uint8_t>& out, std::uint64_t v) {
     while (v >= 0x80) {
         out.push_back(static_cast<std::uint8_t>(v | 0x80));
@@ -256,7 +268,8 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
     }
     case CommandType::MoveGroup:
     case CommandType::Run:
-    case CommandType::AttackMove: {
+    case CommandType::AttackMove:
+    case CommandType::Retreat: {
         const auto& p = std::get<MoveGroupPayload>(c.payload);
         putIds(out, p.regiments);
         putVec(out, p.goal);
@@ -296,6 +309,12 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
         const auto& p = std::get<DebugSetEntrenchedPayload>(c.payload);
         putIds(out, p.regiments);
         putVarint(out, p.entrenched ? 1 : 0);
+        break;
+    }
+    case CommandType::DebugSetExperience: {
+        const auto& p = std::get<DebugSetExperiencePayload>(c.payload);
+        putIds(out, p.regiments);
+        putFixed(out, p.xp);
         break;
     }
     }
@@ -361,7 +380,8 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
     }
     case CommandType::MoveGroup:
     case CommandType::Run:
-    case CommandType::AttackMove: {
+    case CommandType::AttackMove:
+    case CommandType::Retreat: {
         MoveGroupPayload p;
         if (!getIds(in, pos, p.regiments) || !getVec(in, pos, p.goal) || !getU(in, pos, 1, v)) return false;
         p.hasFacing = v != 0;
@@ -409,6 +429,12 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
         DebugSetEntrenchedPayload p;
         if (!getIds(in, pos, p.regiments) || !getU(in, pos, 1, v)) return false;
         p.entrenched = v != 0;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::DebugSetExperience: {
+        DebugSetExperiencePayload p;
+        if (!getIds(in, pos, p.regiments) || !getFixed(in, pos, p.xp)) return false;
         out.payload = std::move(p);
         return true;
     }

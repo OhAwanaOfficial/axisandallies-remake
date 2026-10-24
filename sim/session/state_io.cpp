@@ -189,6 +189,12 @@ void put(ByteWriter& w, const Engagement& e) {
     w.vec2(e.resumeGoal);
     w.boolean(e.resumeHasFacing);
     w.angle(e.resumeFacing);
+    w.fixed(e.morale);
+    w.fixed(e.efficiency);
+    w.fixed(e.xp);
+    w.u8(e.level);
+    w.u32(e.stillTicks);
+    w.entity(e.lastAttacker);
 }
 void get(ByteReader& r, Engagement& e) {
     e.state = static_cast<Engagement::State>(r.u8());
@@ -206,6 +212,12 @@ void get(ByteReader& r, Engagement& e) {
     e.resumeGoal = r.vec2();
     e.resumeHasFacing = r.boolean();
     e.resumeFacing = r.angle();
+    e.morale = r.fixed();
+    e.efficiency = r.fixed();
+    e.xp = r.fixed();
+    e.level = r.u8();
+    e.stillTicks = r.u32();
+    e.lastAttacker = r.entity();
 }
 void put(ByteWriter& w, const Projectile& p) {
     w.entity(p.shooter);
@@ -300,6 +312,12 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
         putPool(w, pool);
     });
 
+    w.tag("KING");
+    for (const Kingdom& k : sim.world().kingdoms) {
+        w.boolean(k.active);
+        w.fixed(k.armyXp);
+    }
+
     w.tag("NAVS");
     w.boolean(sim.nav() != nullptr);
     if (sim.nav() != nullptr) putNav(w, *sim.nav());
@@ -349,6 +367,11 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
         if (!r.expectTag(kPoolTags[poolNo++]) || !getPool(r, pool, world.registry)) poolsOk = false;
     });
     if (!poolsOk) return fail("bad component pool");
+    if (!r.expectTag("KING")) return fail("missing KING");
+    for (Kingdom& k : world.kingdoms) {
+        k.active = r.boolean();
+        k.armyXp = r.fixed();
+    }
 
     if (!r.expectTag("NAVS")) return fail("missing NAVS");
     const bool hasNav = r.boolean();

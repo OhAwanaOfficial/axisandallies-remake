@@ -19,6 +19,11 @@ const std::vector<CombatTuningField>& combatTuningFields() {
         {"chaseRepathDistance", &CombatTuning::chaseRepathDistance, "Attack: re-path when the target moved this far"},
         {"moveGraceSeconds", &CombatTuning::moveGraceSeconds, "no auto-engage this long after a Move or Run"},
         {"closeInSeconds", &CombatTuning::closeInSeconds, "engaged with nothing in range this long: close in"},
+        {"attackValueScale", &CombatTuning::attackValueScale, "damage x (1 + AV x this) for experience AV"},
+        {"xpPerHealth", &CombatTuning::xpPerHealth, "a unit's combat value for XP: health_max x this"},
+        {"fleeDistance", &CombatTuning::fleeDistance, "how far a routing regiment runs"},
+        {"fleeSpread", &CombatTuning::fleeSpread, "degrees of random spread in a rout's direction"},
+        {"rallyFraction", &CombatTuning::rallyFraction, "exhausted until morale is this far from breaking point to full"},
     };
     return fields;
 }

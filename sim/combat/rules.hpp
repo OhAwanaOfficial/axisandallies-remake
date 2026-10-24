@@ -37,6 +37,7 @@ struct TargetFilter {
 struct AbilityRules {
     TargetFilter filter;
     std::vector<DamageHit> damage;  // MAIN_DAMAGE and ADD_DAMAGE effects
+    Fixed moraleLoss;               // MORALE_LOSS effect amounts: a morale "breaker" (mortars, artillery)
     bool attack = false;            // has damage and can hit enemies
 };
 

@@ -6,6 +6,7 @@
 #include "combat/rules.hpp"
 #include "nav/map_def.hpp"
 #include "nav/nav_world.hpp"
+#include "systems/morale.hpp"
 #include "systems/orders.hpp"
 #include "systems/stages.hpp"
 
@@ -76,6 +77,7 @@ struct Fighter {
     const std::vector<TurretDef>* turrets = nullptr;
     bool checkResist = false;
     Fixed radius;
+    std::uint64_t types = 0;  // target types: its profile's, plus routing while its regiment routs
 };
 
 class Field {
@@ -84,6 +86,8 @@ public:
         const World& w = sim.world();
         const DefSet& defs = *sim.config().defs;
         const CombatRules& rules = sim.combatRules();
+        const std::uint32_t rt = defs.targetTypeIndex("routing");
+        const std::uint64_t routingType = rt != kNoDef && rt < 64 ? std::uint64_t{1} << rt : 0;
         for (std::size_t i = 0; i < w.combats.size(); ++i) {
             const EntityId id = w.combats.ids()[i];
             const Transform* t = w.transforms.get(id);
@@ -114,6 +118,10 @@ public:
                 continue;
             }
             if (f.profile == nullptr) continue;
+            f.types = f.profile->targetTypes;
+            if (const Engagement* e = f.org.isNull() ? nullptr : w.engagements.get(f.org); e != nullptr && e->state == Engagement::State::Routing) {
+                f.types |= routingType;  // actor_state_routing: enabled_target_flags routing
+            }
             fs.push_back(f);
         }
         if (const nav::NavWorld* nav = sim.nav()) {
@@ -200,17 +208,19 @@ bool entrenchedOf(const World& w, EntityId org) {
 }
 
 TargetStats statsOf(const Ctx& c, const Fighter& t) {
-    return c.rules.statsOf(*t.profile, terrainAt(c.sim, t.pos), entrenchedOf(c.w, t.org));
+    TargetStats s = c.rules.statsOf(*t.profile, terrainAt(c.sim, t.pos), entrenchedOf(c.w, t.org));
+    s.defense = s.defense + levelDefenseOf(c.sim, t.org);  // experience level DV
+    return s;
 }
 
-// The attacker's formation attack multiplier (ATTACK_EFFICIENCY_DESIRED; blending is part 2).
-Fixed attackMultiplierOf(const Ctx& c, const Fighter& f) {
-    const Regiment* r = f.org.isNull() ? nullptr : c.w.regiments.get(f.org);
-    if (r == nullptr || r->layout == kNoDef) return Fixed::fromInt(1);
-    const LayoutDef& l = c.defs.layouts[r->layout];
-    if (r->formation >= l.formations.size()) return Fixed::fromInt(1);
-    const std::uint32_t fi = l.formations[r->formation].formationIndex;
-    return fi != kNoDef ? c.defs.formations[fi].attackMultiplier : Fixed::fromInt(1);
+// The shooter's damage multiplier: its regiment's blended attack efficiency and level AV.
+Fixed shooterMultiplier(const Ctx& c, const Fighter& f) {
+    return attackMultiplierOf(c.sim, f.org);
+}
+
+// Routing, retreating and exhausted regiments are passive: no auto-engage, no fire.
+bool passive(Engagement::State s) {
+    return s == Engagement::State::Routing || s == Engagement::State::Retreating || s == Engagement::State::Exhausted;
 }
 
 bool formationAggressive(const DefSet& defs, const Regiment& r) {
@@ -273,6 +283,7 @@ void engage(Ctx& c, Engagement& e, EntityId id, EntityId owner) {
 // enemy, or the Attack target). Division members hold their slots instead.
 void closeIn(Ctx& c, Engagement& e, EntityId id, EntityId owner, FVec2 toward) {
     if (owner != id) return;
+    if (e.entrenched && e.mode != Engagement::Mode::Attack) return;  // dug in: it holds the position
     Order* o = c.w.orders.get(id);
     if (!e.closing) {
         if (moving(o) && !e.suspended && e.mode != Engagement::Mode::Attack) {
@@ -385,7 +396,7 @@ void runRegiments(Ctx& c, const Timers& tm) {
             if (t.player == player) continue;
             bool can = false;
             for (auto it = lo; it != arms.end() && it->first == org && !can; ++it) {
-                can = CombatRules::passes(c.rules.ability(it->second)->filter, true, t.profile->targetTypes);
+                can = CombatRules::passes(c.rules.ability(it->second)->filter, true, t.types);
             }
             if (!can) continue;
             const Fixed d = (t.pos - p).lengthSq();
@@ -404,6 +415,10 @@ void runRegiments(Ctx& c, const Timers& tm) {
         const Transform* a = w.transforms.get(id);
         const DefRef* dr = w.defRefs.get(id);
         if (r == nullptr || a == nullptr || dr == nullptr || !std::binary_search(liveOrgs.begin(), liveOrgs.end(), id)) continue;
+        if (e.state == Engagement::State::Routing || e.state == Engagement::State::Retreating) {
+            ++e.stateTicks;  // the Morale stage runs these
+            continue;
+        }
         const RegimentDef& rd = c.defs.regiments[dr->index];
         const Fixed zoc = rd.controlRange > Fixed{} ? rd.controlRange : kDefaultZoc;
         const bool running = r->runRestore != Regiment::kNone;
@@ -417,7 +432,8 @@ void runRegiments(Ctx& c, const Timers& tm) {
             --e.sampleTicks;
         }
         const bool hit = e.lastCombat == c.tick;  // it hit or was hit last tick
-        const bool mayEngage = c.tick >= e.graceUntil && (aggressive || e.mode != Engagement::Mode::None);
+        const bool mayEngage = c.tick >= e.graceUntil && e.state != Engagement::State::Exhausted &&
+                               (aggressive || e.mode != Engagement::Mode::None);
         const auto hostiles = [&] { return nearestEnemy(id, a->position, zoc, r->player) != nullptr; };
         const std::uint32_t quiet = e.lastCombat == 0 ? kNever : c.tick + 1 - e.lastCombat;
         const bool hasTarget = std::binary_search(aiming.begin(), aiming.end(), id);
@@ -511,7 +527,7 @@ void runRegiments(Ctx& c, const Timers& tm) {
 // --- targeting -------------------------------------------------------------------------------
 
 bool canHit(const Fighter& self, const Fighter& t, const AbilityDef& ab, const AbilityRules& ar, Fixed reach) {
-    if (t.player == self.player || !CombatRules::passes(ar.filter, true, t.profile->targetTypes)) return false;
+    if (t.player == self.player || !CombatRules::passes(ar.filter, true, t.types)) return false;
     const Fixed d = distance(self.pos, t.pos);
     return d <= reach + t.radius && d >= ab.minRange;
 }
@@ -523,9 +539,9 @@ void runTargeting(Ctx& c, const Timers& tm) {
         Combat* cb = w.combats.get(f.id);
         if (cb == nullptr || f.weapons == nullptr || f.weapons->empty()) continue;
         const Engagement* e = f.org.isNull() ? nullptr : w.engagements.get(f.org);
-        const bool armed = f.org.isNull() || (e != nullptr && (e->state == Engagement::State::Engaging ||
-                                                               e->state == Engagement::State::Stalemate ||
-                                                               e->mode == Engagement::Mode::Attack));
+        const bool armed = f.org.isNull() || (e != nullptr && !passive(e->state) &&
+                                               (e->state == Engagement::State::Engaging || e->state == Engagement::State::Stalemate ||
+                                                e->mode == Engagement::Mode::Attack));
         cb->faceTarget = EntityId{};
         if (!armed) {
             std::fill(cb->targets.begin(), cb->targets.end(), EntityId{});
@@ -578,6 +594,7 @@ void kill(Ctx& c, const Fighter& v, EntityId killer) {
     w.health.get(v.id)->current = Fixed{};
     w.registry.destroyLater(v.id);
     c.sim.emit({SimEvent::Type::Died, v.id, v.player, CommandType::Noop, killer});
+    moraleOnKill(c.sim, v.id, killer);
     if (v.org.isNull()) return;
     for (const Fighter& f : c.field.fs) {
         if (f.org == v.org && f.id != v.id && healthOf(w, f.id) > Fixed{}) return;
@@ -607,7 +624,7 @@ void impact(Ctx& c, std::uint32_t ability, EntityId shooter, std::uint8_t player
         c.field.within(point, ab.area + kMaxTargetRadius, near);
         for (const std::uint32_t k : near) {
             const Fighter& t = c.field.fs[k];
-            if (t.player == player || healthOf(c.w, t.id) <= Fixed{} || !CombatRules::passes(ar->filter, true, t.profile->targetTypes)) continue;
+            if (t.player == player || healthOf(c.w, t.id) <= Fixed{} || !CombatRules::passes(ar->filter, true, t.types)) continue;
             const Fixed d = distance(point, t.pos);
             if (d > ab.area + t.radius) continue;
             victims.push_back({{d, t.id}, &t});
@@ -624,6 +641,7 @@ void impact(Ctx& c, std::uint32_t ability, EntityId shooter, std::uint8_t player
         Health* hp = c.w.health.get(t->id);
         if (hp == nullptr || hp->current <= Fixed{}) continue;
         hp->current = hp->current - dmg;
+        moraleOnHit(c.sim, t->id, shooter, ability);
         markCombat(c, t->org);
         if (from != nullptr) markCombat(c, from->org);
         if (hp->current <= Fixed{}) kill(c, *t, shooter);
@@ -657,7 +675,7 @@ void moveProjectiles(Ctx& c) {
 
 void fire(Ctx& c, const Fighter& f, const WeaponDef& wd, const Fighter& t) {
     const AbilityDef& ab = c.defs.abilities[wd.ability];
-    const Fixed mult = attackMultiplierOf(c, f);
+    const Fixed mult = shooterMultiplier(c, f);
     c.sim.emit({SimEvent::Type::Fired, f.id, f.player, CommandType::Noop, t.id});
     markCombat(c, f.org);
     if (ab.projectileIndex == kNoDef) {
@@ -785,7 +803,7 @@ void attachEngagement(Sim& sim, EntityId regiment) {
 void clearEngagement(Sim& sim, EntityId regiment) {
     Engagement* e = sim.world().engagements.get(regiment);
     if (e == nullptr) return;
-    e->state = Engagement::State::Idle;
+    if (e->state != Engagement::State::Exhausted) e->state = Engagement::State::Idle;  // exhaustion outlasts orders
     e->mode = Engagement::Mode::None;
     e->target = EntityId{};
     e->suspended = false;

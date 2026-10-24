@@ -28,7 +28,8 @@ enum class CommandType : std::uint8_t {
     SetGroupBehaviour = 6,  // group behaviour on (division) / off for the regiments' group
     Attack = 7,             // 1..6 regiments attack a regiment, unit or building: chase, then engage (GAME_DESIGN §6.5)
     AttackMove = 8,         // MoveGroup that engages anything met on the way, whatever the formation
-    // 9..199: gameplay commands, assigned when their systems land.
+    Retreat = 9,            // ordered retreat to a point: the layout's retreat formation, passive (GAME_DESIGN §6.6)
+    // 10..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
     DebugSetTransform = 202,
@@ -36,7 +37,8 @@ enum class CommandType : std::uint8_t {
     DebugPlaceBlocker = 204,  // building stand-in: an entity whose footprint blocks the nav grid
     DebugRequestPath = 205,   // queue a path request from an entity's position to a goal
     DebugSpawnBuilding = 206, // place a building by IDS (duels, tests): blocks its cells, defends itself
-    DebugSetEntrenched = 207, // mark regiments entrenched (the entrenchment timer arrives in M5 part 2)
+    DebugSetEntrenched = 207, // mark regiments entrenched at once (normally: entrenchment_time halted)
+    DebugSetExperience = 208, // set regiments' XP (duels, tests); levels follow
 };
 
 struct NoPayload {
@@ -144,11 +146,19 @@ struct DebugSetEntrenchedPayload {
     }
 };
 
+struct DebugSetExperiencePayload {
+    std::vector<EntityId> regiments;
+    Fixed xp;
+    friend bool operator==(const DebugSetExperiencePayload& a, const DebugSetExperiencePayload& b) noexcept {
+        return a.regiments == b.regiments && a.xp == b.xp;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
                                     DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
                                     DebugRequestPathPayload, MoveGroupPayload, RegimentListPayload, SetFormationPayload,
                                     SetGroupBehaviourPayload, AttackPayload, DebugSpawnBuildingPayload,
-                                    DebugSetEntrenchedPayload>;
+                                    DebugSetEntrenchedPayload, DebugSetExperiencePayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -186,6 +196,8 @@ Command makeAttackMove(std::uint32_t tick, std::uint8_t player, std::uint16_t se
 Command makeDebugSpawnBuilding(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string ids, FVec2 pos, Angle facing);
 Command makeDebugSetEntrenched(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments,
                                bool entrenched);
+Command makeRetreat(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal);
+Command makeDebugSetExperience(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, Fixed xp);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

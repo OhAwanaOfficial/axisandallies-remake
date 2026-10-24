@@ -51,7 +51,9 @@ const char* stageName(Stage s);
 struct SimEvent {
     // Arrived / Blocked: a regiment's (or division's) move order finished at, or short of, its goal.
     // Fired: `entity` shot at `other` (M5). Died: unit or building `entity` was killed by `other`.
-    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died };
+    // Routed: regiment `entity` broke (its last attacker: `other`). LevelUp: regiment `entity` gained
+    // an experience level.
+    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died, Routed, LevelUp };
     Type type = Type::Spawned;
     EntityId entity;
     std::uint8_t player = 0;

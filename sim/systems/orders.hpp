@@ -9,7 +9,7 @@
 // (each regiment paths on its own to goal + its group-formation offset) or, with group behaviour
 // on, a division (one anchor paths for all; members hold slots around it). Groups shrinking below
 // two regiments dissolve. Commands only accept the sending player's live regiments; ids that
-// aren't are skipped, and the command is rejected if none is left.
+// aren't are skipped, and the command is rejected if none is left. Routing regiments don't obey.
 //
 // Combat (systems/combat.cpp) puts moves on hold while a regiment fights (Order::State::Engaged)
 // and resumes them; Attack and AttackMove (M5) set the regiment's Engagement mode.
@@ -27,6 +27,8 @@ void applySetGroupBehaviour(Sim& sim, const Command& c, const SetGroupBehaviourP
 void applyAttack(Sim& sim, const Command& c, const AttackPayload& p);
 void applyAttackMove(Sim& sim, const Command& c, const MoveGroupPayload& p);
 void applySetEntrenched(Sim& sim, const Command& c, const DebugSetEntrenchedPayload& p);
+void applyRetreat(Sim& sim, const Command& c, const MoveGroupPayload& p);
+void applySetExperience(Sim& sim, const Command& c, const DebugSetExperiencePayload& p);
 
 // --- for combat -----------------------------------------------------------------------------------
 // The entity whose Order moves a regiment: its division's Group, or the regiment itself.
@@ -39,6 +41,8 @@ void resumeOrder(Sim& sim, EntityId owner);
 void restartOrder(Sim& sim, EntityId owner, FVec2 goal, bool hasFacing, Angle facing);
 // Stops `owner`'s move where it is.
 void stopOrder(Sim& sim, EntityId owner);
+// Takes a regiment out of its group (rout, retreat).
+void detachFromGroup(Sim& sim, EntityId regiment);
 // Moves a single regiment toward `goal` (Attack chasing its target); keeps its Engagement.
 void chaseOrder(Sim& sim, EntityId regiment, FVec2 goal);
 

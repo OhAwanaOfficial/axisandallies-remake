@@ -5,6 +5,7 @@
 #include "combat/rules.hpp"
 #include "nav/nav_world.hpp"
 #include "systems/combat.hpp"
+#include "systems/morale.hpp"
 #include "systems/movement.hpp"
 #include "systems/orders.hpp"
 #include "systems/stages.hpp"
@@ -172,6 +173,12 @@ void Sim::apply(const Command& c) {
     case CommandType::DebugSetEntrenched:
         applySetEntrenched(*this, c, std::get<DebugSetEntrenchedPayload>(c.payload));
         return;
+    case CommandType::Retreat:
+        applyRetreat(*this, c, std::get<MoveGroupPayload>(c.payload));
+        return;
+    case CommandType::DebugSetExperience:
+        applySetExperience(*this, c, std::get<DebugSetExperiencePayload>(c.payload));
+        return;
     }
     reject();
 }
@@ -244,6 +251,7 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     idle.goal = p.position;
     world_.orders.set(org, idle);
     attachEngagement(*this, org);
+    initRegimentMorale(*this, org);
 }
 
 // A building on its own (duels, tests; base building arrives in M6): it blocks the cells under
@@ -271,6 +279,7 @@ void Sim::spawnBuilding(const Command& c, const DebugSpawnBuildingPayload& p) {
     world_.footprints.set(id, fp);
     nav_->grid.stamp({fp.x0, fp.y0, fp.x1, fp.y1});
     attachCombat(*this, id, c.player);
+    if (c.player < kMaxPlayers) world_.kingdoms[c.player].active = true;
     events_.push_back({SimEvent::Type::Spawned, id, c.player, c.type});
 }
 

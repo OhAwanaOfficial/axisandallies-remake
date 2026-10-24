@@ -12,8 +12,9 @@
 // StalemateTime. Attack chases its target to CAITargetInRangeZOCMultiplier × ZOC, then engages.
 // Being hit also triggers a sample. When no unit of a fighting regiment has a target in firing
 // range for closeInSeconds, it moves toward the nearest enemy (or its Attack target) and stops
-// again once one has; a move it held resumes afterwards (Engagement::resume*). Division members
-// hold their slots instead. Retreating and Routing exist for morale (part 2).
+// again once one has; a move it held resumes afterwards (Engagement::resume*). Division members,
+// and entrenched regiments without an Attack order, hold their position instead. Retreating,
+// Routing and Exhausted regiments are run by the Morale stage (systems/morale.hpp) and are passive.
 //
 // Then per fighter (ascending), each weapon keeps or picks a target: enemies in range + fuzzy
 // range that pass the ability's target filter. KillTargetIsHighestPriority keeps a valid target.
@@ -26,8 +27,10 @@
 // whose recharge is over fires when aimed (turret within turretAimTolerance, local gun's body
 // within localFireArc). A shot with a projectile spawns one that flies distance / speed; others
 // hit at the end of the stage, all together, so a unit killed this tick has still fired (no
-// advantage from entity order). Area shots hit the nearest enemies within `area` (at most max_targets), with
-// linear attenuation from attenuation_range_min (full) to the edge (attenuation_factor_max).
+// advantage from entity order). Area shots hit the nearest enemies within `area` (at most
+// max_targets), with linear attenuation from attenuation_range_min (full) to the edge
+// (attenuation_factor_max). Damage scales with the shooter's attack efficiency and level AV;
+// targets add their level DV (systems/morale.hpp).
 // Damage: CombatRules::damage (tuning.hpp). A unit at 0 health dies (destroyed in Cleanup); a
 // regiment with no living units goes with it. There is no friendly fire and no hit chance.
 

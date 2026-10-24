@@ -4,6 +4,7 @@
 // components (ARCHITECTURE §4.3); they arrive with their systems. Pools are listed in a FIXED
 // order in forEachPool, which is the order of the canonical serializer and of destruction.
 
+#include <array>
 #include <functional>
 #include <vector>
 
@@ -147,9 +148,12 @@ struct Combat {
     }
 };
 
-// A regiment's engagement state machine (GAME_DESIGN §6.6) and its attack orders.
+// A regiment's engagement state machine (GAME_DESIGN §6.6), its attack orders, and its morale,
+// experience, entrenchment and combat efficiency (§6.4, §6.7–6.9; systems/morale.cpp).
 struct Engagement {
-    enum class State : std::uint8_t { Idle = 0, Engaging = 1, Stalemate = 2, Reform = 3, Regroup = 4, Retreating = 5, Routing = 6 };
+    enum class State : std::uint8_t {
+        Idle = 0, Engaging = 1, Stalemate = 2, Reform = 3, Regroup = 4, Retreating = 5, Routing = 6, Exhausted = 7
+    };
     enum class Mode : std::uint8_t { None = 0, Attack = 1, AttackMove = 2 };
     State state = State::Idle;
     Mode mode = Mode::None;
@@ -166,12 +170,20 @@ struct Engagement {
     FVec2 resumeGoal;              // the regiment's own move that was put on hold
     bool resumeHasFacing = false;
     Angle resumeFacing;
+    Fixed morale;                  // current morale; at most the sum of its units' morale_value
+    Fixed efficiency;              // actual attack efficiency, blending toward its formation's
+    Fixed xp;                      // experience
+    std::uint8_t level = 0;        // RegimentDef::experienceLevels index
+    std::uint32_t stillTicks = 0;  // ticks halted: entrenched after RegimentDef entrenchment_time
+    EntityId lastAttacker;         // the regiment that last hit it (gets the XP if it routs)
     friend bool operator==(const Engagement& a, const Engagement& b) noexcept {
         return a.state == b.state && a.mode == b.mode && a.suspended == b.suspended && a.closing == b.closing &&
                a.entrenched == b.entrenched && a.sampleTicks == b.sampleTicks && a.noTarget == b.noTarget &&
                a.stateTicks == b.stateTicks && a.lastCombat == b.lastCombat && a.graceUntil == b.graceUntil &&
                a.target == b.target && a.goal == b.goal && a.resumeGoal == b.resumeGoal &&
-               a.resumeHasFacing == b.resumeHasFacing && a.resumeFacing == b.resumeFacing;
+               a.resumeHasFacing == b.resumeHasFacing && a.resumeFacing == b.resumeFacing && a.morale == b.morale &&
+               a.efficiency == b.efficiency && a.xp == b.xp && a.level == b.level && a.stillTicks == b.stillTicks &&
+               a.lastAttacker == b.lastAttacker;
     }
 };
 
@@ -191,8 +203,17 @@ struct Projectile {
     }
 };
 
+// A player's side of the game (GAME_DESIGN §6.8: army XP). Indexed by player id.
+constexpr std::size_t kMaxPlayers = 8;  // SVars KingdomsMax
+struct Kingdom {
+    bool active = false;  // it has spawned something
+    Fixed armyXp;         // experience the player's actors earned for it, plus a periodic gain
+    friend bool operator==(const Kingdom& a, const Kingdom& b) noexcept { return a.active == b.active && a.armyXp == b.armyXp; }
+};
+
 struct World {
     EntityRegistry registry;
+    std::array<Kingdom, kMaxPlayers> kingdoms{};
     Pool<Transform> transforms;
     Pool<DefRef> defRefs;
     Pool<Health> health;

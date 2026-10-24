@@ -6,6 +6,7 @@
 #include "core/sim.hpp"
 #include "nav/nav_world.hpp"
 #include "systems/combat.hpp"
+#include "systems/morale.hpp"
 #include "systems/movement.hpp"
 #include "systems/stages.hpp"
 
@@ -21,6 +22,8 @@ std::vector<EntityId> validRegiments(const Sim& sim, const Command& c, std::vect
     const World& w = sim.world();
     for (const EntityId id : ids) {
         const Regiment* r = w.registry.alive(id) ? w.regiments.get(id) : nullptr;
+        const Engagement* e = w.engagements.get(id);
+        if (e != nullptr && e->state == Engagement::State::Routing) continue;  // deaf to orders
         if (r != nullptr && r->player == c.player && w.orders.has(id)) out.push_back(id);
     }
     return out;
@@ -317,8 +320,31 @@ void applySetEntrenched(Sim& sim, const Command& c, const DebugSetEntrenchedPayl
     const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
     if (regs.empty()) return sim.reject(c);
     for (const EntityId id : regs) {
-        if (Engagement* e = sim.world().engagements.get(id)) e->entrenched = p.entrenched;
+        Engagement* e = sim.world().engagements.get(id);
+        if (e == nullptr) continue;
+        e->entrenched = p.entrenched;
+        e->stillTicks = p.entrenched ? 0x7FFFFFFF : 0;  // the morale stage keeps it while halted
     }
+}
+
+void applyRetreat(Sim& sim, const Command& c, const MoveGroupPayload& p) {
+    if (sim.nav() == nullptr) return sim.reject(c);
+    const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
+    if (regs.empty()) return sim.reject(c);
+    for (const EntityId id : regs) {
+        clearEngagement(sim, id);
+        startRetreat(sim, id, clampToMap(sim, p.goal));
+    }
+}
+
+void applySetExperience(Sim& sim, const Command& c, const DebugSetExperiencePayload& p) {
+    const std::vector<EntityId> regs = validRegiments(sim, c, p.regiments);
+    if (regs.empty()) return sim.reject(c);
+    for (const EntityId id : regs) setExperience(sim, id, p.xp);
+}
+
+void detachFromGroup(Sim& sim, EntityId regiment) {
+    leaveGroup(sim, regiment);
 }
 
 EntityId orderOwner(const Sim& sim, EntityId regiment) {

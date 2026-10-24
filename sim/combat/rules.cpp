@@ -40,6 +40,7 @@ CombatRules::CombatRules(const DefSet* defs, const nav::MapDef* map, const Comba
             }
         }
         for (const EffectDef& e : a.effects) {
+            if (iequals(e.type, "MORALE_LOSS")) r.moraleLoss = r.moraleLoss + e.amount;
             if (!iequals(e.type, "MAIN_DAMAGE") && !iequals(e.type, "ADD_DAMAGE")) continue;
             const std::uint32_t t = d.damageTypeIndex(e.damageType);
             if (t == kNoDef || e.amount <= Fixed{}) continue;

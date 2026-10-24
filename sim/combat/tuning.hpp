@@ -42,6 +42,13 @@ struct CombatTuning {
     Fixed chaseRepathDistance = 3_fx;  // Attack: re-path when the target moved this far from the goal
     Fixed moveGraceSeconds = 5_fx;     // after a Move / Run order, no auto-engage for this long
     Fixed closeInSeconds = 2_fx;       // engaged with no unit in range this long: move toward the enemy
+
+    // --- morale and experience (M5 part 2) [CALIBRATE] -------------------------------------------
+    Fixed attackValueScale = 0.01_fx;  // damage × (1 + AV × this): experience levels' AV (+4 .. +40)
+    Fixed xpPerHealth = 0.01_fx;       // a unit's combat value for XP: health_max × this (infantry 2, tank 4)
+    Fixed fleeDistance = 40_fx;        // a routing regiment runs this far
+    Fixed fleeSpread = 45_fx;          // degrees either side of straight away from the enemy, at random
+    Fixed rallyFraction = 0.5_fx;      // exhausted until morale is this far from the breaking point to full
 };
 
 // Name → field table for --tune and the docs; `set` returns false for an unknown name.

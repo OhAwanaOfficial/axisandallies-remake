@@ -10,6 +10,7 @@
 //     "XFRM" Transform   "DREF" DefRef   "HLTH" Health   "MEMB" Member   "FTPR" Footprint   "PATH" Path
 //     "REGT" Regiment    "ORDR" Order    "MOVR" Mover    "GRUP" Group
 //     "COMB" Combat      "ENGT" Engagement   "PROJ" Projectile
+//   "KING" per player (kMaxPlayers): u8 active, fixed armyXp
 //   "NAVS" u8 hasNav, then if set: u32 navVersion, u32 n + dirty clusters, PathService state
 //          (queue, job in progress, budget debt, next id; see nav/path_service.cpp)
 //
@@ -27,8 +28,9 @@
 
 namespace corps {
 
-// 2: mapHash, FTPR, PATH, NAVS; 3: REGT, ORDR, MOVR, GRUP (M4); 4: tuning hash, COMB, ENGT, PROJ (M5)
-constexpr std::uint32_t kStateFormatVersion = 4;
+// 2: mapHash, FTPR, PATH, NAVS; 3: REGT, ORDR, MOVR, GRUP (M4); 4: tuning hash, COMB, ENGT, PROJ (M5);
+// 5: morale, efficiency, XP, entrenchment timer in ENGT, KING (M5 part 2)
+constexpr std::uint32_t kStateFormatVersion = 5;
 
 std::vector<std::uint8_t> saveState(const Sim& sim);
 std::uint64_t stateHash(const Sim& sim);

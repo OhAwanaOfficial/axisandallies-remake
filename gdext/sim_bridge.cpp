@@ -91,6 +91,8 @@ const char* eventName(corps::SimEvent::Type t) {
     case corps::SimEvent::Type::Blocked: return "blocked";
     case corps::SimEvent::Type::Fired: return "fired";
     case corps::SimEvent::Type::Died: return "died";
+    case corps::SimEvent::Type::Routed: return "routed";
+    case corps::SimEvent::Type::LevelUp: return "level_up";
     }
     return "?";
 }

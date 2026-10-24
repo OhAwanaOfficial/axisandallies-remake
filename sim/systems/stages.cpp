@@ -26,7 +26,6 @@ void runPathfinding(Sim& sim) {
     }
 }
 void runVision(Sim&) {}
-void runMorale(Sim&) {}
 void runSupply(Sim&) {}
 void runCapture(Sim&) {}
 
