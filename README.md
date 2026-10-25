@@ -129,6 +129,17 @@ minute (money, net income, oil and ammo balance, the shortfall bought with money
 events. `--out` writes a replay for `determinism-check`; `simcli show-def gbr_corps` shows a building's footprint,
 packing, recruits and research.
 
+## Supply, cities and victory on a real map (M6 part 2)
+```bash
+python -I tools/rmp.py "C:/Users/lenovo/Desktop/Axis & Allies/Data.rwd" "Maps/DeveloperMaps/(1v1)Golden Fields.RMP" --out cache/maps/golden_fields
+build\windows\simcli\Release\simcli.exe skirmish gbr ger --map cache/maps/golden_fields/map.json --minutes 10 --regiments 8 --regiments-b 2 --out skirmish.rpl
+build\windows\simcli\Release\simcli.exe determinism-check skirmish.rpl --per-stage --map cache/maps/golden_fields/map.json
+```
+`rmp.py` now also writes the map's placed things (towns, start placeholders), kingdoms and rules. The skirmish starts
+both kingdoms at their Corps placeholders with the map's starting money, sends one regiment of each side to take the
+nearest town and the rest at the enemy HQ, and prints money, income, cities held and regiments in supply every minute,
+with the captures, eliminations and the victory.
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv

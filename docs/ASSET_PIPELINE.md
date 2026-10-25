@@ -120,7 +120,7 @@ small ints, probably transitions / decals / blob data.
   * `0x20` = water (`WaterTerrain`, `water = true`)
   * `0x01` = map border, the outermost ring of tiles (and `0x21` where that ring is water)
   * `0x00` = ground
-* **Blocking for land units = mountain | water | border.** Golden Fields has 4,129 blocked tiles of 16,384 (1,589 mountain, 2,276 water, 508 border). Bridges and fords show up as non-water tiles across rivers (Kursk), so they stay passable. This is terrain blocking only: placed objects (`DYNAMIC_THINGS`: forests, buildings, villages) block on top and aren't decoded yet.
+* **Blocking for land units = mountain | water | border.** Golden Fields has 4,129 blocked tiles of 16,384 (1,589 mountain, 2,276 water, 508 border). Bridges and fords show up as non-water tiles across rivers (Kursk), so they stay passable. This is terrain blocking only: placed objects (`DYNAMIC_THINGS`: forests, buildings, villages) block on top. Their records are decoded (below), but only cities are placed in the sim so far.
 * **Settlement zone (v6):** flags bit `0x04` marks the tiles around village/town centres. On Golden Fields, 96% of the 870 flagged tiles lie within 30 m of one of the two `chaparral_village_town_center` objects. This matches `template_object`'s `needs_space_for_settlement_zone`.
 * **orient** (0–3) is most likely the texture rotation. That's an assumption: it isn't checked against the original renderer.
 
@@ -130,7 +130,14 @@ small ints, probably transitions / decals / blob data.
 3. The TERRAIN trailer.
 4. The `u32 unknown = 1` fields.
 5. The world-scale constant itself: 2 m per tile is measured from object positions, not read from a header field. `GWORLD` holds `f32 0.0625` (1/16, probably the 16 ticks/s game step), not a size.
-6. Objects, kingdoms, triggers and the other chunks: out of scope for this spike (M10).
+6. Triggers, objectives, teams and the other chunks: out of scope for this spike (M10).
+
+**Placed objects, kingdoms and rules (M6 part 2).** `tools/rmp.py` decodes three more chunks into `map.json` (`things`, `kingdoms`, `rules`; integer millimetres, since the sim parses no floats):
+* **`DYNAMIC_THINGS`** (`DYNAMIC_THINGS_INDEX`: `u32 0, u32 n`, then n record sizes; records start at offset 8). A record: a u16-prefixed UTF-16 IDS, then `u32 kind, u32 object id, u32 2`, 6 zero bytes, `f32 x, y, z` (metres = sim cells), `f32` facing x, y; at body offset 68 a `u32 14` followed by the **owner** (a kingdom's object id); named things (town centres) carry a `name_N` string near the end. The rest of the record isn't decoded. Verified on Golden Fields: town centres at (210, 74) and (50, 200), `placeholder_corpsunpacked` at (205, 145) for kingdom_0 and (27, 129) for kingdom_1, `start_loc`s, villages, trees and hedges.
+* **IDS renames:** the map names things by old IDS (`chaparral_village_town_center`, `chaparral_village02`). `translate.tgi` maps them (`ids_old` → `ids_new`, chained: → `mediterranean_city_center01` → `mediterranean_city_center01_large`), but those Translate records sit inside a block comment, so our TGI parser drops them. `rmp.py` reads the pairs from the raw text, comments included, and writes the resolved IDS as `ids_translated`; the sim's loader uses it.
+* **`KINGDOMS`:** per kingdom, `wstr "kingdom"`, `u32 4`, `u32 object id`, `u32 2`, its name (`kingdom_0`), later the name again and its colour (`blue`, `red`, `gray`). A thing's `owner` in `map.json` is the kingdom's index (-1: none). A kingdom that owns a `placeholder_corps*` thing is playable (player = its index); the others (Golden Fields' gray `kingdom_2`) are neutral.
+* **`RULES`:** `u32 4, u32 0`, the game type (`NORMAL`), `u32 count`, then per rule a name, `u8 0`, `u32 type` and the value (type 0: u8 bool; 1, 2: f32; 3: u32). Golden Fields: DifficultyLevel 0, Multiplayer 0, Rated 0, CityVictoryRatio 0, FogOfWar 1, ResourceStockpileDefault 1000.
+* **Start positions:** a nation's `[Placeholder]` list (`Nations/*.tgi`) turns `placeholder_corpsunpacked` into its Corps HQ (`gbr_corps`, `ger_corps`, …).
 
 ---
 

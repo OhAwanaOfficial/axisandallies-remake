@@ -21,6 +21,7 @@
 #include "session/state_io.hpp"
 #include "systems/bases.hpp"
 #include "systems/economy.hpp"
+#include "systems/supply.hpp"
 #include "data/tgi/resolved_dump.hpp"
 #include "data/tgi/value_parse.hpp"
 #include "tgi_fixture.hpp"
@@ -780,4 +781,87 @@ TEST_CASE("golden economy: a GBR base earns, recruits a division HQ that unpacks
     // Heavy tanks: not this HQ's, and they need a motor pool and tech_heavy_tank anyway.
     sim.step({at(makeRecruit(0, 0, 0, hq, "regiment_gbr_tank_heavy"))});
     CHECK(std::any_of(sim.events().begin(), sim.events().end(), [](const SimEvent& ev) { return ev.type == SimEvent::Type::CommandRejected; }));
+}
+
+TEST_CASE("golden defs: supply, cities and victory data (supply ranges, resupply rates, cities, SVars)") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const BuildingDef& corps = *defs.building("gbr_corps");
+    CHECK(corps.supplyRange == 60_fx);
+    CHECK(corps.hq);
+    CHECK_FALSE(corps.supplyRelay);
+    const BuildingDef& city = *defs.building("mediterranean_city_center01_large");
+    CHECK(city.cityZoneRadius == 42_fx);
+    CHECK(city.supplyRange == 55_fx);
+    CHECK(city.captureable);
+    CHECK(city.production.money == 15_fx);
+    CHECK(isCity(defs, defs.buildingIndex("mediterranean_city_center01_large")));
+    CHECK_FALSE(isCity(defs, defs.buildingIndex("med_villageblock12x12_02")));  // a village block: scenery
+    CHECK(abs(defs.unit("gbr_infantry")->resupplyRate - 0.3_fx) < 0.0001_fx);
+    const RegimentDef& inf = *defs.regiment("regiment_gbr_infantry");
+    CHECK(inf.supplyUsed);
+    CHECK(abs(inf.shortfallDamageRate - 0.01_fx) < 0.0001_fx);
+    CHECK(defs.regiment("regiment_gbr_hq_infantry")->hq);
+    const EconomyDef& e = defs.economy;
+    CHECK(e.siegeDamageSeconds == 7_fx);
+    CHECK(e.underSiegeRate == 0.25_fx);
+    CHECK(e.supplyUnderSiege);
+    CHECK(e.moraleSupplyBonus == 1_fx);
+    CHECK(abs(e.captureHealthFactor - 0.3_fx) < 0.0001_fx);
+    CHECK(e.teamVictory);
+    CHECK(placeholderThing(defs, "ger", "placeholder_corpsunpacked") == "ger_corps");
+}
+
+TEST_CASE("golden skirmish on Golden Fields: the map's towns are cities, both kingdoms start at their placeholders, a city falls") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const std::string path = CORPS_SOURCE_DIR "/cache/maps/golden_fields/map.json";
+    std::ifstream in(vfs::pathFromUtf8(path), std::ios::binary);
+    if (!in) {
+        MESSAGE("skipped: no " << path << " (tools/rmp.py output)");
+        return;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    nav::MapDef map;
+    std::string err;
+    REQUIRE_MESSAGE(nav::loadRmpJson(text, map, err), err);
+    REQUIRE(map.kingdoms.size() == 3);
+    CHECK(map.rule("ResourceStockpileDefault", 0_fx) == 1000_fx);
+    const std::vector<MapStart> starts = mapStarts(map);
+    REQUIRE(starts.size() == 2);
+    CHECK(starts[0].position == FVec2{205_fx, 145_fx});
+    CHECK(starts[1].position == FVec2{27_fx, 129_fx});
+    Sim sim({1, &defs, &map});
+    std::vector<EntityId> cities;
+    for (std::size_t i = 0; i < sim.world().structures.size(); ++i) cities.push_back(sim.world().structures.ids()[i]);
+    REQUIRE(cities.size() == 2);  // chaparral_village_town_center -> mediterranean_city_center01_large, twice
+    for (const EntityId c : cities) {
+        CHECK(sim.world().structures.get(c)->player == kNeutral);
+        CHECK(defs.buildings[sim.world().defRefs.get(c)->index].ids == "mediterranean_city_center01_large");
+    }
+    std::uint16_t seq = 0;
+    const auto at = [&](Command c) {
+        c.tick = sim.tick();
+        c.seq = seq++;
+        return c;
+    };
+    const FVec2 cityPos = sim.world().transforms.get(cities[0])->position;  // (210, 74)
+    sim.step({at(makeStartPlayer(0, 0, 0, "gbr_corps", starts[0].position, starts[0].facing)),
+              at(makeStartPlayer(0, 1, 0, "ger_corps", starts[1].position, starts[1].facing)),
+              at(makeSpawnRegiment(0, 0, 0, "regiment_gbr_infantry", cityPos + FVec2{0_fx, 12_fx}, Angle{}))});
+    for (const SimEvent& ev : sim.events()) CHECK(ev.type != SimEvent::Type::CommandRejected);
+    CHECK(sim.world().kingdoms[0].money > 999_fx);  // the map's starting money
+    EntityId captured;
+    for (int i = 0; i < 300 && captured.isNull(); ++i) {
+        sim.step();
+        for (const SimEvent& ev : sim.events()) {
+            if (ev.type == SimEvent::Type::CityCaptured) captured = ev.entity;
+        }
+    }
+    REQUIRE(captured == cities[0]);
+    CHECK(sim.world().structures.get(captured)->player == 0);
+    CHECK(ledgerOf(sim, 0).production.money == 25_fx + 15_fx);
+    // Both HQs supply their surroundings.
+    const std::vector<SupplyZone> zones = supplyZones(sim);
+    CHECK(zones.size() == 3);
 }

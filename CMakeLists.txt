@@ -69,6 +69,18 @@ if(CORPS_BUILD_TESTS)
   add_test(NAME simcli_economy_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/economy.rpl --per-stage)
   set_tests_properties(simcli_economy_determinism PROPERTIES FIXTURES_REQUIRED economy_rpl
     SKIP_REGULAR_EXPRESSION "cannot read")
+  # Supply, cities and victory on a real map (M6 part 2): Golden Fields from tools/rmp.py (cache/,
+  # skipped without it), 8 GBR regiments against 2 German ones until the German HQ falls; the film
+  # must replay identically.
+  set(CORPS_GOLDEN_FIELDS ${CMAKE_SOURCE_DIR}/cache/maps/golden_fields/map.json)
+  add_test(NAME simcli_skirmish COMMAND simcli skirmish gbr ger --map ${CORPS_GOLDEN_FIELDS} --minutes 8 --regiments 8
+    --regiments-b 2 --out ${CMAKE_BINARY_DIR}/skirmish.rpl)
+  set_tests_properties(simcli_skirmish PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP skirmish_rpl
+    PASS_REGULAR_EXPRESSION "result: team 0 wins")
+  add_test(NAME simcli_skirmish_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/skirmish.rpl --per-stage
+    --map ${CORPS_GOLDEN_FIELDS})
+  set_tests_properties(simcli_skirmish_determinism PROPERTIES FIXTURES_REQUIRED skirmish_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

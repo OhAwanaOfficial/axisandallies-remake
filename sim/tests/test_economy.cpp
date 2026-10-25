@@ -96,7 +96,8 @@ RegimentDef regiment(std::string ids, std::vector<std::string> slots, Fixed cost
 // hq_truck (in reg_hq), pool_truck, depot_truck. Regiments: reg_inf (3 rifle + mgun; 50 money,
 // ammo 10, unit limit 1, 4 s), reg_heavy (one heavy tank: 200 money, oil 18, ammo 20, unit limit
 // 1; needs the motor pool and tech_heavy), reg_hq (the HQ truck; 2 s). Start location: building
-// limit 5.
+// limit 5. The Corps HQ and the division HQ have supply zones (60 and 50, as gbr_corps' 60): their
+// buildings recruit only in supply (M6 part 2).
 const DefSet& defs() {
     static const DefSet set = [] {
         DefSet d;
@@ -128,6 +129,7 @@ const DefSet& defs() {
         BuildingDef corps = building("corps", 10_fx, 10_fx, {"building", "corpshq"});
         corps.providesCorps = true;
         corps.health = 3500_fx;
+        corps.supplyRange = 60_fx;
         corps.production.money = 25_fx;
         corps.production.oil = 10_fx;
         corps.production.ammo = 20_fx;
@@ -144,6 +146,7 @@ const DefSet& defs() {
         hq.production.oil = 5_fx;
         hq.production.ammo = 10_fx;
         hq.production.unitLimitProvided = 3_fx;
+        hq.supplyRange = 50_fx;
         hq.recruits = {"reg_inf", "reg_heavy"};
         ResearchItemDef heavyTech;
         heavyTech.propertyIds = "tech_heavy";

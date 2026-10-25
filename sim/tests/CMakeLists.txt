@@ -8,6 +8,7 @@ add_executable(sim_tests
   test_movement.cpp
   test_combat.cpp
   test_economy.cpp
+  test_supply.cpp
   test_tgi_parse.cpp
   test_tgi_values.cpp
   test_tgi_lst.cpp

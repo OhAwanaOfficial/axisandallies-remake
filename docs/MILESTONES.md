@@ -30,7 +30,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
 | **M5** | Parts 1–3 done | — | See below. Left: the first calibration pass against the original (CALIBRATION.md). |
-| **M6** | Part 1 done (sim) | — | See below. Left: supply zones, healing and replacement, under siege, bankrupt effects, construction (bunkers), cities, victory, the HUD, the scripted opponent. |
+| **M6** | Parts 1–2 done (sim) | — | See below. Left: construction (bunkers) and repair, the HUD, the scripted opponent. |
 
 **M4 details:**
 * **Nav:**
@@ -114,6 +114,15 @@ Carried over from M4:
 * **Formats:** state v6 (`STRC`, `DPLY`, economy in `KING`); DefSet layout v5.
 * **Movement fix:** an anchor slides around a building corner its smoothed path clips instead of re-pathing into it (PATHFINDING §5).
 * **Tests:** `test_economy.cpp` (13 cases on hand-built defs: income, the manual's shortfall example, bankruptcy, limits, placement, recruiting, requirements, research, pack / unpack, save / load, encoding, a replay fixture `sim/tests/fixtures/economy_m6.rpl`), 2 golden cases on the GBR data, `simcli economy` + determinism check in CTest. Golden movement hash and the M3–M5 fixtures re-recorded (format change; behaviour checks unchanged).
+
+**M6 part 2 details (sim only; GAME_DESIGN §5, §8, §12):**
+* **Map things:** `tools/rmp.py` decodes `DYNAMIC_THINGS`, `KINGDOMS` and `RULES` and resolves IDS renames from `translate.tgi` (ASSET_PIPELINE §2.1); `MapDef` gains things, kingdoms and rules (in the map hash); `mapStarts` and nation placeholders give the start positions.
+* **Data:** supply range, relay, stockpile max, `supply_required`, `resupply_rate`, `supply_used`, HQ flags (HQComponent and HQ trucks), captureable / destructible, city zone radius; `EconomyDef` siege seconds 7, rate 0.25, `SupplyProvideUnderSiege`, morale supply bonus 1, capture health 0.3, capture XP multiplier 1, city ratio, team victory. DefSet layout v6.
+* **Supply** (`sim/systems/supply.*`): zones shared by allies, relays, under siege, healing, free replacement keeping XP and level, morale supply bonus, `supply_required` production, recruiting only in supply, the bankrupt effects (×0.25 in supply, attrition out of it).
+* **Cities and victory:** map cities spawn as neutral Structures; capture in 5 s with no enemy in the zone; elimination when the last HQ is gone; team victory and the city control ratio; teams in combat.
+* **Commands** 17 (`SetMatchRules`) and 211–212 (`DebugSetHealth`, `DebugSetOwner`); events Replaced, CityCaptured, KingdomDefeated, TeamVictory, CityRatioVictory. StartPlayer uses the map's starting money.
+* **Formats:** state v7 (supply and capture in `STRC`, `SUPL`, team and elimination in `KING`, `MTCH`).
+* **Tests:** `test_supply.cpp` (17 cases on hand-built defs and a two-city map: zones, allies, relays, healing, replacement, bankruptcy, siege both ways, supply_required, capture, contest, recapture, elimination, allies' victory, city ratio, save / load, encoding, map.json things, a replay fixture `sim/tests/fixtures/supply_m6.rpl`), 2 golden cases on the real data and Golden Fields, `simcli skirmish` (Golden Fields, 8 GBR vs 2 GER regiments until the German HQ falls) + determinism check in CTest. Golden movement hash and the M3–M6 fixtures re-recorded (format change; behaviour checks unchanged).
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

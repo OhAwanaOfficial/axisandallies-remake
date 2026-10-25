@@ -93,11 +93,11 @@ Example values (GBR template, same for PER) **[DATA]**:
 Income is applied **per sim tick, pro-rated** (income/min ÷ 600 ticks) using fixed-point. The HUD shows per-minute values.
 
 **Implemented (M6 part 1, `sim/systems/economy.*`):**
-* **Start:** `StartPlayer` gives a kingdom its Corps HQ (deployed) and **500 money** **[DATA `ResourceStockpileDefault`]**. The start location (Thing `start_loc`) provides **building limit 20** **[DATA]**.
-* **Who produces and pays:** every deployed building (not while packing or unpacking), every truck (packed HQs keep producing: the Corps truck +12 money, +5 oil, +10 ammo; an HQ truck also +5 unit limit) **[DATA]**, every regiment (its organization's upkeep: infantry 10 ammo, unit limit 1) and every unit with an upkeep.
+* **Start:** `StartPlayer` gives a kingdom its Corps HQ (deployed) and **500 money** **[DATA `ResourceStockpileDefault`]**, or the map's own `ResourceStockpileDefault` rule (RULES chunk; Golden Fields: 1000). The start location (Thing `start_loc`) provides **building limit 20** **[DATA]**.
+* **Who produces and pays:** every deployed building (not while packing or unpacking; one with `supply_required` only while in supply; cities a kingdom holds included), every truck (packed HQs keep producing: the Corps truck +12 money, +5 oil, +10 ammo; an HQ truck also +5 unit limit) **[DATA]**, every regiment (its organization's upkeep: infantry 10 ammo, unit limit 1) and every unit with an upkeep.
 * **Shortfall prices** come from the Resource records' `PurchaseCost` (ammo 2, oil 3). The money stockpile is clamped to 0 .. `EconomyStockpileResourceMax` (99999); the unit limit provided is capped at `EconomyLimitedResourceMax` (20).
 * **Limits:** a regiment's `unit_limit_consumed` (infantry 1) and a truck's or building's `building_limit_consumed` (1; a supply depot 0) count while they exist; queued and half-recruited regiments reserve what they will consume.
-* **Bankrupt** (no money, negative net income) is a kingdom flag with events. Its effects (slow resupply, attrition out of supply, no construction or repair) arrive with supply and construction (M6 part 2).
+* **Bankrupt** (no money, negative net income) is a kingdom flag with events (`Bankrupt` / `Solvent`). Since M6 part 2: in supply its regiments heal and get replacements at ×0.25 (`DenizenResupplyRateUnderSiege`, stacking with a siege) **[CALIBRATE]**; out of supply every unit loses `shortfall_damage_rate` (0.01) × max health per second until it dies. "No construction or repair" waits for construction.
 
 ---
 
@@ -290,7 +290,7 @@ Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from R
 * **Placement** (`placeBuilding`): the footprint is `Size` (SQUARE `square_size`: HQs 10, depots 8; RECT `rect_width` × `rect_height`; CIRCLE 2 × `blocking_radius`), turned by the facing (`axis_locked`: snapped to 90°) and snapped to whole cells. It and its `BaseTerrain` `padding` (1) must be inside the map and passable for foot and wheeled units; no building may be within `BuildingPaddingMeters` (2) of it; a kingdom has one Corps HQ (property `corpshq`). **`placement_groups` are only the editor's palettes** (`group_nation_gbr`, …: an IDS and a name); they add no rule.
 * **Unpack:** the truck regiment drives to the footprint's centre; on arrival the placement is checked again, then the trucks give way to the building, which stamps its footprint at once and unpacks for its `unpacking_length`. It keeps the trucks' health fraction and the regiment's XP. Re-ordering the trucks cancels; a spot taken meanwhile gives `DeployFailed`.
 * **Pack:** health at least `pack_health_min`, nothing queued or researching; after `packing_length` the building gives way to its packed HQ regiment (or its truck's convoy), health fraction and XP kept.
-* **Recruit** (`RecruitComponent`): up to 5 regiments queued per building, paid when queued (the regiment's cost plus its units', e.g. a truck's), refundable until it starts. The front regiment appears empty at the building's `DenizenComponent/DeploymentInfo` `creation_offset` and heads for its `deployment_offset`; a unit joins every `recruit_time` ÷ units (infantry regiments: 15 s), the first after one interval **[CALIBRATE]**. Every unit's `required_structures` must all be owned and deployed (a unit listing several needs all of them), and its `required_properties` must be on the recruiting building (its own, its LOCAL research, or the kingdom's research that applies to it). Recruiting ignores supply until supply zones exist.
+* **Recruit** (`RecruitComponent`): up to 5 regiments queued per building, paid when queued (the regiment's cost plus its units', e.g. a truck's), refundable until it starts. The front regiment appears empty at the building's `DenizenComponent/DeploymentInfo` `creation_offset` and heads for its `deployment_offset`; a unit joins every `recruit_time` ÷ units (infantry regiments: 15 s), the first after one interval **[CALIBRATE]**. Every unit's `required_structures` must all be owned and deployed (a unit listing several needs all of them), and its `required_properties` must be on the recruiting building (its own, its LOCAL research, or the kingdom's research that applies to it). Recruiting (the next unit) pauses while the building is outside every active supply zone of its team (M6 part 2).
 
 **Biomes:** buildings and trailers have `Arctic/` and `Desert/` texture variants. Choose by map biome.
 
@@ -302,6 +302,14 @@ Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from R
 * **Under siege**: if an enemy is near (or the building was damaged within `UnderSiegeRecentlyDamagedSeconds = 7`), that building's supply zone **deactivates**. Exception flag: `SupplyProvideUnderSiege`.
 * Out of supply while bankrupt: health drains.
 * HUD: supply-border toggle [Ctrl+S].
+
+**Implemented (M6 part 2, `sim/systems/supply.*`, Supply stage):**
+* **Zones:** `SupplyComponent` `supply_range` around every deployed Structure that has one (the GBR Corps HQ 60) and every city a kingdom holds (55). Allies (same team, `SetMatchRules`) share them. A relay (`is_relay`) supplies only while it stands in another active zone of its team, chains included. Unpacking or packing buildings, neutral cities and eliminated kingdoms supply nothing. A regiment is in supply when its anchor is in an active zone of its team and its `OrganizationComponent` `supply_used` is set.
+* **Under siege:** an enemy unit within the supplier's siege radius (its `control_range`, else a city's `zone_radius` 42, else its `supply_range`) **[CALIBRATE]**, or a hit taken within `UnderSiegeRecentlyDamagedSeconds` (7 s). The data sets **`SupplyProvideUnderSiege = true`**, so a besieged zone keeps supplying at `DenizenResupplyRateUnderSiege` (×0.25). With the flag false it switches off. A regiment in several zones uses an unbesieged one.
+* **Healing:** each unit heals `ElementComponent` `resupply_rate` × max health per minute (infantry 0.3, tanks 0.1). Buildings don't heal (repair waits for construction).
+* **Replacement:** a regiment missing a unit gets one free every `recruit_time` ÷ units (infantry: 15 s ÷ 9), lowest missing layout element first, at its formation slot **[CALIBRATE: the original may walk it in from the supplier]**. It joins at the regiment's level (its health multiplier) and keeps the regiment's XP (XP lives on the regiment). It raises the morale ceiling but doesn't refill morale. Regiments still being recruited aren't replaced. Event `Replaced`.
+* **Morale:** `MoraleSupplyBonus` (1) is added to every morale replenishment in supply.
+* **Production and recruiting:** buildings with `EconomyComponent` `supply_required` produce only in supply; recruiting pauses outside supply.
 
 ---
 
@@ -327,6 +335,13 @@ Shared supply and vision, flares (attack here, defend here, etc.), Report (share
 
 ## 12. Victory conditions
 Elimination (destroy all HQs/units per `game_types`), **city control ratio** (percentage of city value held), and scenario objectives (campaign). The exact elimination rule is read from `game_types_aa.tgi` and `game_events.tgi`.
+
+**Implemented (M6 part 2, `sim/systems/supply.*`, Capture stage).** `game_types_aa.tgi`'s `NORMAL` has no rule fields, so these rules are ours:
+* **Cities:** every map thing whose def has a `CityComponent` (after translate.tgi's renames: Golden Fields' `chaparral_village_town_center` → `mediterranean_city_center01_large`) is a Structure from the start: neutral (unless its map kingdom is a playable one), full health, footprint stamped, no weapons, so nothing targets it (cities are indestructible here). Village blocks (`med_villageblock12x12_*`: not captureable, no production) are scenery and aren't spawned. A city produces its `Production` (15 money, 10 oil, 10 ammo) for its holder and supplies like a depot.
+* **Capture:** a kingdom's unit within the capture radius (half the footprint + 4 m) **[CALIBRATE]** and no unit of any other team within `zone_radius` (42 m), for 5 s **[CALIBRATE]**. The city's health rises to at least `CaptureHealthFactor` (0.3) × max, and the nearest unit's regiment gains `ExperienceDefaultValue` × `ExperienceCaptureMultiplier` XP. Contesting or leaving resets it. A held city falls the same way when its holder has no unit in the zone. Event `CityCaptured`.
+* **Elimination:** a kingdom that started is eliminated once it has no HQ left: no Structure with `HQComponent` (Corps HQ, division HQs) and no regiment that is an HQ or carries an HQ's truck (a packing or moving HQ counts). Event `KingdomDefeated`.
+* **Victory:** with `TeamVictory` (true) the last team with a kingdom standing wins, once two teams have played; without it, the last kingdom. With a city victory ratio above 0 (the map's `CityVictoryRatio` rule, else the SVar; `SetMatchRules` at tick 0 overrides; Golden Fields: 0), a team holding at least that share of the cities' value (their money production) wins at once. Events `TeamVictory` / `CityRatioVictory`; the match keeps its winner and end tick, and the sim runs on.
+* **Teams:** `SetMatchRules` (command 17, tick 0 only) sets each player's team, the city ratio and team victory. By default each kingdom is its own team. Combat, siege and capture treat other teams as enemies and allies as friends.
 
 ---
 

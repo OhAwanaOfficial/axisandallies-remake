@@ -590,7 +590,7 @@ TEST_CASE("save/load mid-move continues identically; the golden movement hash ho
     CHECK(stateHash(a) == want);
 
     // Cross-compiler / cross-platform golden value (CORPS_PRINT_GOLDEN=1 prints it).
-    constexpr std::uint64_t kGolden = 0x6d3a12dbebc0c443ULL;
+    constexpr std::uint64_t kGolden = 0xd4377411e6e28a49ULL;
     if (testEnvSet("CORPS_PRINT_GOLDEN")) {
         std::printf("movement golden: 0x%016llxULL\n", static_cast<unsigned long long>(want));
     } else {

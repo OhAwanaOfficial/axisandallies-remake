@@ -20,6 +20,8 @@
 //               [--max-seconds S] [--size N] [--seed S] [--tune name=value,...] [--out F.rpl] [--verbose]
 //   simcli economy [NATION] [--minutes M] [--recruit IDS@S,...] [--research PROP@S,...] [--size N] [--seed S]
 //                  [--out F.rpl]
+//   simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]
+//                   [--city-ratio R] [--seed S] [--out F.rpl]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -77,7 +79,9 @@ void usage() {
                  "              [--until-wiped] [--max-seconds S] [--size N] [--seed S] [--tune name=value,...]\n"
                  "              [--out F.rpl] [--verbose]\n"
                  "  simcli economy [NATION] [--minutes M] [--recruit IDS@S,...] [--research PROP@S,...]\n"
-                 "                 [--size N] [--seed S] [--out F.rpl]\n");
+                 "                 [--size N] [--seed S] [--out F.rpl]\n"
+                 "  simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]\n"
+                 "                  [--city-ratio R] [--seed S] [--out F.rpl]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -162,7 +166,8 @@ const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-se
                                              "spawn", "at", "regiment", "facing",
                                              "map", "gen", "size", "queries", "class", "budget",
                                              "distance", "formation-a", "formation-b", "max-seconds", "tune",
-                                             "xp-a", "xp-b", "retreat-a", "retreat-b", "minutes", "recruit", "research"};
+                                             "xp-a", "xp-b", "retreat-a", "retreat-b", "minutes", "recruit", "research",
+                                             "city-ratio", "regiments-b"};
 const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose",
                                             "until-wiped"};
 
@@ -362,6 +367,7 @@ int main(int argc, char** argv) {
     if (args->command == "perf") return simcli::cmdPerf(sa);
     if (args->command == "duel") return simcli::cmdDuel(sa);
     if (args->command == "economy") return simcli::cmdEconomy(sa);
+    if (args->command == "skirmish") return simcli::cmdSkirmish(sa);
     usage();
     return kExitUsage;
 }
