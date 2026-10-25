@@ -1,0 +1,8 @@
+; Minimal repro: 2D canvas crash with many skinned 3D characters (no GDExtension, no assets).
+config_version=5
+
+[application]
+
+config/name="Canvas crash repro"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")

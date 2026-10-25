@@ -253,21 +253,54 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
     * Release writes the template_release library `bin/windows/release/`, for exports.
     * The root CMakeLists strips godot-cpp 4.3's hardcoded `/MDd`, which it applies whenever `CMAKE_BUILD_TYPE` is empty, as with Visual Studio.
     * It also defines `DEBUG_ENABLED` and `DEBUG_METHODS_ENABLED` for godot-cpp's RelWithDebInfo; godot-cpp itself defines them only in Debug.
-  * **Known crash (Godot 4.7.2, dev laptop), avoided by drawing the HUD in 3D:** with 160 regiments moving and any 2D item visible, Godot crashes (signal 11) in its 2D canvas renderer.
-    * Where: `msvcrt!memmove` under `LocalVector`, called from the code that culls and renders the CanvasItem tree (same offsets in every crash: main+153bd7d, 153f1ef, 379d9df, 379dc02 in the official 4.7.2 exe).
-    * Not the GDExtension: a GDScript-only project with no extension crashes the same way (below). An AddressSanitizer build of sim and SimBridge also runs the scenario clean.
-    * **Workaround (`battle.gd`):** the HUD is a `Label3D` 1 m in front of the camera, sized so one font pixel is one screen pixel. With no CanvasItem visible, the crash doesn't happen. `--hud2d` brings back the 2D `Label` to reproduce it.
-    * 160-regiment `--measure` runs:
+  * **Godot 2D canvas crash (Godot 4.6.3–4.8-beta1, GL Compatibility through ANGLE; fixed on our side by the `GpuPacer` autoload).** With the GPU far behind the CPU and 2D text that changes, Godot crashes (signal 11) in its 2D canvas renderer.
+    * **Where** (symbolized with the official 4.8-beta1 debug symbols): `msvcrt!memmove` ← `RasterizerCanvasGLES3::_render_items+0x537` ← `canvas_render_items` ← `RendererCanvasCull::_render_canvas_item_tree` ← `render_canvas`. The same four frames appear in 4.7.2 (main+153bd7d, 153f1ef, 379d9df, 379dc02) and 4.6.3.
+    * **Cause** (`drivers/gles3/rasterizer_canvas_gles3.cpp`, unchanged on master):
+      * `_render_items` copies the batch's instance data with `memcpy` into the pointer `glMapBufferRange(…, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT)` returns, and never checks it for null. The light UBO upload and the overflow path in `_record_item_commands` do the same.
+      * Before that, `canvas_render_items` reuses an instance buffer from three frames back once `glClientWaitSync(fence, 100 ms)` returns, whether it signalled or timed out.
+      * With GPU frames over ~100 ms, the GPU is still reading that buffer, ANGLE's D3D11 map of it fails, and the copy writes through null.
+      * Upstream #122724 (Android, the same unchecked map) was closed as not planned.
+    * **When:** only when frames take well over 100 ms (High with 160 regiments on the dev laptop: 170–250 ms) and a Label's text changes. A ColorRect alone or a static label never crashed. Low (43 ms) and Medium (77–100 ms) never crashed.
+    * **Not the cause:** our GDExtension (a GDScript-only project crashed the same way, and an AddressSanitizer build of sim and SimBridge runs clean), the Godot version, or any canvas or font setting.
+    * **The matrix** (`--gen=7:1024 --regiments=160 --quality=high --measure=450`; crashed / runs):
 
-      | HUD | Crashed |
+      | Variant | Crashed |
       |---|---|
-      | 2D Label, text set every frame | 3 of 5 |
-      | 2D Label, text set at most 4 times a second | 5 of 5 with the laptop otherwise idle (each ~36 s after spawn); 3 of 17 in earlier runs, some with another Godot running |
-      | Hidden (F4 or `--no-hud`) | 0 of 10 |
-      | Label3D (now the default) | 0 of 10 |
+      | Godot 4.7.2, 2D HUD (baseline) | 3/4 (and 4/4 with `--no-gpu-pacer` on the final code) |
+      | Godot 4.6.3 (latest 4.6.x) | 3/4 |
+      | Godot 4.8-beta1 (newest; there is no 4.7.3) | 2/4 |
+      | `rendering/driver/threads/thread_model` = Separate | 4/4 |
+      | `gl_compatibility/item_buffer_size` 1024 / 4096 / 65536 | 5/8, 4/4, 2/4 |
+      | MSDF default font | 2/4 |
+      | No subpixel positioning or font oversampling | 2/4 |
+      | Snap 2D transforms and vertices to pixels | 1/4 |
+      | Nearest canvas texture filter | 1/4 |
+      | V-Sync off | 2/4 |
+      | Only a ColorRect visible (no text) | 0/4 |
+      | The Label's text set once | 0/4 |
+      | Drain the GPU every slow frame (prototype) | 0/12 |
+      | **GpuPacer (final)** | **0/8 at 3.6–4.2 fps (earlier versions of the drain: 0/26, plus the 1/6 below)** |
 
-      So throttling the text doesn't help; only having no visible CanvasItem does. The box-select `ColorRect` is still 2D, so a crash during a long drag is possible.
-    * Minimal repro (no GDExtension): a 3D scene with 1,060 instanced skinned, animated characters plus a 2D `Label` updated every frame. It crashed in 2 of 15 runs with the same backtrace; boxes instead of characters crashed 0 of 9, and 0 of 3 with the Label hidden. The project and a draft upstream issue are in the session notes (`canvas_crash_repro/`, `godot-canvas-crash-issue-draft.md`); the issue isn't filed yet.
+      Driver: the HD 3000 has only OpenGL 3.1. `--rendering-driver opengl3` falls back to ANGLE ("your video card drivers seem not to support the required OpenGL 3.3"); with the fallback off it fails with "Failed to create native OpenGL window". So the native `opengl3` driver can't be tested on this machine. Mesa's llvmpipe would make that possible, but needs a third-party download.
+    * **Fix (`godot/scripts/gpu_pacer.gd`, autoload `GpuPacer`):** keep the GPU from running behind when frames are slow, so Godot never reuses a busy buffer.
+      * Only on the Compatibility renderer.
+      * It drains when a frame, or the smoothed frame time the game would have without pacing, exceeds 95 ms, and releases once that estimate is under 85 ms. It also starts on, so the first heavy frames after a load are covered. To drain, it reads back a 1×1 SubViewport at the start of each frame, which waits until the GPU has finished every frame queued so far.
+      * While it drains, CPU and GPU no longer overlap, so it judges the larger of the CPU part and the GPU wait, not the drained frame time.
+      * Two earlier versions failed, which set these rules:
+        * Judging the drained time kept it on after one slow loading frame, halving Low's fps in 1 of 3 runs.
+        * A 70 ms release left it on in Medium (73–79 ms), costing 13.4 → 10.5 fps.
+        * Engaging only on the average (from 0) left the first frames after the spawn undrained: 1 crash in 6.
+      * Cost:
+        * Low: 23.1–23.2 fps, the same as with the Label3D HUD (21.3–21.5 in a run where another process doubled the sim step).
+        * Medium: 13.0–13.6 fps, against 13.2–13.6 without it.
+        * Both drain only 20–55 frames, mostly while loading.
+        * High with 160 regiments: about 25 % (3.6–4.2 instead of ~5.2 fps), where the game is already unplayable on this laptop.
+      * The HUD shows "GPU pacing" while it is on; `--no-gpu-pacer` turns it off to reproduce the crash.
+    * **With it, the HUD and the info panel are 2D Labels again** (`battle.gd`). M6's HUD can use any Control. The Label3D workaround and `--hud2d` are gone.
+    * **Upstream:** `tools/godot_canvas_crash/` holds:
+      * an engine patch against 4.7.2 (on a fence timeout use a new buffer; null-check every map with a `glBufferSubData` fallback), not built or tested;
+      * an issue draft. Godot doesn't accept AI-written issues, so it needs a person to rewrite and file it;
+      * an asset-free GDScript repro attempt: skinned characters, a GPU-bound shader and a changing Label. It doesn't crash on the dev laptop (0/4; earlier variants 0/15), so the battle view stays the reliable repro. Under a debugger the battle didn't crash either (0/3).
   * **Every config loads in Godot.** The editor and `godot --path` load only the library in the debug slot (`bin/windows/debug/`): Debug or RelWithDebInfo, whichever was linked last (see above). The Release (template_release) DLL also runs the battle view in the editor when copied into that slot: self test 14/14, 160 regiments at a reported 7.6 fps (the old `delta`-based `--measure`, which can't go below ~7.5; not re-measured), sim step 3.9 ms. Godot itself loads it only in exported release builds.
   * **TGI load time (Release):** mounting the archives, loading and resolving the TGI and compiling the Defs takes 0.7 s from a cold process (`simcli show-def`; load and resolve alone, 0.46–0.54 s). That's under the 5 s threshold, so there is no binary DefSet cache.
   * Battle view fps (dev laptop, HD 3000 through ANGLE, 1280×720, gen:7:1024, optimized (RelWithDebInfo) DLL, V-Sync on, `--measure=300`):
@@ -320,7 +353,7 @@ Where the time went: sim + GDScript about 2 ms (sim step 0.16, snapshot 0.12, vi
   * `prewarm(def)` loads a unit type's records, decoded sounds and death model when its first regiment appears, so a fight doesn't stall on the first shots and deaths. The sprite shaders are compiled at start by an expired sprite.
   * Budgets: bodies (wrecks and corpse nodes) 16 Low, 48 Medium, 96 High; baked corpses 60 per type on Low, 200 otherwise. The oldest go first.
 * **Banners** (`banners.gd`, `banner.gdshader`): over each regiment, its player's flag and bars for health (of the most it had), morale (of its maximum; orange while routing) and attack efficiency. Routing flags blink, entrenched ones show sandbags, selected ones get a light border. `SimBridge.banner_instances(alpha, lift, selected)` builds them in C++: 4 instances per regiment with living units, at the interpolated centroid of those units, 3.2 m above the terrain. They are one MultiMesh of constant-pixel-size quads (clip-space offsets; the Compatibility renderer's flipped projection is accounted for), drawn over everything.
-* **Info panel:** a second `Label3D` on the camera (bottom left, like the HUD, no CanvasItem), refreshed with the HUD at most 4 times a second. It shows the first selected regiment: type, units alive of the most it had, health, morale with its maximum and breaking point, efficiency, level and XP with the next threshold, formation, engagement state and order mode, entrenchment.
+* **Info panel:** a 2D `Label` at the bottom left, refreshed with the HUD at most 4 times a second. It shows the first selected regiment: type, units alive of the most it had, health, morale with its maximum and breaking point, efficiency, level and XP with the next threshold, formation, engagement state and order mode, entrenchment.
 * `godot --headless --path godot --script res://scripts/tools/dump_record.gd -- TYPE IDS` prints a record as the view sees it.
 * **Cost on Low** (dev laptop, as above; `--profile` after a warm-up long enough for the fight, `--no-fx` turns effects and banners off, `--warmup=FRAMES`):
 

@@ -6,3 +6,7 @@ config_version=5
 config/name="Project Corps"
 run/main_scene="res://scenes/battle.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
+
+[autoload]
+
+GpuPacer="*res://scripts/gpu_pacer.gd"

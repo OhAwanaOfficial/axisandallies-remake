@@ -54,7 +54,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 
 Carried over from M4:
 * building ticks on big maps: **done** (cluster-level labels, 6–8 ms avg at 1024², PATHFINDING §10);
-* the Release GDExtension crashing in the editor: **done**. Debug, RelWithDebInfo (optimized, what the editor runs) and Release all build and run the battle view. A Godot 4.7.2 crash in its 2D canvas renderer remains whenever a 2D item is visible. The HUD is now a Label3D, which avoids it (0 crashes, against 5 of 5 with the throttled 2D label); the upstream report is drafted, not filed (ARCHITECTURE §4.4);
+* the Release GDExtension crashing in the editor: **done**. Debug, RelWithDebInfo (optimized, what the editor runs) and Release all build and run the battle view. The Godot 2D canvas crash (GLES3 canvas renderer, unchecked `glMapBufferRange` when the GPU runs >100 ms behind; 4.6.3 to 4.8-beta1) is fixed on our side by the `GpuPacer` autoload, so the HUD is 2D again (0 of 14 crashes with it, against 7 of 8 without). The engine patch and an issue draft are in `tools/godot_canvas_crash/`, not filed (ARCHITECTURE §4.4);
 * TGI load time: 0.7 s in Release, so no DefSet cache is needed;
 * lazy path refinement;
 * real-map roads (objects, M10);

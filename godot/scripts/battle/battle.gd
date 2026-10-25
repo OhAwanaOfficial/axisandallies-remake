@@ -29,7 +29,8 @@ extends Node3D
 ##   --no-hud (hide the HUD label), --no-fx (no combat effects or banners, for profiling), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
 ##   --profile=FRAMES (frame time split by cost; with --no-anim, --hide-units, --no-shadows, --plain-terrain),
 ##   --warmup=FRAMES (frames --profile / --measure skip first; default 90 / 60),
-##   --hud2d (draw the HUD as a 2D Label instead of a Label3D on the camera; crashes Godot 4.7.2, ARCHITECTURE §4.4).
+##   --no-gpu-pacer (turn off the GpuPacer autoload, which keeps Godot's 2D renderer from crashing
+##   when frames are slow on GL Compatibility; ARCHITECTURE §4.4).
 
 const TICK := 0.1
 const PLAYER := 0
@@ -53,12 +54,11 @@ var units                    # UnitBatches (Low, Medium) or UnitViews (High)
 var models: UnitModels
 var fx: FxRunner
 var banners: Banners
-var info3d: Label3D          # the selected regiment's info panel (a Label3D, like the HUD)
+var info_panel: Label        # the selected regiment's info panel (bottom left)
 var quality := ""
 var sun: DirectionalLight3D
 var cam: RtsCamera
 var hud: Label
-var hud3d: Label3D           # the HUD text, unless --hud2d: then `hud` shows it
 var box_rect: ColorRect
 var overlay_root: Node3D
 
@@ -209,6 +209,20 @@ func _build_scene(map: Dictionary) -> void:
 	hud.add_theme_color_override("font_outline_color", Color.BLACK)
 	hud.add_theme_constant_override("outline_size", 4)
 	layer.add_child(hud)
+	info_panel = Label.new()
+	info_panel.add_theme_color_override("font_color", Color.WHITE)
+	info_panel.add_theme_color_override("font_outline_color", Color.BLACK)
+	info_panel.add_theme_constant_override("outline_size", 4)
+	info_panel.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	info_panel.anchor_top = 1.0
+	info_panel.anchor_bottom = 1.0
+	info_panel.offset_left = 10.0
+	info_panel.offset_bottom = -10.0
+	info_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	info_panel.visible = false
+	layer.add_child(info_panel)
+	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	box_rect = ColorRect.new()
 	box_rect.color = Color(0.4, 0.8, 1.0, 0.18)
 	box_rect.visible = false
@@ -416,10 +430,10 @@ func _measure_frame(delta: float, step_ms: float, steps: int) -> void:
 		for x in st:
 			stotal += x
 		st.sort()
-		print("MEASURE %d regiments, %d units, %d frames: avg %.1f fps (frame %.1f ms, p95 %.1f ms; clamped delta %.1f ms); sim step avg %.2f ms, max %.2f ms; renderer %s" % [
+		print("MEASURE %d regiments, %d units, %d frames: avg %.1f fps (frame %.1f ms, p95 %.1f ms; clamped delta %.1f ms); sim step avg %.2f ms, max %.2f ms; GPU pacer drains %d (est. %.1f ms); renderer %s" % [
 			regiment_defs.size(), units.stats.units, f.size(), 1000.0 / (total / f.size()), total / f.size(),
 			f[int(f.size() * 0.95)], _measure.delta_ms / f.size(), stotal / maxi(st.size(), 1),
-			st.back() if not st.is_empty() else 0.0, RenderingServer.get_video_adapter_name()])
+			st.back() if not st.is_empty() else 0.0, GpuPacer.drains, GpuPacer.estimate_ms, RenderingServer.get_video_adapter_name()])
 		get_tree().quit()
 
 
@@ -925,21 +939,13 @@ func _build_cost_overlay(cls: int) -> void:
 var _hud_next_ms := 0
 
 
+## The HUD and the info panel are 2D Labels on a CanvasLayer. (Until the GpuPacer autoload they
+## were Label3Ds on the camera, to avoid Godot's GLES3 canvas crash; ARCHITECTURE §4.4.)
 func _update_hud() -> void:
-	if not _args().has("hud2d") and hud3d == null and cam.camera != null:
-		hud3d = _make_hud3d()
-	hud.visible = overlay.hud and hud3d == null
-	if hud3d != null:
-		hud3d.visible = overlay.hud
-		if info3d == null:
-			info3d = _make_hud3d()
-			info3d.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-		info3d.visible = overlay.hud and not selected.is_empty()
-	if not overlay.hud or _args().has("no-hud"):
-		hud.visible = false
-		if hud3d != null:
-			hud3d.visible = false
-			info3d.visible = false
+	var show: bool = overlay.hud and not _args().has("no-hud")
+	hud.visible = show
+	info_panel.visible = show and not selected.is_empty()
+	if not show:
 		return
 	# Rebuild the text at most 4 times a second, and only when it changes.
 	var now := Time.get_ticks_msec()
@@ -947,9 +953,10 @@ func _update_hud() -> void:
 		return
 	_hud_next_ms = now + 250
 	var lines_out: Array[String] = []
-	lines_out.append("tick %d  %s  x%s  %d fps  %d units%s  quality %s" % [snap.get("tick", 0), "PAUSED" if paused else "",
+	lines_out.append("tick %d  %s  x%s  %d fps  %d units%s  quality %s%s" % [snap.get("tick", 0), "PAUSED" if paused else "",
 		str(speed), Engine.get_frames_per_second(), units.stats.units,
-		"  (%d placeholders)" % units.stats.placeholders if units.stats.placeholders > 0 else "", quality.capitalize()])
+		"  (%d placeholders)" % units.stats.placeholders if units.stats.placeholders > 0 else "", quality.capitalize(),
+		"  GPU pacing" if GpuPacer.active else ""])
 	var shown := 0
 	for bits in _selected_ids():
 		if shown >= 6:
@@ -970,15 +977,11 @@ func _update_hud() -> void:
 		"  [ATTACK-MOVE: click ground or enemy, Esc cancels]" if _attack_mode else "", fx.stats.sprites,
 		fx.stats.bodies + (units.stats.get("corpses", 0) if units is UnitBatches else 0), fx.stats.sounds])
 	var text := "\n".join(lines_out)
-	if hud3d != null:
-		_place_hud3d()
-		if text != hud3d.text:
-			hud3d.text = text
-		var info_text := _info_text()
-		if info_text != info3d.text:
-			info3d.text = info_text
-	elif text != hud.text:
+	if text != hud.text:
 		hud.text = text
+	var info_text := _info_text()
+	if info_text != info_panel.text:
+		info_panel.text = info_text
 
 
 ## The info panel: the first selected regiment's strength, health, morale, efficiency, experience
@@ -1008,37 +1011,6 @@ func _info_text() -> String:
 	out.append("level %d    xp %d%s" % [lv, roundi(info.xp), next])
 	out.append("%s  %s%s" % [FORMATION_LABELS.get(info.formation, info.formation), state, "  ENTRENCHED" if info.entrenched else ""])
 	return "\n".join(out)
-
-
-## The HUD as a Label3D 1 m in front of the camera, sized so one font pixel is one screen pixel.
-## It renders with the 3D scene, so no CanvasItem is visible (Godot 4.7.2 canvas crash,
-## ARCHITECTURE §4.4).
-func _make_hud3d() -> Label3D:
-	var l := Label3D.new()
-	l.font_size = 16
-	l.outline_size = 8
-	l.modulate = Color.WHITE
-	l.outline_modulate = Color.BLACK
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	l.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	l.shaded = false
-	l.no_depth_test = true
-	l.render_priority = 10
-	l.outline_render_priority = 9
-	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	cam.camera.add_child(l)
-	return l
-
-
-func _place_hud3d() -> void:
-	var size := get_viewport().get_visible_rect().size
-	var half_h := tan(deg_to_rad(cam.camera.fov) * 0.5)  # frustum half-height at 1 m
-	var px := 2.0 * half_h / size.y
-	hud3d.pixel_size = px
-	hud3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, half_h - 8.0 * px, -1.0)
-	if info3d != null:
-		info3d.pixel_size = px
-		info3d.position = Vector3(-half_h * size.x / size.y + 10.0 * px, -half_h + 10.0 * px, -1.0)
 
 
 # ---------------------------------------------------------------- graphics quality
@@ -1310,7 +1282,10 @@ func _selftest() -> void:
 		fx.stats.deaths > 0 and fx.stats.bodies + corpses > 0)
 	_hud_next_ms = 0
 	_update_hud()
-	check.call("the info panel shows the selected regiment", info3d != null and info3d.visible and info3d.text.contains("morale"))
+	check.call("the info panel shows the selected regiment", info_panel.visible and info_panel.text.contains("morale"))
+	check.call("the HUD is a visible 2D Label (GpuPacer %s on %s)" % ["on" if GpuPacer.enabled else "off",
+		RenderingServer.get_current_rendering_method()], hud.visible and hud.text.contains("tick")
+		and GpuPacer.enabled == (RenderingServer.get_current_rendering_method() == "gl_compatibility"))
 	await click.call(Vector2(size.x - 20, size.y * 0.5))
 	# Freeze the fight so the unit counts below hold while the presets rebuild.
 	paused = true
