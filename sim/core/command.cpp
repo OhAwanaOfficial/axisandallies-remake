@@ -220,6 +220,77 @@ bool getVarint(const std::vector<std::uint8_t>& in, std::size_t& pos, std::uint6
     return false;
 }
 
+namespace {
+
+Command baseOrder(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, CommandType type, BaseOrderPayload p) {
+    Command c = base(tick, player, seq, type);
+    c.payload = std::move(p);
+    return c;
+}
+
+}  // namespace
+
+Command makeStartPlayer(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string corpsIds, FVec2 pos, Angle facing) {
+    BaseOrderPayload p;
+    p.ids = std::move(corpsIds);
+    p.position = pos;
+    p.facing = facing;
+    return baseOrder(tick, player, seq, CommandType::StartPlayer, std::move(p));
+}
+
+Command makeRecruit(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::string ids) {
+    BaseOrderPayload p;
+    p.target = building;
+    p.ids = std::move(ids);
+    return baseOrder(tick, player, seq, CommandType::Recruit, std::move(p));
+}
+
+Command makeCancelRecruit(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::uint8_t index) {
+    BaseOrderPayload p;
+    p.target = building;
+    p.index = index;
+    return baseOrder(tick, player, seq, CommandType::CancelRecruit, std::move(p));
+}
+
+Command makeUnpack(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId regiment, FVec2 pos, Angle facing) {
+    BaseOrderPayload p;
+    p.target = regiment;
+    p.position = pos;
+    p.facing = facing;
+    return baseOrder(tick, player, seq, CommandType::Unpack, std::move(p));
+}
+
+Command makePack(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building) {
+    BaseOrderPayload p;
+    p.target = building;
+    return baseOrder(tick, player, seq, CommandType::Pack, std::move(p));
+}
+
+Command makeResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::string propertyIds) {
+    BaseOrderPayload p;
+    p.target = building;
+    p.ids = std::move(propertyIds);
+    return baseOrder(tick, player, seq, CommandType::Research, std::move(p));
+}
+
+Command makeCancelResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building) {
+    BaseOrderPayload p;
+    p.target = building;
+    return baseOrder(tick, player, seq, CommandType::CancelResearch, std::move(p));
+}
+
+Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, Fixed money) {
+    BaseOrderPayload p;
+    p.amount = money;
+    return baseOrder(tick, player, seq, CommandType::DebugSetMoney, std::move(p));
+}
+
+Command makeDebugGrantProperty(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string propertyIds) {
+    BaseOrderPayload p;
+    p.ids = std::move(propertyIds);
+    return baseOrder(tick, player, seq, CommandType::DebugGrantProperty, std::move(p));
+}
+
 void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
     out.push_back(static_cast<std::uint8_t>(c.type));
     out.push_back(c.player);
@@ -317,6 +388,43 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
         putFixed(out, p.xp);
         break;
     }
+    case CommandType::StartPlayer: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putString(out, p.ids);
+        putVec(out, p.position);
+        putVarint(out, p.facing.units);
+        break;
+    }
+    case CommandType::Recruit:
+    case CommandType::Research: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putString(out, p.ids);
+        break;
+    }
+    case CommandType::CancelRecruit: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putVarint(out, p.index);
+        break;
+    }
+    case CommandType::Unpack: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putVec(out, p.position);
+        putVarint(out, p.facing.units);
+        break;
+    }
+    case CommandType::Pack:
+    case CommandType::CancelResearch:
+        putVarint(out, std::get<BaseOrderPayload>(c.payload).target.bits);
+        break;
+    case CommandType::DebugSetMoney:
+        putFixed(out, std::get<BaseOrderPayload>(c.payload).amount);
+        break;
+    case CommandType::DebugGrantProperty:
+        putString(out, std::get<BaseOrderPayload>(c.payload).ids);
+        break;
     }
 }
 
@@ -435,6 +543,60 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
     case CommandType::DebugSetExperience: {
         DebugSetExperiencePayload p;
         if (!getIds(in, pos, p.regiments) || !getFixed(in, pos, p.xp)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::StartPlayer: {
+        BaseOrderPayload p;
+        if (!getString(in, pos, p.ids) || !getVec(in, pos, p.position) || !getU(in, pos, 0xFFFF, v)) return false;
+        p.facing = Angle::fromUnits(static_cast<std::uint32_t>(v));
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::Recruit:
+    case CommandType::Research: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getString(in, pos, p.ids)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::CancelRecruit: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getU(in, pos, 0xFF, v)) return false;
+        p.index = static_cast<std::uint8_t>(v);
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::Unpack: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getVec(in, pos, p.position) || !getU(in, pos, 0xFFFF, v)) return false;
+        p.facing = Angle::fromUnits(static_cast<std::uint32_t>(v));
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::Pack:
+    case CommandType::CancelResearch: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::DebugSetMoney: {
+        BaseOrderPayload p;
+        if (!getFixed(in, pos, p.amount)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::DebugGrantProperty: {
+        BaseOrderPayload p;
+        if (!getString(in, pos, p.ids)) return false;
         out.payload = std::move(p);
         return true;
     }

@@ -5,8 +5,6 @@
 
 namespace corps {
 
-void runEconomy(Sim&) {}
-void runTimers(Sim&) {}
 
 // Rebuild the clusters touched by stamps since last tick, spend the expansion budget, and hand
 // finished paths to their requesters (dropped if the requester died or has asked again since).

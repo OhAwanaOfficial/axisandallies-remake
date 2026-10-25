@@ -295,11 +295,11 @@ Fixed moraleMaxOf(const Sim& sim, EntityId regiment) {
     return sum;
 }
 
-Fixed attackMultiplierOf(const Sim& sim, EntityId regiment) {
+Fixed attackMultiplierOf(const Sim& sim, EntityId regiment, Fixed extraAv) {
     const Engagement* e = regiment.isNull() ? nullptr : sim.world().engagements.get(regiment);
     if (e == nullptr) return Fixed::fromInt(1);
     const ExperienceLevelDef* level = levelOf(sim, regiment);
-    const Fixed av = level != nullptr ? level->attack : Fixed{};
+    const Fixed av = (level != nullptr ? level->attack : Fixed{}) + extraAv;
     return e->efficiency * (Fixed::fromInt(1) + av * sim.tuning().attackValueScale);
 }
 

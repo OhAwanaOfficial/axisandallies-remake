@@ -96,6 +96,13 @@ const char* eventName(corps::SimEvent::Type t) {
     case corps::SimEvent::Type::Routed: return "routed";
     case corps::SimEvent::Type::LevelUp: return "level_up";
     case corps::SimEvent::Type::Hit: return "hit";
+    case corps::SimEvent::Type::Recruited: return "recruited";
+    case corps::SimEvent::Type::Unpacked: return "unpacked";
+    case corps::SimEvent::Type::Packed: return "packed";
+    case corps::SimEvent::Type::ResearchDone: return "research_done";
+    case corps::SimEvent::Type::Bankrupt: return "bankrupt";
+    case corps::SimEvent::Type::Solvent: return "solvent";
+    case corps::SimEvent::Type::DeployFailed: return "deploy_failed";
     }
     return "?";
 }

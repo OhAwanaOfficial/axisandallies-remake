@@ -29,7 +29,15 @@ enum class CommandType : std::uint8_t {
     Attack = 7,             // 1..6 regiments attack a regiment, unit or building: chase, then engage (GAME_DESIGN §6.5)
     AttackMove = 8,         // MoveGroup that engages anything met on the way, whatever the formation
     Retreat = 9,            // ordered retreat to a point: the layout's retreat formation, passive (GAME_DESIGN §6.6)
-    // 10..199: gameplay commands, assigned when their systems land.
+    // Bases and economy (M6, GAME_DESIGN §5, §7; systems/bases.hpp). Payload: BaseOrderPayload.
+    StartPlayer = 10,       // a kingdom starts: its Corps HQ (ids) deployed at position, starting money
+    Recruit = 11,           // a building queues a regiment (ids; a truck: its convoy); paid now
+    CancelRecruit = 12,     // a building drops queue entry `index` (refunded)
+    Unpack = 13,            // a truck regiment drives to position and unpacks into its building there
+    Pack = 14,              // a building packs onto its truck(s)
+    Research = 15,          // a building researches a property (ids); paid now
+    CancelResearch = 16,    // a building stops its research (refunded)
+    // 17..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
     DebugSetTransform = 202,
@@ -39,6 +47,8 @@ enum class CommandType : std::uint8_t {
     DebugSpawnBuilding = 206, // place a building by IDS (duels, tests): blocks its cells, defends itself
     DebugSetEntrenched = 207, // mark regiments entrenched at once (normally: entrenchment_time halted)
     DebugSetExperience = 208, // set regiments' XP (duels, tests); levels follow
+    DebugSetMoney = 209,      // set the sender's money (amount) (tests, simcli economy)
+    DebugGrantProperty = 210, // grant the sender's kingdom a property (ids), as GLOBAL research does
 };
 
 struct NoPayload {
@@ -154,11 +164,28 @@ struct DebugSetExperiencePayload {
     }
 };
 
+// The bases commands (10..16, 209, 210). Each type uses some fields; the encoding writes only those:
+//   StartPlayer: ids, position, facing     Recruit / Research: target, ids
+//   CancelRecruit: target, index            Unpack: target, position, facing
+//   Pack / CancelResearch: target           DebugSetMoney: amount      DebugGrantProperty: ids
+struct BaseOrderPayload {
+    EntityId target;   // the building, or the truck regiment (Unpack)
+    std::string ids;   // building / regiment / property IDS
+    FVec2 position;
+    Angle facing;
+    std::uint8_t index = 0;
+    Fixed amount;
+    friend bool operator==(const BaseOrderPayload& a, const BaseOrderPayload& b) noexcept {
+        return a.target == b.target && a.ids == b.ids && a.position == b.position && a.facing == b.facing && a.index == b.index &&
+               a.amount == b.amount;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
                                     DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
                                     DebugRequestPathPayload, MoveGroupPayload, RegimentListPayload, SetFormationPayload,
                                     SetGroupBehaviourPayload, AttackPayload, DebugSpawnBuildingPayload,
-                                    DebugSetEntrenchedPayload, DebugSetExperiencePayload>;
+                                    DebugSetEntrenchedPayload, DebugSetExperiencePayload, BaseOrderPayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -198,6 +225,15 @@ Command makeDebugSetEntrenched(std::uint32_t tick, std::uint8_t player, std::uin
                                bool entrenched);
 Command makeRetreat(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, FVec2 goal);
 Command makeDebugSetExperience(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<EntityId> regiments, Fixed xp);
+Command makeStartPlayer(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string corpsIds, FVec2 pos, Angle facing);
+Command makeRecruit(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::string ids);
+Command makeCancelRecruit(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::uint8_t index);
+Command makeUnpack(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId regiment, FVec2 pos, Angle facing);
+Command makePack(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building);
+Command makeResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building, std::string propertyIds);
+Command makeCancelResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building);
+Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, Fixed money);
+Command makeDebugGrantProperty(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string propertyIds);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

@@ -53,9 +53,17 @@ struct SimEvent {
     // Fired: `entity` shot at `other` with ability `detail` (M5). Hit: a shot of ability `detail`
     // from `other` landed `at` (on `entity`, the primary target, or nothing). Died: unit or building
     // `entity` was killed by `other`, `at` facing `facing`. Routed: regiment `entity` broke (its last
-    // attacker: `other`). LevelUp: regiment `entity` gained an experience level. Events feed the view
-    // (sounds, effects, death models); they are outputs, not state.
-    enum class Type : std::uint8_t { Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died, Routed, LevelUp, Hit };
+    // attacker: `other`). LevelUp: regiment `entity` gained an experience level.
+    // Bases (M6): Recruited: regiment `entity` has all its units (building `other`, regiment def
+    // `detail`). Unpacked / Packed: building `entity` finished unpacking / packed into regiment
+    // `other`. ResearchDone: building `entity` granted property `detail`. Bankrupt / Solvent: player
+    // `player`'s kingdom went bankrupt / recovered. DeployFailed: truck regiment `entity` arrived
+    // where its building no longer fits. Events feed the view (sounds, effects, death models, HUD);
+    // they are outputs, not state.
+    enum class Type : std::uint8_t {
+        Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died, Routed, LevelUp, Hit,
+        Recruited, Unpacked, Packed, ResearchDone, Bankrupt, Solvent, DeployFailed
+    };
     Type type = Type::Spawned;
     EntityId entity;
     std::uint8_t player = 0;
@@ -120,6 +128,10 @@ public:
 
     // Restores the tick counter (save/load only).
     void restoreTick(std::uint32_t t) noexcept { tick_ = t; }
+
+    // Creates regiment def `regiment` for `player` with all its units at `position` (SpawnRegiment;
+    // a building packing onto its trucks). Returns the regiment, or null if no entity was left.
+    EntityId spawnRegimentAt(std::uint8_t player, std::uint32_t regiment, FVec2 position, Angle facing, CommandType cause);
 
 private:
     void applyCommands(const std::vector<Command>& commands);

@@ -4,7 +4,9 @@
 
 #include "combat/rules.hpp"
 #include "nav/nav_world.hpp"
+#include "systems/bases.hpp"
 #include "systems/combat.hpp"
+#include "systems/economy.hpp"
 #include "systems/morale.hpp"
 #include "systems/movement.hpp"
 #include "systems/orders.hpp"
@@ -67,7 +69,7 @@ void Sim::step(const std::vector<Command>& commands) {
     after(Stage::ApplyCommands);
     runEconomy(*this);
     after(Stage::Economy);
-    runTimers(*this);
+    runBases(*this);
     after(Stage::Timers);
     runOrders(*this);
     after(Stage::Orders);
@@ -179,31 +181,59 @@ void Sim::apply(const Command& c) {
     case CommandType::DebugSetExperience:
         applySetExperience(*this, c, std::get<DebugSetExperiencePayload>(c.payload));
         return;
+    case CommandType::StartPlayer:
+        applyStartPlayer(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::Recruit:
+        applyRecruit(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::CancelRecruit:
+        applyCancelRecruit(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::Unpack:
+        applyUnpack(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::Pack:
+        applyPack(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::Research:
+        applyResearch(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::CancelResearch:
+        applyCancelResearch(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::DebugSetMoney:
+        applyDebugSetMoney(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::DebugGrantProperty:
+        applyDebugGrantProperty(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
     }
     reject();
 }
 
 void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
-    const auto reject = [&] { events_.push_back({SimEvent::Type::CommandRejected, EntityId{}, c.player, c.type}); };
-    if (config_.defs == nullptr) return reject();
+    const std::uint32_t regIndex = config_.defs != nullptr ? config_.defs->regimentIndex(p.regimentIds) : kNoDef;
+    if (regIndex == kNoDef || spawnRegimentAt(c.player, regIndex, p.position, p.facing, c.type).isNull()) reject(c);
+}
+
+EntityId Sim::spawnRegimentAt(std::uint8_t player, std::uint32_t regIndex, FVec2 position, Angle facing, CommandType cause) {
     const DefSet& defs = *config_.defs;
-    const std::uint32_t regIndex = defs.regimentIndex(p.regimentIds);
-    if (regIndex == kNoDef) return reject();
     const RegimentDef& reg = defs.regiments[regIndex];
 
     const EntityId org = world_.registry.create();
-    if (org.isNull()) return reject();
-    world_.transforms.set(org, {p.position, p.facing});
+    if (org.isNull()) return org;
+    world_.transforms.set(org, {position, facing});
     world_.defRefs.set(org, {DefRef::Kind::Regiment, regIndex});
     Regiment regiment;
     regiment.layout = reg.layoutIndex;
-    regiment.player = c.player;
+    regiment.player = player;
     const LayoutDef* layout = reg.layoutIndex != kNoDef ? &defs.layouts[reg.layoutIndex] : nullptr;
     if (layout != nullptr) {
         const std::uint32_t f = layout->formation(layout->defaultFormationIds);
         regiment.formation = static_cast<std::uint16_t>(f != kNoDef ? f : 0);
     }
-    events_.push_back({SimEvent::Type::Spawned, org, c.player, c.type});
+    events_.push_back({SimEvent::Type::Spawned, org, player, cause});
 
     // Regiment slot s fills layout slot s, which holds `number` elements (PER infantry: 9 men).
     // Member::slot is the layout element; slots past the layout use the legacy grid placement.
@@ -211,7 +241,7 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     const auto addUnit = [&](const ElementRef& el, std::uint32_t element, FVec2 offset) {
         const EntityId e = world_.registry.create();
         if (e.isNull()) return false;
-        world_.transforms.set(e, {p.position + offset.rotated(p.facing), p.facing});
+        world_.transforms.set(e, {position + offset.rotated(facing), facing});
         if (el.kind == ElementKind::Unit) {
             const UnitDef& u = defs.units[el.index];
             world_.defRefs.set(e, {DefRef::Kind::Unit, el.index});
@@ -226,8 +256,8 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
             world_.health.set(e, {hp, hp});
         }
         world_.members.set(e, {org, static_cast<std::uint16_t>(element)});
-        attachCombat(*this, e, c.player);
-        events_.push_back({SimEvent::Type::Spawned, e, c.player, c.type});
+        attachCombat(*this, e, player);
+        events_.push_back({SimEvent::Type::Spawned, e, player, cause});
         return true;
     };
     const std::size_t layoutElements = layout != nullptr ? layout->elementSlot.size() : 0;
@@ -247,11 +277,12 @@ void Sim::spawnRegiment(const Command& c, const SpawnRegimentPayload& p) {
     }
     world_.regiments.set(org, regiment);
     Order idle;
-    idle.facing = p.facing;
-    idle.goal = p.position;
+    idle.facing = facing;
+    idle.goal = position;
     world_.orders.set(org, idle);
     attachEngagement(*this, org);
     initRegimentMorale(*this, org);
+    return org;
 }
 
 // A building on its own (duels, tests; base building arrives in M6): it blocks the cells under

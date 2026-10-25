@@ -56,9 +56,9 @@ void moraleOnKill(Sim& sim, EntityId victim, EntityId killer);
 // `victim` was hit by an attack of ability `ability` from `shooter`.
 void moraleOnHit(Sim& sim, EntityId victim, EntityId shooter, std::uint32_t ability);
 
-// Damage multiplier of a regiment's attacks: efficiency × (1 + AV × attackValueScale). 1 for
-// entities that aren't in a regiment.
-Fixed attackMultiplierOf(const Sim& sim, EntityId regiment);
+// Damage multiplier of a regiment's attacks: efficiency × (1 + (AV + extraAv) × attackValueScale),
+// AV from its experience level, extraAv from research (M6). 1 for entities not in a regiment.
+Fixed attackMultiplierOf(const Sim& sim, EntityId regiment, Fixed extraAv = {});
 // DV a regiment's experience level adds to its units' defense.
 Fixed levelDefenseOf(const Sim& sim, EntityId regiment);
 // Morale ceiling: its living units' morale_value (+ level MORALE each).

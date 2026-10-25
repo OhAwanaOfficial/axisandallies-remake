@@ -238,6 +238,65 @@ void get(ByteReader& r, Projectile& p) {
     p.attackMultiplier = r.fixed();
 }
 
+void putU32s(ByteWriter& w, const std::vector<std::uint32_t>& v) {
+    w.u32(static_cast<std::uint32_t>(v.size()));
+    for (const std::uint32_t x : v) w.u32(x);
+}
+void getU32s(ByteReader& r, std::vector<std::uint32_t>& v) {
+    const std::uint32_t n = r.count(4);
+    v.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) v.push_back(r.u32());
+}
+void put(ByteWriter& w, const Structure& s) {
+    w.u8(static_cast<std::uint8_t>(s.state));
+    w.u8(s.player);
+    w.u32(s.stateTicks);
+    w.fixed(s.xp);
+    putU32s(w, s.properties);
+    w.u32(static_cast<std::uint32_t>(s.queue.size()));
+    for (const RecruitOrder& o : s.queue) {
+        w.u32(o.regiment);
+        w.fixed(o.paid);
+    }
+    w.entity(s.recruit);
+    w.u16(s.nextElement);
+    w.u32(s.recruitTicks);
+    w.u32(s.research);
+    w.u32(s.researchTicks);
+    w.fixed(s.researchPaid);
+}
+void get(ByteReader& r, Structure& s) {
+    s.state = static_cast<Structure::State>(r.u8());
+    s.player = r.u8();
+    s.stateTicks = r.u32();
+    s.xp = r.fixed();
+    getU32s(r, s.properties);
+    const std::uint32_t n = r.count(12);
+    s.queue.clear();
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) {
+        RecruitOrder o;
+        o.regiment = r.u32();
+        o.paid = r.fixed();
+        s.queue.push_back(o);
+    }
+    s.recruit = r.entity();
+    s.nextElement = r.u16();
+    s.recruitTicks = r.u32();
+    s.research = r.u32();
+    s.researchTicks = r.u32();
+    s.researchPaid = r.fixed();
+}
+void put(ByteWriter& w, const Deploy& d) {
+    w.u32(d.building);
+    w.vec2(d.at);
+    w.angle(d.facing);
+}
+void get(ByteReader& r, Deploy& d) {
+    d.building = r.u32();
+    d.at = r.vec2();
+    d.facing = r.angle();
+}
+
 template <class T>
 void putPool(ByteWriter& w, const Pool<T>& pool) {
     w.u32(static_cast<std::uint32_t>(pool.size()));
@@ -264,7 +323,7 @@ bool getPool(ByteReader& r, Pool<T>& pool, const EntityRegistry& reg) {
 }
 
 constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH", "REGT", "ORDR", "MOVR", "GRUP",
-                                    "COMB", "ENGT", "PROJ"};
+                                    "COMB", "ENGT", "PROJ", "STRC", "DPLY"};
 
 std::uint64_t mapHashOf(const Sim& sim) {
     return sim.config().map != nullptr ? sim.config().map->mapHash : 0;
@@ -316,6 +375,10 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
     for (const Kingdom& k : sim.world().kingdoms) {
         w.boolean(k.active);
         w.fixed(k.armyXp);
+        w.boolean(k.started);
+        w.fixed(k.money);
+        w.boolean(k.bankrupt);
+        putU32s(w, k.properties);
     }
 
     w.tag("NAVS");
@@ -371,6 +434,10 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     for (Kingdom& k : world.kingdoms) {
         k.active = r.boolean();
         k.armyXp = r.fixed();
+        k.started = r.boolean();
+        k.money = r.fixed();
+        k.bankrupt = r.boolean();
+        getU32s(r, k.properties);
     }
 
     if (!r.expectTag("NAVS")) return fail("missing NAVS");

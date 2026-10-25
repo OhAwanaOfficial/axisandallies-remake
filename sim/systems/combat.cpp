@@ -6,6 +6,7 @@
 #include "combat/rules.hpp"
 #include "nav/map_def.hpp"
 #include "nav/nav_world.hpp"
+#include "systems/economy.hpp"
 #include "systems/morale.hpp"
 #include "systems/orders.hpp"
 #include "systems/stages.hpp"
@@ -209,13 +210,14 @@ bool entrenchedOf(const World& w, EntityId org) {
 
 TargetStats statsOf(const Ctx& c, const Fighter& t) {
     TargetStats s = c.rules.statsOf(*t.profile, terrainAt(c.sim, t.pos), entrenchedOf(c.w, t.org));
-    s.defense = s.defense + levelDefenseOf(c.sim, t.org);  // experience level DV
+    s.defense = s.defense + levelDefenseOf(c.sim, t.org) + researchDefenseValue(c.sim, t.id);  // level DV, research DV
     return s;
 }
 
-// The shooter's damage multiplier: its regiment's blended attack efficiency and level AV.
+// The shooter's damage multiplier: its regiment's blended attack efficiency, level AV and the
+// AV its kingdom's research gives it.
 Fixed shooterMultiplier(const Ctx& c, const Fighter& f) {
-    return attackMultiplierOf(c.sim, f.org);
+    return attackMultiplierOf(c.sim, f.org, researchAttackValue(c.sim, f.id));  // level AV + research AV (M6)
 }
 
 // Routing, retreating and exhausted regiments are passive: no auto-engage, no fire.

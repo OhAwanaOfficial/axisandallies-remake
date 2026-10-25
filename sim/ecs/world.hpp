@@ -203,12 +203,62 @@ struct Projectile {
     }
 };
 
-// A player's side of the game (GAME_DESIGN §6.8: army XP). Indexed by player id.
+// A player building of the economy (M6, GAME_DESIGN §7): a base building that was started with,
+// unpacked from a truck or (later) constructed. It produces and pays upkeep (systems/economy),
+// packs back onto its truck, recruits regiments one unit at a time and researches properties
+// (systems/bases). Buildings placed with DebugSpawnBuilding have none: they only defend.
+struct RecruitOrder {
+    std::uint32_t regiment = 0;  // DefSet::regiments index
+    Fixed paid;                  // money taken when it was queued (refunded on cancel)
+    friend bool operator==(const RecruitOrder& a, const RecruitOrder& b) noexcept { return a.regiment == b.regiment && a.paid == b.paid; }
+};
+struct Structure {
+    static constexpr std::uint32_t kNone = 0xFFFFFFFFu;
+    enum class State : std::uint8_t { Deployed = 0, Unpacking = 1, Packing = 2 };
+    State state = State::Deployed;
+    std::uint8_t player = 0;
+    std::uint32_t stateTicks = 0;           // ticks left of unpacking / packing
+    Fixed xp;                               // its HQ regiment's experience, kept while unpacked
+    std::vector<std::uint32_t> properties;  // LOCAL research granted to it (property indexes, sorted)
+    std::vector<RecruitOrder> queue;        // regiments waiting; the front one is being recruited
+    EntityId recruit;                       // the regiment being filled (null: none started yet)
+    std::uint16_t nextElement = 0;          // recruit plan index of its next unit
+    std::uint32_t recruitTicks = 0;         // ticks to the next unit
+    std::uint32_t research = kNone;         // BuildingDef::research index in progress
+    std::uint32_t researchTicks = 0;
+    Fixed researchPaid;
+    friend bool operator==(const Structure& a, const Structure& b) noexcept {
+        return a.state == b.state && a.player == b.player && a.stateTicks == b.stateTicks && a.xp == b.xp &&
+               a.properties == b.properties && a.queue == b.queue && a.recruit == b.recruit && a.nextElement == b.nextElement &&
+               a.recruitTicks == b.recruitTicks && a.research == b.research && a.researchTicks == b.researchTicks &&
+               a.researchPaid == b.researchPaid;
+    }
+};
+
+// A truck regiment on its way to unpack (on the regiment entity): it drives to `at`, then
+// becomes `building` facing `facing` (systems/bases).
+struct Deploy {
+    std::uint32_t building = 0;  // DefSet::buildings index
+    FVec2 at;                    // the footprint's centre
+    Angle facing;
+    friend bool operator==(const Deploy& a, const Deploy& b) noexcept {
+        return a.building == b.building && a.at == b.at && a.facing == b.facing;
+    }
+};
+
+// A player's side of the game (GAME_DESIGN §5, §6.8). Indexed by player id.
 constexpr std::size_t kMaxPlayers = 8;  // SVars KingdomsMax
 struct Kingdom {
-    bool active = false;  // it has spawned something
-    Fixed armyXp;         // experience the player's actors earned for it, plus a periodic gain
-    friend bool operator==(const Kingdom& a, const Kingdom& b) noexcept { return a.active == b.active && a.armyXp == b.armyXp; }
+    bool active = false;   // it has spawned something
+    Fixed armyXp;          // experience the player's actors earned for it, plus a periodic gain
+    bool started = false;  // StartPlayer: it has an economy (money, start location, buildings)
+    Fixed money;           // the stockpile, 0 .. EconomyDef::stockpileMax
+    bool bankrupt = false; // no money and a negative net income
+    std::vector<std::uint32_t> properties;  // GLOBAL research granted (property indexes, sorted)
+    friend bool operator==(const Kingdom& a, const Kingdom& b) noexcept {
+        return a.active == b.active && a.armyXp == b.armyXp && a.started == b.started && a.money == b.money &&
+               a.bankrupt == b.bankrupt && a.properties == b.properties;
+    }
 };
 
 struct World {
@@ -227,6 +277,8 @@ struct World {
     Pool<Combat> combats;
     Pool<Engagement> engagements;
     Pool<Projectile> projectiles;
+    Pool<Structure> structures;
+    Pool<Deploy> deploys;
 
     // Fixed pool order: serializer sections and component removal follow it.
     template <class F>
@@ -244,6 +296,8 @@ struct World {
         f(combats);
         f(engagements);
         f(projectiles);
+        f(structures);
+        f(deploys);
     }
 
     // Runs the registry's deferred destruction and drops the dead entities' components.

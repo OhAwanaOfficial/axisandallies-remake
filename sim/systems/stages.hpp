@@ -7,8 +7,7 @@ namespace corps {
 
 class Sim;
 
-void runEconomy(Sim& sim);      // M6: production, upkeep, shortfall conversion, limits
-void runTimers(Sim& sim);       // M6: construction / pack / unpack / recruit / research timers
+// Economy: runEconomy (systems/economy.hpp). Timers: runBases (systems/bases.hpp).
 void runOrders(Sim& sim);       // M4: regiment/group order state machines -> plans
 void runPathfinding(Sim& sim);  // M4: request queue with a fixed node-expansion budget
 void runMovement(Sim& sim);     // M4: anchors, formation slots, steering, avoidance

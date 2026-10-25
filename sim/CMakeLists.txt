@@ -12,6 +12,8 @@ add_library(sim STATIC
   systems/movement.cpp
   systems/combat.cpp
   systems/morale.cpp
+  systems/economy.cpp
+  systems/bases.cpp
   combat/tuning.cpp
   combat/rules.cpp
   session/hash.cpp
