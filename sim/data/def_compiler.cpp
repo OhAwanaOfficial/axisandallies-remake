@@ -208,11 +208,18 @@ private:
                       : has("tank") ? UnitMoveClass::Tracked
                       : has("vehicle") ? UnitMoveClass::Wheeled
                                        : UnitMoveClass::Foot;
-        u.requiredStructures = asciiLowerCopy(text(childOf(t, "ElementComponent"), "required_structures"));
+        const ResolvedNode* element = childOf(t, "ElementComponent");
+        u.requiredStructures = asciiLowerCopy(text(element, "required_structures"));
+        u.requiredStructureIds = words(element, "required_structures");
+        u.requiredProperties = words(element, "required_properties");
         const ResolvedNode* econ = childOf(t, "EconomyComponent");
         u.cost = resources(childOf(econ, "Cost"));
         u.upkeep = resources(childOf(econ, "Upkeep"));
+        u.production = resources(childOf(econ, "Production"));
         u.resourcePrefix = text(childOf(t, "View"), "resource_prefix");
+        const ResolvedNode* mobile = childOf(t, "MobileDeploymentComponent");
+        u.unpackToIds = asciiLowerCopy(text(mobile, "unpack_to_actor_ids"));
+        u.unpackingLength = fx(mobile, "unpacking_length");
         defs.units.push_back(std::move(u));
     }
 
@@ -294,7 +301,60 @@ private:
         b.cost = resources(childOf(econ, "Cost"));
         b.upkeep = resources(childOf(econ, "Upkeep"));
         b.production = resources(childOf(econ, "Production"));
+        const ResolvedNode* size = childOf(t, "Size");
+        const std::string shape = asciiUpperCopy(text(size, "blocking_shape"));
+        b.shape = shape == "SQUARE" ? FootprintShape::Square : shape == "RECT" ? FootprintShape::Rect : FootprintShape::Circle;
+        b.squareSize = fx(size, "square_size");
+        b.rectWidth = fx(size, "rect_width");
+        b.rectHeight = fx(size, "rect_height");
+        b.padding = fx(childOf(t, "BaseTerrain"), "padding");
+        const ResolvedNode* flags = childOf(t, "Flags");
+        b.tileLocked = flag(flags, "tile_locked", false);
+        b.axisLocked = flag(flags, "axis_locked", false);
+        b.providesCorps = std::find(b.properties.begin(), b.properties.end(), "corpshq") != b.properties.end();
+        const ResolvedNode* mobile = childOf(t, "MobileDeploymentComponent");
+        b.mobile = mobile != nullptr;
+        b.packHealthMin = fx(mobile, "pack_health_min");
+        b.packingLength = fx(mobile, "packing_length");
+        b.unpackingLength = fx(mobile, "unpacking_length");
+        const ResolvedNode* deploy = childOf(childOf(t, "DenizenComponent"), "DeploymentInfo");
+        b.creationOffset = point(deploy, "creation_offset");
+        b.deploymentOffset = point(deploy, "deployment_offset");
+        const ResolvedNode* rc2 = childOf(t, "ResearchComponent");
+        for (std::size_t i = 0; i < countOf(rc2, "ResearchItem"); ++i) {
+            const ResolvedNode* item = childOf(rc2, "ResearchItem", i);
+            ResearchItemDef d;
+            d.propertyIds = asciiLowerCopy(text(item, "property_IDS"));
+            const std::string scope = asciiUpperCopy(text(item, "type"));
+            d.scope = scope == "LOCAL" ? ResearchItemDef::Scope::Local
+                      : scope == "SUPPORT" ? ResearchItemDef::Scope::Support
+                                           : ResearchItemDef::Scope::Global;
+            d.time = fx(item, "research_time");
+            d.cost = resources(childOf(item, "ResearchCost"));
+            if (!d.propertyIds.empty()) b.research.push_back(std::move(d));
+        }
         defs.buildings.push_back(std::move(b));
+    }
+
+    // The start location (Thing start_loc) gives a kingdom its building limit.
+    void startLocation(const Record& r) {
+        defs.economy.startLocation = resources(childOf(childOf(&r.tree, "EconomyComponent"), "Production"));
+    }
+
+    // Resource ammo / oil: PurchaseCost money (the shortfall price, GAME_DESIGN §5).
+    void resource(const Record& r, const std::string& ids) {
+        const ResolvedNode* pc = childOf(&r.tree, "PurchaseCost");
+        if (pc == nullptr) return;
+        if (ids == "ammo") defs.economy.ammoPrice = fx(pc, "money", defs.economy.ammoPrice);
+        if (ids == "oil") defs.economy.oilPrice = fx(pc, "money", defs.economy.oilPrice);
+    }
+
+    // A "right, forward" point (DeploymentInfo offsets) in the sim's frame (+x forward, +y left).
+    FVec2 point(const ResolvedNode* n, std::string_view key) {
+        const ResolvedField* f = fieldOf(n, key);
+        if (f == nullptr || !f->hasValue() || isNull(f->text())) return {};
+        const auto p = readPoint(f->text(), 2, site(f, key));
+        return {p[1], -p[0]};
     }
 
     // Data offsets are (right, forward); the sim's regiment frame is (+x forward, +y left).
@@ -515,6 +575,83 @@ void sortByIds(std::vector<T>& v) {
     std::stable_sort(v.begin(), v.end(), [](const T& a, const T& b) { return asciiLowerCopy(a.ids) < asciiLowerCopy(b.ids); });
 }
 
+}  // namespace
+
+// Trucks, HQ regiments, convoys and recruit lists (GAME_DESIGN §7). Runs after every def is
+// sorted and regiment slots are resolved; it may add regiments, so it re-sorts them and resolves
+// regiment indexes last.
+void linkBases(DefSet& defs, tgi::Diagnostics& diags) {
+    for (UnitDef& u : defs.units) {
+        u.unpackTo = u.unpackToIds.empty() ? kNoDef : defs.buildingIndex(u.unpackToIds);
+        if (!u.unpackToIds.empty() && u.unpackTo == kNoDef) {
+            diags.report(DiagCode::BadValue, "", 0, "truck " + u.ids + ": unpacks to unknown building '" + u.unpackToIds + "'");
+        }
+    }
+    // A truck no regiment holds travels alone: give it a one-slot convoy regiment, laid out by the
+    // one-element "convoy" layout (the truck on the anchor; without a layout a lone unit's slot
+    // would trail 1.5 behind and beside it, into buildings it drives around).
+    std::vector<bool> held(defs.units.size(), false);
+    for (const RegimentDef& g : defs.regiments) {
+        for (const ElementRef& e : g.slots) {
+            if (e.kind == ElementKind::Unit) held[e.index] = true;
+        }
+    }
+    for (std::uint32_t i = 0; i < defs.units.size(); ++i) {
+        const UnitDef& u = defs.units[i];
+        if (u.unpackTo == kNoDef || held[i]) continue;
+        RegimentDef g;
+        g.ids = "convoy_" + asciiLowerCopy(u.ids);
+        g.nameKey = u.nameKey;
+        g.convoy = true;
+        g.slotIds = {asciiLowerCopy(u.ids)};
+        g.slots = {{ElementKind::Unit, i}};
+        g.recruitTime = u.unpackingLength;  // a bare truck rolls out of its depot as fast as it unpacks
+        g.layoutIds = "convoy";
+        defs.regiments.push_back(std::move(g));
+    }
+    if (defs.layoutIndex("convoy") == kNoDef) {
+        LayoutDef l;
+        l.ids = "convoy";
+        l.slots.push_back({"truck", 1, true, true, false});
+        l.elementSlot = {0};
+        LayoutFormationDef f;
+        f.offsets = {FVec2{}};
+        l.formations.push_back(std::move(f));
+        defs.layouts.push_back(std::move(l));
+        sortByIds(defs.layouts);
+    }
+    sortByIds(defs.regiments);
+    for (RegimentDef& g : defs.regiments) g.layoutIndex = g.layoutIds.empty() ? kNoDef : defs.layoutIndex(g.layoutIds);
+    for (std::uint32_t bi = 0; bi < defs.buildings.size(); ++bi) {
+        BuildingDef& b = defs.buildings[bi];
+        for (std::uint32_t ui = 0; ui < defs.units.size() && b.truck == kNoDef; ++ui) {
+            if (defs.units[ui].unpackTo == bi) b.truck = ui;
+        }
+        for (std::uint32_t gi = 0; gi < defs.regiments.size(); ++gi) {
+            for (const ElementRef& e : defs.regiments[gi].slots) {
+                if (b.truck != kNoDef && b.packedRegiment == kNoDef && e.kind == ElementKind::Unit && e.index == b.truck) {
+                    b.packedRegiment = gi;
+                }
+                if (b.unpackedRegiment == kNoDef && e.kind == ElementKind::Building && e.index == bi) b.unpackedRegiment = gi;
+            }
+        }
+        if (b.mobile && b.unpackingLength <= Fixed{} && b.truck != kNoDef) b.unpackingLength = defs.units[b.truck].unpackingLength;
+        for (ResearchItemDef& r : b.research) r.property = defs.propertyIndex(r.propertyIds);
+        b.recruitRefs.clear();
+        for (const std::string& a : b.recruits) {
+            RecruitRef ref;
+            ref.ids = a;
+            ref.regiment = defs.regimentIndex(a);
+            if (ref.regiment == kNoDef) {
+                if (const std::uint32_t ui = defs.unitIndex(a); ui != kNoDef) ref.regiment = defs.regimentIndex("convoy_" + a);
+            }
+            if (ref.regiment != kNoDef) b.recruitRefs.push_back(std::move(ref));
+        }
+    }
+}
+
+namespace {
+
 DefSet Compiler::run() {
     const Symbol thingSym = sym("thing");
     const Symbol abilitySym = sym("abilitydefinition");
@@ -527,6 +664,7 @@ DefSet Compiler::run() {
     const Symbol targetTypeSym = sym("targettype");
     const Symbol propertySym = sym("property");
     const Symbol terrainSym = sym("terrain");
+    const Symbol resourceSym = sym("resource");
     std::map<std::string, std::size_t> categories;
 
     // byIds is sorted by (type symbol, IDS), so this walk is deterministic.
@@ -541,6 +679,7 @@ DefSet Compiler::run() {
             else if (category == "ORGANIZATION") regiment(r, ids);
             else if (category == "BUILDING") building(r, ids);
             else if (category == "PROJECTILE") projectile(r, ids);
+            else if (category == "START_LOC") startLocation(r);
             else ++stats.thingsSkipped;
         } else if (e.type == abilitySym) {
             defs.abilities.push_back(ability(&r.tree, ids, ""));
@@ -560,11 +699,18 @@ DefSet Compiler::run() {
             property(r, ids);
         } else if (e.type == terrainSym) {
             terrain(r, ids);
+        } else if (e.type == resourceSym) {
+            resource(r, ids);
         }
     }
     for (const DefIndex::Singleton& s : db.defs.singletons) {
         if (s.type == svarsSym) svars(s.merged);
     }
+    EconomyDef& econ = defs.economy;
+    econ.startMoney = defs.svars.getFixed("ResourceStockpileDefault", econ.startMoney);
+    econ.stockpileMax = defs.svars.getFixed("EconomyStockpileResourceMax", econ.stockpileMax);
+    econ.limitedMax = defs.svars.getFixed("EconomyLimitedResourceMax", econ.limitedMax);
+    econ.buildingPadding = defs.svars.getFixed("BuildingPaddingMeters", econ.buildingPadding);
 
     // Inline abilities were appended in unit/building order; sort everything by IDS and remap.
     std::vector<std::string> abilityIdsByOld;
@@ -637,6 +783,7 @@ DefSet Compiler::run() {
             g.slots.push_back(ref);
         }
     }
+    linkBases(defs, diags);
 
     stats.categories.assign(categories.begin(), categories.end());
     defs.stats = stats;

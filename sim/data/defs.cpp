@@ -135,7 +135,7 @@ bool SVarsDef::getBool(std::string_view name, bool fallback) const {
 std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     ByteWriter w;
     w.tag("DEFS");
-    w.u32(4);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat; 4: morale, XP)
+    w.u32(5);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat; 4: morale, XP; 5: bases)
     w.u32(static_cast<std::uint32_t>(d.abilities.size()));
     for (const AbilityDef& a : d.abilities) {
         w.str(a.ids);
@@ -182,9 +182,15 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(u.moraleValue);
         putStrings(w, u.properties);
         w.str(u.requiredStructures);
+        putStrings(w, u.requiredStructureIds);
+        putStrings(w, u.requiredProperties);
         put(w, u.cost);
         put(w, u.upkeep);
+        put(w, u.production);
         w.str(u.resourcePrefix);
+        w.str(u.unpackToIds);
+        w.u32(u.unpackTo);
+        w.fixed(u.unpackingLength);
     }
     w.u32(static_cast<std::uint32_t>(d.regiments.size()));
     for (const RegimentDef& g : d.regiments) {
@@ -222,6 +228,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
             w.fixed(l.moraleRecovery);
         }
         w.fixed(g.fakeCombatValue);
+        w.boolean(g.convoy);
     }
     w.u32(static_cast<std::uint32_t>(d.buildings.size()));
     for (const BuildingDef& b : d.buildings) {
@@ -236,10 +243,40 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(b.controlRange);
         w.fixed(b.moraleValue);
         putStrings(w, b.recruits);
+        w.u32(static_cast<std::uint32_t>(b.recruitRefs.size()));
+        for (const RecruitRef& r : b.recruitRefs) {
+            w.str(r.ids);
+            w.u32(r.regiment);
+        }
         putStrings(w, b.properties);
         put(w, b.cost);
         put(w, b.upkeep);
         put(w, b.production);
+        w.u8(static_cast<std::uint8_t>(b.shape));
+        w.fixed(b.squareSize);
+        w.fixed(b.rectWidth);
+        w.fixed(b.rectHeight);
+        w.fixed(b.padding);
+        w.boolean(b.tileLocked);
+        w.boolean(b.axisLocked);
+        w.boolean(b.providesCorps);
+        w.boolean(b.mobile);
+        w.fixed(b.packHealthMin);
+        w.fixed(b.packingLength);
+        w.fixed(b.unpackingLength);
+        w.vec2(b.creationOffset);
+        w.vec2(b.deploymentOffset);
+        w.u32(static_cast<std::uint32_t>(b.research.size()));
+        for (const ResearchItemDef& r : b.research) {
+            w.str(r.propertyIds);
+            w.u32(r.property);
+            w.u8(static_cast<std::uint8_t>(r.scope));
+            w.fixed(r.time);
+            put(w, r.cost);
+        }
+        w.u32(b.truck);
+        w.u32(b.packedRegiment);
+        w.u32(b.unpackedRegiment);
     }
     w.u32(static_cast<std::uint32_t>(d.nations.size()));
     for (const NationDef& n : d.nations) {
@@ -331,6 +368,14 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.fixed(p.life);
         w.fixed(p.spread);
     }
+    const EconomyDef& e = d.economy;
+    w.fixed(e.startMoney);
+    w.fixed(e.stockpileMax);
+    w.fixed(e.limitedMax);
+    w.fixed(e.buildingPadding);
+    w.fixed(e.ammoPrice);
+    w.fixed(e.oilPrice);
+    put(w, e.startLocation);
     w.u32(static_cast<std::uint32_t>(d.svars.vars.size()));
     for (const SVar& v : d.svars.vars) {
         w.str(v.name);

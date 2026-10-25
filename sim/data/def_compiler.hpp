@@ -5,6 +5,8 @@
 //   Thing, category UNIT or TRUCK             -> UnitDef (+ its inline abilities -> AbilityDef)
 //   Thing, category ORGANIZATION              -> RegimentDef (slots -> unit/truck or building)
 //   Thing, category BUILDING                  -> BuildingDef
+//   Thing, category START_LOC                 -> EconomyDef::startLocation
+//   Resource (ammo, oil PurchaseCost)         -> EconomyDef prices
 //   AbilityDefinition (top level)             -> AbilityDef
 //   Nation                                    -> NationDef
 //   SVars (singleton, SVars.tgi + SVars_AA)   -> SVarsDef
@@ -18,5 +20,11 @@
 namespace corps {
 
 DefSet compileDefs(const tgi::TgiDatabase& db, tgi::Diagnostics& diags);
+
+// Links bases (M6): trucks to the buildings they unpack into, buildings to their truck and HQ
+// regiments, recruit lists to regiments; adds a "convoy_<truck>" regiment for every truck no
+// regiment holds (and re-sorts the regiments). compileDefs calls it; hand-built DefSets (tests)
+// call it after filling units, regiments (slots resolved) and buildings, sorted by IDS.
+void linkBases(DefSet& defs, tgi::Diagnostics& diags);
 
 }  // namespace corps

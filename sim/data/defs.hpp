@@ -148,6 +148,33 @@ struct WeaponDef {
 
 // What a regiment slot holds: a unit (or truck), or a building (an unpacked HQ).
 enum class ElementKind : std::uint8_t { None = 0, Unit = 1, Building = 2 };
+
+// ResearchComponent/ResearchItem (GAME_DESIGN §9): researching it grants `property` to the
+// kingdom (GLOBAL), to the building (LOCAL) or to a settlement (SUPPORT; not supported yet).
+struct ResearchItemDef {
+    enum class Scope : std::uint8_t { Global = 0, Local = 1, Support = 2 };
+    std::string propertyIds;
+    std::uint32_t property = kNoDef;  // into DefSet::properties
+    Scope scope = Scope::Global;
+    Fixed time;                       // research_time, seconds
+    ResourceAmounts cost;             // ResearchCost
+};
+
+// Size: the footprint a building stamps (PATHFINDING §2.1). SQUARE: square_size cells a side;
+// RECT: rect_width x rect_height (width along the building's right); CIRCLE: blocking_radius.
+enum class FootprintShape : std::uint8_t { Square = 0, Rect = 1, Circle = 2 };
+
+// Economy constants (GAME_DESIGN §5): SVars, the Resource records' PurchaseCost, and what the
+// start location (Thing start_loc) provides a kingdom.
+struct EconomyDef {
+    Fixed startMoney = Fixed::fromInt(500);        // ResourceStockpileDefault
+    Fixed stockpileMax = Fixed::fromInt(99999);    // EconomyStockpileResourceMax
+    Fixed limitedMax = Fixed::fromInt(20);         // EconomyLimitedResourceMax (unit limit cap)
+    Fixed buildingPadding = Fixed::fromInt(2);     // BuildingPaddingMeters: gap between buildings
+    Fixed ammoPrice = Fixed::fromInt(2);           // Resource ammo PurchaseCost money
+    Fixed oilPrice = Fixed::fromInt(3);            // Resource oil PurchaseCost money
+    ResourceAmounts startLocation;                 // start_loc Production (building limit 20)
+};
 struct ElementRef {
     ElementKind kind = ElementKind::None;
     std::uint32_t index = kNoDef;  // into DefSet::units or DefSet::buildings
@@ -182,9 +209,16 @@ struct UnitDef {
     Fixed moraleValue;                     // ElementComponent morale_value: its share of the regiment's morale
     std::vector<std::string> properties;   // property_IDS, in resolved order
     std::string requiredStructures;
+    std::vector<std::string> requiredStructureIds;  // required_structures, split: all are needed
+    std::vector<std::string> requiredProperties;    // ElementComponent required_properties
     ResourceAmounts cost;
     ResourceAmounts upkeep;
+    ResourceAmounts production;            // trucks produce while packed
     std::string resourcePrefix;  // view: model/texture prefix (kept for SimBridge spawning visuals)
+    // MobileDeploymentComponent of a truck: the building it unpacks into.
+    std::string unpackToIds;
+    std::uint32_t unpackTo = kNoDef;       // into DefSet::buildings
+    Fixed unpackingLength;                 // seconds
 };
 
 struct RegimentDef {
@@ -210,6 +244,13 @@ struct RegimentDef {
     ResourceAmounts upkeep;
     std::vector<ExperienceLevelDef> experienceLevels;  // ascending; empty: no ExperienceComponent
     Fixed fakeCombatValue = Fixed::fromInt(-1);        // ExperienceComponent fake_cv_value (-1: none)
+    bool convoy = false;  // synthetic "convoy_<truck>": a truck no regiment holds, travelling alone
+};
+
+// A RecruitComponent entry, resolved: a regiment, or a bare truck (recruited as its convoy).
+struct RecruitRef {
+    std::string ids;
+    std::uint32_t regiment = kNoDef;  // into DefSet::regiments (a truck's convoy regiment)
 };
 
 struct BuildingDef {
@@ -226,10 +267,33 @@ struct BuildingDef {
     bool checkDamageResistance = false;
     Fixed moraleValue;                  // ElementComponent morale_value (HQ buildings in a regiment)
     std::vector<std::string> recruits;  // RecruitComponent actor_ids (regiments it can recruit)
+    std::vector<RecruitRef> recruitRefs;  // the same, resolved (entries that resolve to nothing dropped)
     std::vector<std::string> properties;
     ResourceAmounts cost;
     ResourceAmounts upkeep;
     ResourceAmounts production;
+    // Size and placement (GAME_DESIGN §7).
+    FootprintShape shape = FootprintShape::Circle;
+    Fixed squareSize;
+    Fixed rectWidth;
+    Fixed rectHeight;
+    Fixed padding;                      // BaseTerrain padding: cells around it that must be buildable
+    bool tileLocked = false;            // Flags tile_locked: the footprint snaps to whole cells
+    bool axisLocked = false;            // Flags axis_locked: facing in steps of 90 degrees
+    bool providesCorps = false;         // property corpshq: one per kingdom
+    // MobileDeploymentComponent: it packs onto a truck.
+    bool mobile = false;
+    Fixed packHealthMin;                // fraction of health needed to pack
+    Fixed packingLength;                // seconds
+    Fixed unpackingLength;              // seconds
+    // DenizenComponent/DeploymentInfo, in the building's frame (+x forward, +y left).
+    FVec2 creationOffset;               // where recruited units appear
+    FVec2 deploymentOffset;             // where a recruited regiment forms up
+    std::vector<ResearchItemDef> research;
+    // Resolved: the truck that unpacks into it, and its HQ regiment packed / unpacked.
+    std::uint32_t truck = kNoDef;             // into DefSet::units
+    std::uint32_t packedRegiment = kNoDef;    // into DefSet::regiments (the truck's regiment or convoy)
+    std::uint32_t unpackedRegiment = kNoDef;  // into DefSet::regiments (slot holding this building)
 };
 
 struct NationDef {
@@ -335,6 +399,7 @@ struct DefSet {
     std::vector<TerrainDef> terrains;
     std::vector<ProjectileDef> projectiles;
     SVarsDef svars;
+    EconomyDef economy;
     std::uint64_t dataHash = 0;
     DefCompileStats stats;
 
