@@ -220,6 +220,7 @@ private:
         const ResolvedNode* mobile = childOf(t, "MobileDeploymentComponent");
         u.unpackToIds = asciiLowerCopy(text(mobile, "unpack_to_actor_ids"));
         u.unpackingLength = fx(mobile, "unpacking_length");
+        u.resupplyRate = fx(element, "resupply_rate");
         defs.units.push_back(std::move(u));
     }
 
@@ -242,6 +243,8 @@ private:
         g.shortfallDamageRate = fx(org, "shortfall_damage_rate");
         g.recruitFull = flag(org, "recruit_full", false);
         g.inSupplyDetached = flag(org, "in_supply_detached", true);
+        g.supplyUsed = flag(org, "supply_used", true);
+        g.hq = childOf(t, "HQComponent") != nullptr;
         g.detectionRange = fx(childOf(t, "DetectionComponent"), "detection_range");
         g.transportActor = asciiLowerCopy(text(t, "transport_actor"));
         g.properties = properties(t);
@@ -317,6 +320,14 @@ private:
         b.packHealthMin = fx(mobile, "pack_health_min");
         b.packingLength = fx(mobile, "packing_length");
         b.unpackingLength = fx(mobile, "unpacking_length");
+        const ResolvedNode* supply = childOf(t, "SupplyComponent");
+        b.supplyRange = fx(supply, "supply_range");
+        b.supplyRelay = flag(supply, "is_relay", false);
+        b.stockpileMax = fx(supply, "stockpile_max");
+        b.supplyRequired = flag(econ, "supply_required", false);
+        b.captureable = flag(body, "captureable", false);
+        b.destructible = flag(body, "destructible", true);
+        b.cityZoneRadius = fx(childOf(t, "CityComponent"), "zone_radius");
         const ResolvedNode* deploy = childOf(childOf(t, "DenizenComponent"), "DeploymentInfo");
         b.creationOffset = point(deploy, "creation_offset");
         b.deploymentOffset = point(deploy, "deployment_offset");
@@ -637,6 +648,7 @@ void linkBases(DefSet& defs, tgi::Diagnostics& diags) {
         }
         if (b.mobile && b.unpackingLength <= Fixed{} && b.truck != kNoDef) b.unpackingLength = defs.units[b.truck].unpackingLength;
         for (ResearchItemDef& r : b.research) r.property = defs.propertyIndex(r.propertyIds);
+        b.hq = b.providesCorps;
         b.recruitRefs.clear();
         for (const std::string& a : b.recruits) {
             RecruitRef ref;
@@ -646,6 +658,16 @@ void linkBases(DefSet& defs, tgi::Diagnostics& diags) {
                 if (const std::uint32_t ui = defs.unitIndex(a); ui != kNoDef) ref.regiment = defs.regimentIndex("convoy_" + a);
             }
             if (ref.regiment != kNoDef) b.recruitRefs.push_back(std::move(ref));
+        }
+    }
+    for (std::uint32_t bi = 0; bi < defs.buildings.size(); ++bi) {
+        BuildingDef& b = defs.buildings[bi];
+        if (b.unpackedRegiment != kNoDef && defs.regiments[b.unpackedRegiment].hq) b.hq = true;
+        if (b.packedRegiment != kNoDef && defs.regiments[b.packedRegiment].hq) b.hq = true;
+    }
+    for (RegimentDef& g : defs.regiments) {
+        for (const ElementRef& e : g.slots) {
+            if (e.kind == ElementKind::Unit && defs.units[e.index].unpackTo != kNoDef && defs.buildings[defs.units[e.index].unpackTo].hq) g.hq = true;
         }
     }
 }
@@ -711,6 +733,14 @@ DefSet Compiler::run() {
     econ.stockpileMax = defs.svars.getFixed("EconomyStockpileResourceMax", econ.stockpileMax);
     econ.limitedMax = defs.svars.getFixed("EconomyLimitedResourceMax", econ.limitedMax);
     econ.buildingPadding = defs.svars.getFixed("BuildingPaddingMeters", econ.buildingPadding);
+    econ.siegeDamageSeconds = defs.svars.getFixed("UnderSiegeRecentlyDamagedSeconds", econ.siegeDamageSeconds);
+    econ.underSiegeRate = defs.svars.getFixed("DenizenResupplyRateUnderSiege", econ.underSiegeRate);
+    econ.supplyUnderSiege = defs.svars.getBool("SupplyProvideUnderSiege", econ.supplyUnderSiege);
+    econ.moraleSupplyBonus = defs.svars.getFixed("MoraleSupplyBonus", econ.moraleSupplyBonus);
+    econ.captureHealthFactor = defs.svars.getFixed("CaptureHealthFactor", econ.captureHealthFactor);
+    econ.captureXpMultiplier = defs.svars.getFixed("ExperienceCaptureMultiplier", econ.captureXpMultiplier);
+    econ.cityVictoryRatio = defs.svars.getFixed("CityVictoryRatio", econ.cityVictoryRatio);
+    econ.teamVictory = defs.svars.getBool("TeamVictory", econ.teamVictory);
 
     // Inline abilities were appended in unit/building order; sort everything by IDS and remap.
     std::vector<std::string> abilityIdsByOld;

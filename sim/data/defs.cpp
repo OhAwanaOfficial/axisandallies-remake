@@ -135,7 +135,7 @@ bool SVarsDef::getBool(std::string_view name, bool fallback) const {
 std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     ByteWriter w;
     w.tag("DEFS");
-    w.u32(5);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat; 4: morale, XP; 5: bases)
+    w.u32(6);  // layout version (2: move class, turn type, layouts, formations, group formations; 3: combat; 4: morale, XP; 5: bases; 6: supply, cities)
     w.u32(static_cast<std::uint32_t>(d.abilities.size()));
     for (const AbilityDef& a : d.abilities) {
         w.str(a.ids);
@@ -191,6 +191,7 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.str(u.unpackToIds);
         w.u32(u.unpackTo);
         w.fixed(u.unpackingLength);
+        w.fixed(u.resupplyRate);
     }
     w.u32(static_cast<std::uint32_t>(d.regiments.size()));
     for (const RegimentDef& g : d.regiments) {
@@ -229,6 +230,8 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         }
         w.fixed(g.fakeCombatValue);
         w.boolean(g.convoy);
+        w.boolean(g.supplyUsed);
+        w.boolean(g.hq);
     }
     w.u32(static_cast<std::uint32_t>(d.buildings.size()));
     for (const BuildingDef& b : d.buildings) {
@@ -277,6 +280,14 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
         w.u32(b.truck);
         w.u32(b.packedRegiment);
         w.u32(b.unpackedRegiment);
+        w.fixed(b.supplyRange);
+        w.boolean(b.supplyRelay);
+        w.fixed(b.stockpileMax);
+        w.boolean(b.supplyRequired);
+        w.boolean(b.captureable);
+        w.boolean(b.destructible);
+        w.fixed(b.cityZoneRadius);
+        w.boolean(b.hq);
     }
     w.u32(static_cast<std::uint32_t>(d.nations.size()));
     for (const NationDef& n : d.nations) {
@@ -376,6 +387,14 @@ std::vector<std::uint8_t> serializeDefs(const DefSet& d) {
     w.fixed(e.ammoPrice);
     w.fixed(e.oilPrice);
     put(w, e.startLocation);
+    w.fixed(e.siegeDamageSeconds);
+    w.fixed(e.underSiegeRate);
+    w.boolean(e.supplyUnderSiege);
+    w.fixed(e.moraleSupplyBonus);
+    w.fixed(e.captureHealthFactor);
+    w.fixed(e.captureXpMultiplier);
+    w.fixed(e.cityVictoryRatio);
+    w.boolean(e.teamVictory);
     w.u32(static_cast<std::uint32_t>(d.svars.vars.size()));
     for (const SVar& v : d.svars.vars) {
         w.str(v.name);

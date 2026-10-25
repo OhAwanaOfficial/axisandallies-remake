@@ -38,7 +38,52 @@ def terrain_chunk(side: int, names: list[str], tiles: list[tuple[int, int, int, 
     return out + b"TRAILER"
 
 
+def thing_record(ids: str, kind: int, obj: int, pos: tuple[float, float, float], facing: tuple[float, float], owner: int,
+                 name: str = "") -> bytes:
+    body = struct.pack("<III", kind, obj, 2) + bytes(6) + struct.pack("<5f", *pos, *facing)
+    body += bytes(rmp.THING_OWNER_TAG - len(body)) + struct.pack("<II", 14, owner) + bytes(16)
+    if name:
+        body += wstr(name) + bytes(8)
+    return wstr(ids) + body
+
+
 class RmpTests(unittest.TestCase):
+    def test_translations_follow_chains_inside_comments(self) -> None:
+        text = """/* commented out
+[Translate template=Translate]
+{ node = Thing
+  ids_old = chaparral_village_town_center
+  ids_new = mediterranean_city_center01 }
+*/
+[Translate template=Translate]
+{ node = Thing
+  ids_old = mediterranean_city_center01
+  ids_new = mediterranean_city_center01_large }"""
+        renames = rmp.translations(text)
+        self.assertEqual(rmp.translated("Chaparral_Village_Town_Center", renames), "mediterranean_city_center01_large")
+        self.assertEqual(rmp.translated("start_loc", renames), "start_loc")
+
+    def test_things_kingdoms_rules(self) -> None:
+        recs = [thing_record("chaparral_village_town_center", 3, 6, (210.0, 74.0, 2.0), (0.0, -1.0), 5, "name_6"),
+                thing_record("placeholder_corpsunpacked", 3, 75, (205.0, 145.0, 2.0), (0.0, -1.0), 1)]
+        things = struct.pack("<II", 0, len(recs)) + b"".join(recs)
+        index = struct.pack("<II", 0, len(recs)) + b"".join(struct.pack("<I", len(r)) for r in recs)
+        got = rmp.decode_things(things, index)
+        self.assertEqual([t.ids for t in got], ["chaparral_village_town_center", "placeholder_corpsunpacked"])
+        self.assertEqual((got[0].x, got[0].y, got[0].owner, got[0].name), (210.0, 74.0, 5, "name_6"))
+        self.assertEqual((got[1].x, got[1].y, got[1].owner, got[1].name), (205.0, 145.0, 1, ""))
+        kingdoms = b""
+        for obj, name, color in [(1, "kingdom_0", "blue"), (2, "kingdom_1", "red")]:
+            kingdoms += wstr("kingdom") + struct.pack("<III", 4, obj, 2) + wstr(name) + bytes(20) + wstr(name) + wstr(color)
+        k = rmp.decode_kingdoms(struct.pack("<II", 3, 2) + kingdoms)
+        self.assertEqual([(x.object_id, x.name, x.color) for x in k], [(1, "kingdom_0", "blue"), (2, "kingdom_1", "red")])
+        rules = struct.pack("<II", 4, 0) + wstr("NORMAL") + struct.pack("<I", 3)
+        rules += wstr("Rated") + b"\0" + struct.pack("<IB", 0, 1)
+        rules += wstr("CityVictoryRatio") + b"\0" + struct.pack("<If", 1, 0.5)
+        rules += wstr("ResourceStockpileDefault") + b"\0" + struct.pack("<If", 2, 1000.0)
+        got_rules = rmp.decode_rules(rules)
+        self.assertEqual([(x.name, x.value) for x in got_rules], [("Rated", 1.0), ("CityVictoryRatio", 0.5), ("ResourceStockpileDefault", 1000.0)])
+
     def test_height_layer(self) -> None:
         h = rmp.decode_height(height_chunk(5, 2.0, 3.5))
         self.assertEqual(h.width, 5)

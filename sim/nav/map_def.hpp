@@ -13,7 +13,9 @@
 #include <string_view>
 #include <vector>
 
+#include "math/angle.hpp"
 #include "math/fixed.hpp"
+#include "math/fvec2.hpp"
 
 namespace corps::nav {
 
@@ -33,6 +35,25 @@ const char* terrainKindName(TerrainKind k);
 constexpr std::uint8_t kCostUnit = 16;
 std::uint8_t terrainCost(TerrainKind k, MoveClass c);
 
+// A placed object of an original map (DYNAMIC_THINGS, tools/rmp.py): a Thing by IDS at a position,
+// owned by one of the map's kingdoms (index into MapDef::kingdoms; -1: none).
+struct MapThing {
+    std::string ids;  // after translate.tgi renames (tools/rmp.py "ids_translated")
+    FVec2 position;
+    Angle facing;
+    std::int32_t owner = -1;
+    std::string name;  // map string key ("name_6"), if any
+};
+struct MapKingdom {
+    std::string name;   // kingdom_0 ...
+    std::string color;  // blue, red, gray ...
+};
+// A match rule of the map (RULES: CityVictoryRatio, ResourceStockpileDefault, ...).
+struct MapRule {
+    std::string name;
+    Fixed value;
+};
+
 struct MapDef {
     std::string name;
     std::uint32_t width = 0;   // cells
@@ -42,6 +63,9 @@ struct MapDef {
     std::vector<std::string> terrainNames;
     std::uint32_t heightWidth = 0;          // vertices per row (view-only)
     std::vector<Fixed> heights;             // view-only ground height per vertex
+    std::vector<MapThing> things;           // placed objects (towns, start locations, ...), file order
+    std::vector<MapKingdom> kingdoms;
+    std::vector<MapRule> rules;
     std::uint64_t mapHash = 0;              // xxh3 of the canonical bytes (call finalize())
 
     std::size_t cellCount() const { return static_cast<std::size_t>(width) * height; }
@@ -50,6 +74,8 @@ struct MapDef {
     }
     // Validates sizes and computes mapHash. false if inconsistent.
     bool finalize();
+    // A rule's value (case-insensitive name), or `fallback`.
+    Fixed rule(std::string_view ruleName, Fixed fallback) const;
 };
 
 // Deterministic test map (PATHFINDING §8): flat ground with a blocked border ring, ocean blobs

@@ -174,6 +174,15 @@ struct EconomyDef {
     Fixed ammoPrice = Fixed::fromInt(2);           // Resource ammo PurchaseCost money
     Fixed oilPrice = Fixed::fromInt(3);            // Resource oil PurchaseCost money
     ResourceAmounts startLocation;                 // start_loc Production (building limit 20)
+    // Supply, cities and victory (M6 part 2, GAME_DESIGN §8, §12).
+    Fixed siegeDamageSeconds = Fixed::fromInt(7);  // UnderSiegeRecentlyDamagedSeconds
+    Fixed underSiegeRate = Fixed::fromRatio(1, 4); // DenizenResupplyRateUnderSiege (also the bankrupt factor)
+    bool supplyUnderSiege = true;                  // SupplyProvideUnderSiege: a besieged zone still supplies (slowly)
+    Fixed moraleSupplyBonus = Fixed::fromInt(1);   // MoraleSupplyBonus
+    Fixed captureHealthFactor = Fixed::fromRatio(3, 10);  // CaptureHealthFactor
+    Fixed captureXpMultiplier = Fixed::fromInt(1);  // ExperienceCaptureMultiplier
+    Fixed cityVictoryRatio;                        // CityVictoryRatio (0: off)
+    bool teamVictory = true;                       // TeamVictory
 };
 struct ElementRef {
     ElementKind kind = ElementKind::None;
@@ -219,6 +228,7 @@ struct UnitDef {
     std::string unpackToIds;
     std::uint32_t unpackTo = kNoDef;       // into DefSet::buildings
     Fixed unpackingLength;                 // seconds
+    Fixed resupplyRate;                    // ElementComponent resupply_rate: in supply it heals this x health a minute
 };
 
 struct RegimentDef {
@@ -245,6 +255,8 @@ struct RegimentDef {
     std::vector<ExperienceLevelDef> experienceLevels;  // ascending; empty: no ExperienceComponent
     Fixed fakeCombatValue = Fixed::fromInt(-1);        // ExperienceComponent fake_cv_value (-1: none)
     bool convoy = false;  // synthetic "convoy_<truck>": a truck no regiment holds, travelling alone
+    bool supplyUsed = true;  // OrganizationComponent supply_used: it heals and is replaced in supply
+    bool hq = false;         // HQComponent, or a convoy of an HQ's truck: keeps its kingdom in the game
 };
 
 // A RecruitComponent entry, resolved: a regiment, or a bare truck (recruited as its convoy).
@@ -294,6 +306,15 @@ struct BuildingDef {
     std::uint32_t truck = kNoDef;             // into DefSet::units
     std::uint32_t packedRegiment = kNoDef;    // into DefSet::regiments (the truck's regiment or convoy)
     std::uint32_t unpackedRegiment = kNoDef;  // into DefSet::regiments (slot holding this building)
+    // Supply (SupplyComponent, EconomyComponent supply_required) and cities (CityComponent, M6 part 2).
+    Fixed supplyRange;                  // 0: no supply zone
+    bool supplyRelay = false;           // is_relay: supplies only while itself in supply
+    Fixed stockpileMax;                 // stockpile_max (kept; not used yet)
+    bool supplyRequired = false;        // produces only while in supply
+    bool captureable = false;           // BodyComponent captureable (cities)
+    bool destructible = false;          // BodyComponent destructible (cities are not)
+    Fixed cityZoneRadius;               // CityComponent zone_radius; > 0: a city centre
+    bool hq = false;                    // a Corps HQ or division HQ: keeps its kingdom in the game
 };
 
 struct NationDef {

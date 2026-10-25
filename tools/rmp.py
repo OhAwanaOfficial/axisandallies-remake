@@ -5,11 +5,13 @@
   python -I tools/rmp.py "<game>/Data.rwd" --survey          # header facts for every map in the archive
 
 Writes DIR/map.json (sizes, terrain name table, per-tile and per-vertex layers, row-major, row 0 =
-world y 0) and PNG previews: height.png, mountain.png, surface.png, terrain.png, class.png,
-blocking.png, settlement.png. Decoded so far: map size, the two height layers, terrain type per
-tile, terrain class (ground / mountain / water / map border), settlement-zone flag, blocking.
-Not decoded: the TERRAIN trailer (about 99 KB on Golden Fields), the per-vertex byte after each
-height grid, objects (DYNAMIC_THINGS) and everything else. See ASSET_PIPELINE section 2.1.
+world y 0; placed things, kingdoms and match rules) and PNG previews: height.png, mountain.png,
+surface.png, terrain.png, class.png, blocking.png, settlement.png. Decoded so far: map size, the
+two height layers, terrain type per tile, terrain class (ground / mountain / water / map border),
+settlement-zone flag, blocking; placed objects (DYNAMIC_THINGS: IDS, position, facing, owning
+kingdom, name), KINGDOMS (object id, name, colour) and RULES (name, value). Not decoded: the
+TERRAIN trailer (about 99 KB on Golden Fields), the per-vertex byte after each height grid, the
+rest of each thing record, and the other chunks. See ASSET_PIPELINE section 2.1.
 
 Never commit or upload the output: it is derived from the player's game files.
 """
@@ -19,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 import zlib
@@ -174,6 +177,141 @@ class DecodedMap:
     height: HeightLayer
     mountain: HeightLayer
     terrain: TerrainLayer
+    things: list["Thing"] = field(default_factory=list)
+    kingdoms: list["Kingdom"] = field(default_factory=list)
+    rules: list["Rule"] = field(default_factory=list)
+
+
+@dataclass
+class Thing:
+    """A placed object (DYNAMIC_THINGS record)."""
+    ids: str
+    x: float  # metres (= sim cells)
+    y: float
+    z: float
+    ox: float  # facing vector
+    oy: float
+    owner: int  # the owning kingdom's object id (KINGDOMS), 0 if none
+    name: str  # a map string key such as "name_6" ("" if none)
+
+
+@dataclass
+class Kingdom:
+    object_id: int
+    name: str  # kingdom_0 ...
+    color: str
+
+
+@dataclass
+class Rule:
+    name: str
+    type: int  # 0 bool, 1 ratio, 2 number, 3 int
+    value: float
+
+
+# DYNAMIC_THINGS record, after the u16-prefixed IDS: u32 kind, u32 object id, u32 2, 6 zero bytes,
+# f32 x, y, z, f32 facing x, y, ...; at body offset 68 a u32 14 and then the owner (a kingdom's object
+# id). Named things (town centres) carry a u16-prefixed "name_N" string near the end. Verified on
+# Golden Fields against the town centres, the start locations and the Corps placeholders.
+THING_POS = 18
+THING_OWNER_TAG = 68
+
+
+def decode_things(d: bytes, index: bytes) -> list[Thing]:
+    (count,) = struct.unpack_from("<I", index, 4)
+    sizes = struct.unpack_from(f"<{count}I", index, 8)
+    out = []
+    p = 8
+    for size in sizes:
+        if p + size > len(d):
+            raise MapError("thing record runs past the chunk")
+        ids, e = _wstr(d, p)
+        x, y, z, ox, oy = struct.unpack_from("<5f", d, e + THING_POS)
+        owner = 0
+        if e + THING_OWNER_TAG + 8 <= p + size and struct.unpack_from("<I", d, e + THING_OWNER_TAG)[0] == 14:
+            (owner,) = struct.unpack_from("<I", d, e + THING_OWNER_TAG + 4)
+        name = ""
+        i = e + THING_OWNER_TAG + 8
+        while i + 2 < p + size:  # a "name_N" string, if any
+            (n,) = struct.unpack_from("<H", d, i)
+            if 3 <= n <= 32 and i + 2 + 2 * n <= p + size:
+                try:
+                    s = d[i + 2:i + 2 + 2 * n].decode("utf-16-le")
+                except UnicodeDecodeError:
+                    s = ""
+                if s.startswith("name_") and s.isascii() and s.isprintable():
+                    name = s
+                    break
+            i += 1
+        out.append(Thing(ids, x, y, z, ox, oy, owner, name))
+        p += size
+    return out
+
+
+TRANSLATE_PAIR = re.compile(r"ids_old\s*=\s*([A-Za-z0-9_]+)\s+ids_new\s*=\s*([A-Za-z0-9_]+)")
+
+
+def translations(text: str) -> dict[str, str]:
+    """Thing IDS renames from translate.tgi (ids_old -> ids_new, lower case). Read from the raw text,
+    commented-out blocks included: the TGI parser (non-nesting comments) sees lines 1292-5310 as one
+    comment, but maps such as Golden Fields name things only those renames reach
+    (chaparral_village_town_center -> mediterranean_city_center01 -> mediterranean_city_center01_large),
+    so the original game evidently applies them."""
+    out: dict[str, str] = {}
+    for old, new in TRANSLATE_PAIR.findall(text):
+        out.setdefault(old.lower(), new.lower())
+    return out
+
+
+def translated(ids: str, renames: dict[str, str]) -> str:
+    seen = set()
+    cur = ids.lower()
+    while cur in renames and cur not in seen:
+        seen.add(cur)
+        cur = renames[cur]
+    return cur
+
+
+def decode_kingdoms(d: bytes) -> list[Kingdom]:
+    """Each kingdom record: wstr "kingdom" (its Thing), u32 4, u32 object id, u32 2, wstr name; later the
+    name again and its colour."""
+    out = []
+    key = struct.pack("<H", 7) + "kingdom".encode("utf-16-le")
+    p = d.find(key)
+    while p >= 0:
+        e = p + len(key)
+        tag, obj, _two = struct.unpack_from("<III", d, e)
+        if tag == 4:
+            name, q = _wstr(d, e + 12)
+            again = d.find(struct.pack("<H", len(name)) + name.encode("utf-16-le"), q)
+            color = _wstr(d, again + 2 + 2 * len(name))[0] if again >= 0 else ""
+            out.append(Kingdom(obj, name, color))
+        p = d.find(key, e)
+    return out
+
+
+def decode_rules(d: bytes) -> list[Rule]:
+    """u32 version, u32 0, wstr game type, u32 count, then per rule: wstr name, u8 0, u32 type, value
+    (type 0: u8 bool; 1: f32 ratio; 2: f32 number; 3: u32 int)."""
+    _game_type, p = _wstr(d, 8)
+    (count,) = struct.unpack_from("<I", d, p)
+    p += 4
+    out = []
+    for _ in range(count):
+        name, p = _wstr(d, p)
+        (typ,) = struct.unpack_from("<I", d, p + 1)
+        p += 5
+        if typ == 0:
+            v = d[p]
+            p += 1
+        elif typ in (1, 2):
+            (v,) = struct.unpack_from("<f", d, p)
+            p += 4
+        else:
+            (v,) = struct.unpack_from("<I", d, p)
+            p += 4
+        out.append(Rule(name, typ, float(v)))
+    return out
 
 
 def decode_map(data: bytes, source: str) -> DecodedMap:
@@ -187,10 +325,17 @@ def decode_map(data: bytes, source: str) -> DecodedMap:
     terrain = decode_terrain(rwd.rmp_chunk_bytes(data, by["TERRAIN"]))
     if not (height.width == mountain.width == terrain.tiles_per_side + 1):
         raise MapError(f"grid sizes disagree: heights {height.width}, mountain {mountain.width}, tiles {terrain.tiles_per_side}")
-    return DecodedMap(source, [c.name for c in chunks], height, mountain, terrain)
+    m = DecodedMap(source, [c.name for c in chunks], height, mountain, terrain)
+    if "DYNAMIC_THINGS" in by and "DYNAMIC_THINGS_INDEX" in by:
+        m.things = decode_things(rwd.rmp_chunk_bytes(data, by["DYNAMIC_THINGS"]), rwd.rmp_chunk_bytes(data, by["DYNAMIC_THINGS_INDEX"]))
+    if "KINGDOMS" in by:
+        m.kingdoms = decode_kingdoms(rwd.rmp_chunk_bytes(data, by["KINGDOMS"]))
+    if "RULES" in by:
+        m.rules = decode_rules(rwd.rmp_chunk_bytes(data, by["RULES"]))
+    return m
 
 
-def export(m: DecodedMap, out: Path, scale: int) -> dict:
+def export(m: DecodedMap, out: Path, scale: int, renames: dict[str, str] | None = None) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     t, h, mt = m.terrain, m.height, m.mountain
     n, v = t.tiles_per_side, h.width
@@ -236,6 +381,17 @@ def export(m: DecodedMap, out: Path, scale: int) -> dict:
         "vertex_mountain_mm": [int(round(x * 1000)) for x in mt.values],
         "vertex_unknown_byte": list(h.vertex_bytes),
     }
+    # Placed things, kingdoms and rules. Positions and facings as integer millimetres (the sim never
+    # parses floats); `owner` is the kingdom's index in `kingdoms` (-1: none).
+    kingdom_index = {k.object_id: i for i, k in enumerate(m.kingdoms)}
+    renames = renames or {}
+    doc["things"] = [{"ids": t.ids, "ids_translated": translated(t.ids, renames), "x_mm": int(round(t.x * 1000)), "y_mm": int(round(t.y * 1000)),
+                      "facing_x_mm": int(round(t.ox * 1000)), "facing_y_mm": int(round(t.oy * 1000)),
+                      "owner": kingdom_index.get(t.owner, -1), "name": t.name} for t in m.things]
+    doc["kingdoms"] = [{"name": k.name, "color": k.color, "object_id": k.object_id} for k in m.kingdoms]
+    doc["rules"] = [{"name": r.name, "type": r.type, "value": r.value, "value_milli": int(round(r.value * 1000))} for r in m.rules]
+    summary["things"] = len(m.things)
+    summary["kingdoms"] = [k.name for k in m.kingdoms]
     (out / "map.json").write_text(json.dumps(doc), encoding="utf-8")
 
     lo, hi = summary["surface"]["min"], summary["surface"]["max"]
@@ -291,18 +447,23 @@ def main(argv: list[str]) -> int:
                         print(f"FAIL {e.name}: {exc}")
                 print(f"{ok} maps decoded", file=sys.stderr)
             return 0
+        renames: dict[str, str] = {}
         if a.map:
             with open(a.source, "rb") as f:
-                hit = next((e for e in rwd.read_toc(f) if e.name.lower() == a.map.replace("\\", "/").lower()), None)
+                toc = rwd.read_toc(f)
+                hit = next((e for e in toc if e.name.lower() == a.map.replace("\\", "/").lower()), None)
                 if hit is None:
                     raise MapError(f"{a.map} not found in {a.source}")
                 data, name = rwd.read_entry(f, hit), hit.name
+                tr = next((e for e in toc if e.name.lower() == "translate.tgi"), None)
+                if tr is not None:
+                    renames = translations(rwd.read_entry(f, tr).decode("utf-8", "replace"))
         else:
             data, name = Path(a.source).read_bytes(), a.source
         m = decode_map(data, name)
         if not a.out:
             ap.error("--out is required unless --survey")
-        summary = export(m, Path(a.out), a.scale)
+        summary = export(m, Path(a.out), a.scale, renames)
         print(json.dumps(summary, indent=1))
         return 0
     except (OSError, MapError, rwd.RwdError, struct.error) as exc:

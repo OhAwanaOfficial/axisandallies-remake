@@ -71,8 +71,37 @@ bool MapDef::finalize() {
     w.u32(heightWidth);
     w.u32(static_cast<std::uint32_t>(heights.size()));
     for (const Fixed h : heights) w.fixed(h);
+    // Things, kingdoms and rules only when present: maps without them keep their old hash.
+    if (!things.empty() || !kingdoms.empty() || !rules.empty()) {
+        w.tag("THNG");
+        w.u32(static_cast<std::uint32_t>(things.size()));
+        for (const MapThing& t : things) {
+            w.str(t.ids);
+            w.vec2(t.position);
+            w.angle(t.facing);
+            w.u32(static_cast<std::uint32_t>(t.owner));
+            w.str(t.name);
+        }
+        w.u32(static_cast<std::uint32_t>(kingdoms.size()));
+        for (const MapKingdom& k : kingdoms) {
+            w.str(k.name);
+            w.str(k.color);
+        }
+        w.u32(static_cast<std::uint32_t>(rules.size()));
+        for (const MapRule& r : rules) {
+            w.str(r.name);
+            w.fixed(r.value);
+        }
+    }
     mapHash = hashBytes(w.buf);
     return true;
+}
+
+Fixed MapDef::rule(std::string_view ruleName, Fixed fallback) const {
+    for (const MapRule& r : rules) {
+        if (iequals(r.name, ruleName)) return r.value;
+    }
+    return fallback;
 }
 
 // ------------------------------------------------------------------------------- generator
@@ -296,6 +325,32 @@ bool loadRmpJson(std::string_view text, MapDef& out, std::string& error) {
     m.heightWidth = static_cast<std::uint32_t>(n + 1);
     m.heights.reserve(h.size());
     for (std::size_t i = 0; i < h.size(); ++i) m.heights.push_back(Fixed::fromRatio(h[i] + mt[i], 1000));
+    // Placed things, kingdoms and rules (optional: older map.json files have none). Integers only.
+    const auto intOf = [](const json::Value* v, std::int64_t fallback) {
+        const auto i = v != nullptr ? v->asInt() : std::nullopt;
+        return i ? *i : fallback;
+    };
+    const auto textOf = [](const json::Value* v) { return v != nullptr && v->type == json::Value::Type::String ? v->text : std::string(); };
+    if (const json::Value* things = root.get("things"); things != nullptr && things->isArray()) {
+        for (const json::Value& t : things->items) {
+            MapThing th;
+            // tools/rmp.py resolves translate.tgi renames into "ids_translated" (the def to use).
+            th.ids = asciiLowerCopy(textOf(t.get("ids_translated")));
+            if (th.ids.empty()) th.ids = asciiLowerCopy(textOf(t.get("ids")));
+            th.position = {Fixed::fromRatio(intOf(t.get("x_mm"), 0), 1000), Fixed::fromRatio(intOf(t.get("y_mm"), 0), 1000)};
+            const FVec2 f{Fixed::fromRatio(intOf(t.get("facing_x_mm"), 0), 1000), Fixed::fromRatio(intOf(t.get("facing_y_mm"), 0), 1000)};
+            th.facing = f == FVec2{} ? Angle{} : f.angle();
+            th.owner = static_cast<std::int32_t>(intOf(t.get("owner"), -1));
+            th.name = textOf(t.get("name"));
+            if (!th.ids.empty()) m.things.push_back(std::move(th));
+        }
+    }
+    if (const json::Value* ks = root.get("kingdoms"); ks != nullptr && ks->isArray()) {
+        for (const json::Value& k : ks->items) m.kingdoms.push_back({textOf(k.get("name")), textOf(k.get("color"))});
+    }
+    if (const json::Value* rs = root.get("rules"); rs != nullptr && rs->isArray()) {
+        for (const json::Value& r : rs->items) m.rules.push_back({textOf(r.get("name")), Fixed::fromRatio(intOf(r.get("value_milli"), 0), 1000)});
+    }
     if (!m.finalize()) {
         error = "map json: inconsistent map";
         return false;
