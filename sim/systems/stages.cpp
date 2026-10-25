@@ -24,7 +24,5 @@ void runPathfinding(Sim& sim) {
     }
 }
 void runVision(Sim&) {}
-void runSupply(Sim&) {}
-void runCapture(Sim&) {}
 
 }  // namespace corps

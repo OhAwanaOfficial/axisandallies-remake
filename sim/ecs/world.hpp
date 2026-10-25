@@ -206,17 +206,19 @@ struct Projectile {
 // A player building of the economy (M6, GAME_DESIGN §7): a base building that was started with,
 // unpacked from a truck or (later) constructed. It produces and pays upkeep (systems/economy),
 // packs back onto its truck, recruits regiments one unit at a time and researches properties
-// (systems/bases). Buildings placed with DebugSpawnBuilding have none: they only defend.
+// (systems/bases). Cities of the map are Structures too, owned by nobody (kNeutral) until captured
+// (systems/supply). Buildings placed with DebugSpawnBuilding have none: they only defend.
 struct RecruitOrder {
     std::uint32_t regiment = 0;  // DefSet::regiments index
     Fixed paid;                  // money taken when it was queued (refunded on cancel)
     friend bool operator==(const RecruitOrder& a, const RecruitOrder& b) noexcept { return a.regiment == b.regiment && a.paid == b.paid; }
 };
+constexpr std::uint8_t kNeutral = 0xFF;  // owner of an uncaptured city
 struct Structure {
     static constexpr std::uint32_t kNone = 0xFFFFFFFFu;
     enum class State : std::uint8_t { Deployed = 0, Unpacking = 1, Packing = 2 };
     State state = State::Deployed;
-    std::uint8_t player = 0;
+    std::uint8_t player = 0;                // kNeutral: a city nobody holds
     std::uint32_t stateTicks = 0;           // ticks left of unpacking / packing
     Fixed xp;                               // its HQ regiment's experience, kept while unpacked
     std::vector<std::uint32_t> properties;  // LOCAL research granted to it (property indexes, sorted)
@@ -227,11 +229,19 @@ struct Structure {
     std::uint32_t research = kNone;         // BuildingDef::research index in progress
     std::uint32_t researchTicks = 0;
     Fixed researchPaid;
+    // Supply (M6 part 2; the Supply stage sets them for the next tick's Economy and Timers).
+    bool inSupply = false;                  // inside an active supply zone of its team
+    bool underSiege = false;                // its own zone is besieged (enemy near, or damaged lately)
+    std::uint32_t lastDamaged = 0;          // tick + 1 of the last hit it took (0: never)
+    // Capture (cities): the player whose units are taking it, and the ticks they have held it.
+    std::uint8_t capturer = kNeutral;
+    std::uint32_t captureTicks = 0;
     friend bool operator==(const Structure& a, const Structure& b) noexcept {
         return a.state == b.state && a.player == b.player && a.stateTicks == b.stateTicks && a.xp == b.xp &&
                a.properties == b.properties && a.queue == b.queue && a.recruit == b.recruit && a.nextElement == b.nextElement &&
                a.recruitTicks == b.recruitTicks && a.research == b.research && a.researchTicks == b.researchTicks &&
-               a.researchPaid == b.researchPaid;
+               a.researchPaid == b.researchPaid && a.inSupply == b.inSupply && a.underSiege == b.underSiege &&
+               a.lastDamaged == b.lastDamaged && a.capturer == b.capturer && a.captureTicks == b.captureTicks;
     }
 };
 
@@ -246,6 +256,17 @@ struct Deploy {
     }
 };
 
+// A regiment's supply state (M6 part 2, GAME_DESIGN §8; systems/supply): whether its anchor is in
+// an active supply zone of its team, and the ticks to its next free replacement unit.
+struct Supply {
+    bool inSupply = false;
+    bool besieged = false;          // the zone it is in is under siege (reduced resupply)
+    std::uint32_t replaceTicks = 0; // 0: no replacement pending
+    friend bool operator==(const Supply& a, const Supply& b) noexcept {
+        return a.inSupply == b.inSupply && a.besieged == b.besieged && a.replaceTicks == b.replaceTicks;
+    }
+};
+
 // A player's side of the game (GAME_DESIGN §5, §6.8). Indexed by player id.
 constexpr std::size_t kMaxPlayers = 8;  // SVars KingdomsMax
 struct Kingdom {
@@ -255,15 +276,33 @@ struct Kingdom {
     Fixed money;           // the stockpile, 0 .. EconomyDef::stockpileMax
     bool bankrupt = false; // no money and a negative net income
     std::vector<std::uint32_t> properties;  // GLOBAL research granted (property indexes, sorted)
+    std::uint8_t team = 0;    // allies share a team (SetMatchRules; default: its own player index)
+    bool eliminated = false;  // started, then lost its last HQ (systems/supply)
     friend bool operator==(const Kingdom& a, const Kingdom& b) noexcept {
         return a.active == b.active && a.armyXp == b.armyXp && a.started == b.started && a.money == b.money &&
-               a.bankrupt == b.bankrupt && a.properties == b.properties;
+               a.bankrupt == b.bankrupt && a.properties == b.properties && a.team == b.team && a.eliminated == b.eliminated;
+    }
+};
+
+// The match's victory rules and result (GAME_DESIGN §12; systems/supply).
+struct Match {
+    static constexpr std::uint8_t kNoTeam = 0xFF;
+    Fixed cityVictoryRatio;     // share of the cities' value a team must hold to win (0: off)
+    bool teamVictory = true;    // allies win together (else the last kingdom standing)
+    bool over = false;
+    std::uint8_t winner = kNoTeam;  // the winning team (teamVictory) or player
+    std::uint32_t endTick = 0;
+    friend bool operator==(const Match& a, const Match& b) noexcept {
+        return a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory && a.over == b.over &&
+               a.winner == b.winner && a.endTick == b.endTick;
     }
 };
 
 struct World {
+    World();
     EntityRegistry registry;
     std::array<Kingdom, kMaxPlayers> kingdoms{};
+    Match match;
     Pool<Transform> transforms;
     Pool<DefRef> defRefs;
     Pool<Health> health;
@@ -279,6 +318,12 @@ struct World {
     Pool<Projectile> projectiles;
     Pool<Structure> structures;
     Pool<Deploy> deploys;
+    Pool<Supply> supplies;
+
+    // A player's team (kNeutral and unknown players: their own, kNeutral).
+    std::uint8_t teamOf(std::uint8_t player) const noexcept { return player < kMaxPlayers ? kingdoms[player].team : kNeutral; }
+    // Whether two players fight each other: different players on different teams.
+    bool hostile(std::uint8_t a, std::uint8_t b) const noexcept { return a != b && teamOf(a) != teamOf(b); }
 
     // Fixed pool order: serializer sections and component removal follow it.
     template <class F>
@@ -298,6 +343,7 @@ struct World {
         f(projectiles);
         f(structures);
         f(deploys);
+        f(supplies);
     }
 
     // Runs the registry's deferred destruction and drops the dead entities' components.

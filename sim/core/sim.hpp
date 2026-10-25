@@ -58,11 +58,16 @@ struct SimEvent {
     // `detail`). Unpacked / Packed: building `entity` finished unpacking / packed into regiment
     // `other`. ResearchDone: building `entity` granted property `detail`. Bankrupt / Solvent: player
     // `player`'s kingdom went bankrupt / recovered. DeployFailed: truck regiment `entity` arrived
-    // where its building no longer fits. Events feed the view (sounds, effects, death models, HUD);
-    // they are outputs, not state.
+    // where its building no longer fits.
+    // Supply and victory (M6 part 2): Replaced: unit `entity` joined regiment `other` as a free
+    // replacement. CityCaptured: city `entity` passed to `player` (from player `detail`; 255: nobody),
+    // taken by regiment `other`. KingdomDefeated: `player` lost its last HQ. TeamVictory /
+    // CityRatioVictory: the match is won by team (or player) `detail` (255: nobody is left).
+    // Events feed the view (sounds, effects, death models, HUD); they are outputs, not state.
     enum class Type : std::uint8_t {
         Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired, Died, Routed, LevelUp, Hit,
-        Recruited, Unpacked, Packed, ResearchDone, Bankrupt, Solvent, DeployFailed
+        Recruited, Unpacked, Packed, ResearchDone, Bankrupt, Solvent, DeployFailed,
+        Replaced, CityCaptured, KingdomDefeated, TeamVictory, CityRatioVictory
     };
     Type type = Type::Spawned;
     EntityId entity;

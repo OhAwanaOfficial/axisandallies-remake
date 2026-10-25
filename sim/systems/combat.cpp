@@ -395,7 +395,7 @@ void runRegiments(Ctx& c, const Timers& tm) {
         Fixed bestD;
         for (const std::uint32_t i : near) {
             const Fighter& t = c.field.fs[i];
-            if (t.player == player) continue;
+            if (!c.w.hostile(t.player, player)) continue;
             bool can = false;
             for (auto it = lo; it != arms.end() && it->first == org && !can; ++it) {
                 can = CombatRules::passes(c.rules.ability(it->second)->filter, true, t.types);
@@ -528,8 +528,8 @@ void runRegiments(Ctx& c, const Timers& tm) {
 
 // --- targeting -------------------------------------------------------------------------------
 
-bool canHit(const Fighter& self, const Fighter& t, const AbilityDef& ab, const AbilityRules& ar, Fixed reach) {
-    if (t.player == self.player || !CombatRules::passes(ar.filter, true, t.types)) return false;
+bool canHit(const World& w, const Fighter& self, const Fighter& t, const AbilityDef& ab, const AbilityRules& ar, Fixed reach) {
+    if (!w.hostile(t.player, self.player) || !CombatRules::passes(ar.filter, true, t.types)) return false;
     const Fixed d = distance(self.pos, t.pos);
     return d <= reach + t.radius && d >= ab.minRange;
 }
@@ -561,7 +561,7 @@ void runTargeting(Ctx& c, const Timers& tm) {
             const AbilityDef& ab = c.defs.abilities[wd.ability];
             const Fixed reach = ab.range + wd.fuzzyRange;
             const Fighter* old = c.field.find(cur);
-            const bool keep = tm.keepKill && old != nullptr && healthOf(w, cur) > Fixed{} && canHit(f, *old, ab, *ar, reach);
+            const bool keep = tm.keepKill && old != nullptr && healthOf(w, cur) > Fixed{} && canHit(w, f, *old, ab, *ar, reach);
             if (!keep) {
                 cur = EntityId{};
                 // Best: the Attack target's units first, then (check_damage_resistance) the most
@@ -570,7 +570,7 @@ void runTargeting(Ctx& c, const Timers& tm) {
                 c.field.within(f.pos, reach + kMaxTargetRadius, near);
                 for (const std::uint32_t k : near) {
                     const Fighter& t = c.field.fs[k];
-                    if (!canHit(f, t, ab, *ar, reach)) continue;
+                    if (!canHit(w, f, t, ab, *ar, reach)) continue;
                     Fixed expected;
                     if (f.checkResist) {
                         const TargetStats s = statsOf(c, t);
@@ -626,7 +626,7 @@ void impact(Ctx& c, std::uint32_t ability, EntityId shooter, std::uint8_t player
         c.field.within(point, ab.area + kMaxTargetRadius, near);
         for (const std::uint32_t k : near) {
             const Fighter& t = c.field.fs[k];
-            if (t.player == player || healthOf(c.w, t.id) <= Fixed{} || !CombatRules::passes(ar->filter, true, t.types)) continue;
+            if (!c.w.hostile(t.player, player) || healthOf(c.w, t.id) <= Fixed{} || !CombatRules::passes(ar->filter, true, t.types)) continue;
             const Fixed d = distance(point, t.pos);
             if (d > ab.area + t.radius) continue;
             victims.push_back({{d, t.id}, &t});
@@ -644,6 +644,7 @@ void impact(Ctx& c, std::uint32_t ability, EntityId shooter, std::uint8_t player
         Health* hp = c.w.health.get(t->id);
         if (hp == nullptr || hp->current <= Fixed{}) continue;
         hp->current = hp->current - dmg;
+        if (Structure* st = c.w.structures.get(t->id)) st->lastDamaged = c.tick + 1;  // under siege (systems/supply)
         moraleOnHit(c.sim, t->id, shooter, ability);
         markCombat(c, t->org);
         if (from != nullptr) markCombat(c, from->org);

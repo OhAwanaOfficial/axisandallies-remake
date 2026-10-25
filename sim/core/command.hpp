@@ -37,7 +37,8 @@ enum class CommandType : std::uint8_t {
     Pack = 14,              // a building packs onto its truck(s)
     Research = 15,          // a building researches a property (ids); paid now
     CancelResearch = 16,    // a building stops its research (refunded)
-    // 17..199: gameplay commands, assigned when their systems land.
+    SetMatchRules = 17,     // tick 0 only: teams, city victory ratio, team victory (MatchRulesPayload)
+    // 18..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
     DebugSetTransform = 202,
@@ -49,6 +50,8 @@ enum class CommandType : std::uint8_t {
     DebugSetExperience = 208, // set regiments' XP (duels, tests); levels follow
     DebugSetMoney = 209,      // set the sender's money (amount) (tests, simcli economy)
     DebugGrantProperty = 210, // grant the sender's kingdom a property (ids), as GLOBAL research does
+    DebugSetHealth = 211,     // set a unit's or building's health (target, amount; clamped to 0 < h <= max)
+    DebugSetOwner = 212,      // give a Structure (a city) to player `index` (kNeutral 255: nobody)
 };
 
 struct NoPayload {
@@ -164,10 +167,11 @@ struct DebugSetExperiencePayload {
     }
 };
 
-// The bases commands (10..16, 209, 210). Each type uses some fields; the encoding writes only those:
+// The bases commands (10..16, 209..212). Each type uses some fields; the encoding writes only those:
 //   StartPlayer: ids, position, facing     Recruit / Research: target, ids
 //   CancelRecruit: target, index            Unpack: target, position, facing
 //   Pack / CancelResearch: target           DebugSetMoney: amount      DebugGrantProperty: ids
+//   DebugSetHealth: target, amount          DebugSetOwner: target, index
 struct BaseOrderPayload {
     EntityId target;   // the building, or the truck regiment (Unpack)
     std::string ids;   // building / regiment / property IDS
@@ -181,11 +185,22 @@ struct BaseOrderPayload {
     }
 };
 
+// SetMatchRules: `teams[p]` is player p's team (players past the list keep their own index).
+struct MatchRulesPayload {
+    std::vector<std::uint8_t> teams;  // at most 8 (kMaxPlayers), each < 8
+    Fixed cityVictoryRatio;           // 0: no city victory; at most 1
+    bool teamVictory = true;
+    friend bool operator==(const MatchRulesPayload& a, const MatchRulesPayload& b) noexcept {
+        return a.teams == b.teams && a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory;
+    }
+};
+
 using CommandPayload = std::variant<NoPayload, SpawnRegimentPayload, DebugSpawnPayload, DebugDestroyPayload,
                                     DebugSetTransformPayload, DebugRngDrawPayload, DebugPlaceBlockerPayload,
                                     DebugRequestPathPayload, MoveGroupPayload, RegimentListPayload, SetFormationPayload,
                                     SetGroupBehaviourPayload, AttackPayload, DebugSpawnBuildingPayload,
-                                    DebugSetEntrenchedPayload, DebugSetExperiencePayload, BaseOrderPayload>;
+                                    DebugSetEntrenchedPayload, DebugSetExperiencePayload, BaseOrderPayload,
+                                    MatchRulesPayload>;
 
 struct Command {
     std::uint32_t tick = 0;  // the tick it is applied at
@@ -234,6 +249,10 @@ Command makeResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq,
 Command makeCancelResearch(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId building);
 Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, Fixed money);
 Command makeDebugGrantProperty(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string propertyIds);
+Command makeSetMatchRules(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<std::uint8_t> teams,
+                          Fixed cityVictoryRatio, bool teamVictory);
+Command makeDebugSetHealth(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, Fixed health);
+Command makeDebugSetOwner(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId structure, std::uint8_t owner);
 
 // Byte encoding of one command's {type, player, payload} (tick/seq are carried by the container).
 // Signed numbers are zig-zag varints; Fixed is its raw int64.

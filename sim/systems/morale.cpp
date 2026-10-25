@@ -315,6 +315,11 @@ void setExperience(Sim& sim, EntityId regiment, Fixed xp) {
     applyLevel(sim, regiment);
 }
 
+void grantExperience(Sim& sim, EntityId regiment, Fixed xp) {
+    if (sim.config().defs == nullptr) return;
+    addExperience(sim, regiment, xp, varsOf(defsOf(sim)));
+}
+
 void startRetreat(Sim& sim, EntityId regiment, FVec2 goal) {
     World& w = sim.world();
     Engagement* e = w.engagements.get(regiment);
@@ -410,7 +415,7 @@ void runMorale(Sim& sim) {
                 Fixed enemy;
                 for (std::size_t k = 0; k < w.combats.size(); ++k) {
                     const EntityId u = w.combats.ids()[k];
-                    if (w.combats.data()[k].player == r->player) continue;
+                    if (!w.hostile(w.combats.data()[k].player, r->player)) continue;
                     const Transform* ut = w.transforms.get(u);
                     const Health* uh = w.health.get(u);
                     if (ut == nullptr || uh == nullptr || uh->current <= Fixed{} || distance(ut->position, a->position) > zoc) continue;
@@ -427,7 +432,9 @@ void runMorale(Sim& sim) {
             case Engagement::State::Regroup:
             case Engagement::State::Exhausted: {
                 const ExperienceLevelDef* level = levelOf(sim, id);
-                gainMorale(sim, id, v.replenish * (level != nullptr ? level->moraleRecovery : Fixed::fromInt(1)));
+                const Supply* sp = w.supplies.get(id);
+                const Fixed bonus = sp != nullptr && sp->inSupply ? defs.economy.moraleSupplyBonus : Fixed{};  // MoraleSupplyBonus
+                gainMorale(sim, id, v.replenish * (level != nullptr ? level->moraleRecovery : Fixed::fromInt(1)) + bonus);
                 break;
             }
             default:

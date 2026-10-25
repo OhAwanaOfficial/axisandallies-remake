@@ -4,12 +4,14 @@
 
 #include "core/ascii.hpp"
 #include "core/sim.hpp"
+#include "nav/map_def.hpp"
 #include "nav/nav_world.hpp"
 #include "systems/combat.hpp"
 #include "systems/economy.hpp"
 #include "systems/morale.hpp"
 #include "systems/movement.hpp"
 #include "systems/orders.hpp"
+#include "systems/supply.hpp"
 
 namespace corps {
 
@@ -128,33 +130,10 @@ EntityId createRegiment(Sim& sim, std::uint8_t player, std::uint32_t regiment, F
     return org;
 }
 
-// Unit `e` of a regiment's plan joins regiment `org` at `pos`.
+// Unit `e` of a regiment's plan joins the regiment being recruited, with full morale.
 bool addRecruit(Sim& sim, EntityId org, const RecruitElement& e, bool first, FVec2 pos, Angle facing) {
-    World& w = sim.world();
-    const DefSet& d = *sim.config().defs;
-    Regiment* r = w.regiments.get(org);
-    if (r == nullptr) return false;
-    const std::uint8_t player = r->player;
-    const EntityId id = w.registry.create();
-    if (id.isNull()) return false;
-    w.transforms.set(id, {pos, facing});
-    if (e.element.kind == ElementKind::Unit) {
-        const UnitDef& u = d.units[e.element.index];
-        w.defRefs.set(id, {DefRef::Kind::Unit, e.element.index});
-        w.health.set(id, {u.health, u.health});
-        w.movers.set(id, {});
-        const auto cls = static_cast<std::uint8_t>(u.moveClass);
-        r = w.regiments.get(org);
-        r->moveClass = first ? cls : restrictiveClass(r->moveClass, cls);
-    } else {
-        const Fixed hp = d.buildings[e.element.index].health;
-        w.defRefs.set(id, {DefRef::Kind::Building, e.element.index});
-        w.health.set(id, {hp, hp});
-    }
-    w.members.set(id, {org, static_cast<std::uint16_t>(e.slot)});
-    attachCombat(sim, id, player);
-    sim.emit({SimEvent::Type::Spawned, id, player, CommandType::Recruit});
-    if (Engagement* g = w.engagements.get(org)) g->morale = moraleMaxOf(sim, org);
+    if (addRegimentUnit(sim, org, e, first, pos, facing, CommandType::Recruit).isNull()) return false;
+    if (Engagement* g = sim.world().engagements.get(org)) g->morale = moraleMaxOf(sim, org);
     return true;
 }
 
@@ -389,6 +368,35 @@ ResourceAmounts recruitLimits(const DefSet& defs, std::uint32_t regiment, std::u
     return a;
 }
 
+EntityId addRegimentUnit(Sim& sim, EntityId org, const RecruitElement& e, bool first, FVec2 pos, Angle facing, CommandType cause,
+                         Fixed healthFactor) {
+    World& w = sim.world();
+    const DefSet& d = *sim.config().defs;
+    Regiment* r = w.regiments.get(org);
+    if (r == nullptr) return {};
+    const std::uint8_t player = r->player;
+    const EntityId id = w.registry.create();
+    if (id.isNull()) return id;
+    w.transforms.set(id, {pos, facing});
+    if (e.element.kind == ElementKind::Unit) {
+        const UnitDef& u = d.units[e.element.index];
+        w.defRefs.set(id, {DefRef::Kind::Unit, e.element.index});
+        w.health.set(id, {u.health * healthFactor, u.health * healthFactor});
+        w.movers.set(id, {});
+        const auto cls = static_cast<std::uint8_t>(u.moveClass);
+        r = w.regiments.get(org);
+        r->moveClass = first ? cls : restrictiveClass(r->moveClass, cls);
+    } else {
+        const Fixed hp = d.buildings[e.element.index].health * healthFactor;
+        w.defRefs.set(id, {DefRef::Kind::Building, e.element.index});
+        w.health.set(id, {hp, hp});
+    }
+    w.members.set(id, {org, static_cast<std::uint16_t>(e.slot)});
+    attachCombat(sim, id, player);
+    sim.emit({SimEvent::Type::Spawned, id, player, cause});
+    return id;
+}
+
 Fixed recruitCost(const DefSet& defs, std::uint32_t regiment) {
     if (regiment >= defs.regiments.size()) return {};
     Fixed cost = defs.regiments[regiment].cost.money;
@@ -410,7 +418,9 @@ void applyStartPlayer(Sim& sim, const Command& c, const BaseOrderPayload& p) {
     if (!pl.ok) return sim.reject(c);
     if (spawnStructure(sim, bi, pl, c.player, Structure::State::Deployed, 0, 1_fx, c.type).isNull()) return sim.reject(c);
     k.started = true;
-    k.money = d->economy.startMoney;
+    // The map's ResourceStockpileDefault rule (Golden Fields: 1000) over the SVar.
+    k.money = std::clamp(sim.config().map != nullptr ? sim.config().map->rule("ResourceStockpileDefault", d->economy.startMoney) : d->economy.startMoney,
+                         Fixed{}, d->economy.stockpileMax);
 }
 
 void applyRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p) {
@@ -590,6 +600,8 @@ void runBases(Sim& sim) {
         }
     }
     const std::vector<EntityId> ids = w.structures.ids();
+    std::vector<SupplyZone> zones;
+    bool haveZones = false;
     for (const EntityId id : ids) {
         Structure* s = w.registry.alive(id) ? w.structures.get(id) : nullptr;
         if (s == nullptr) continue;
@@ -611,7 +623,13 @@ void runBases(Sim& sim) {
             }
             break;
         case Structure::State::Deployed:
-            recruitStep(sim, id, *s);
+            if (!s->queue.empty()) {
+                if (!haveZones) {
+                    zones = supplyZones(sim);
+                    haveZones = true;
+                }
+                if (zoneAt(zones, w.teamOf(s->player), w.transforms.get(id)->position) != nullptr) recruitStep(sim, id, *s);
+            }
             s = w.structures.get(id);  // recruiting adds entities (pools may move)
             researchStep(sim, id, *s);
             break;

@@ -285,6 +285,27 @@ Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t
     return baseOrder(tick, player, seq, CommandType::DebugSetMoney, std::move(p));
 }
 
+Command makeSetMatchRules(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<std::uint8_t> teams,
+                          Fixed cityVictoryRatio, bool teamVictory) {
+    Command c = base(tick, player, seq, CommandType::SetMatchRules);
+    c.payload = MatchRulesPayload{std::move(teams), cityVictoryRatio, teamVictory};
+    return c;
+}
+
+Command makeDebugSetHealth(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, Fixed health) {
+    BaseOrderPayload p;
+    p.target = target;
+    p.amount = health;
+    return baseOrder(tick, player, seq, CommandType::DebugSetHealth, std::move(p));
+}
+
+Command makeDebugSetOwner(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId structure, std::uint8_t owner) {
+    BaseOrderPayload p;
+    p.target = structure;
+    p.index = owner;
+    return baseOrder(tick, player, seq, CommandType::DebugSetOwner, std::move(p));
+}
+
 Command makeDebugGrantProperty(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string propertyIds) {
     BaseOrderPayload p;
     p.ids = std::move(propertyIds);
@@ -425,6 +446,26 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
     case CommandType::DebugGrantProperty:
         putString(out, std::get<BaseOrderPayload>(c.payload).ids);
         break;
+    case CommandType::SetMatchRules: {
+        const auto& p = std::get<MatchRulesPayload>(c.payload);
+        putVarint(out, p.teams.size());
+        for (const std::uint8_t t : p.teams) putVarint(out, t);
+        putFixed(out, p.cityVictoryRatio);
+        putVarint(out, p.teamVictory ? 1 : 0);
+        break;
+    }
+    case CommandType::DebugSetHealth: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putFixed(out, p.amount);
+        break;
+    }
+    case CommandType::DebugSetOwner: {
+        const auto& p = std::get<BaseOrderPayload>(c.payload);
+        putVarint(out, p.target.bits);
+        putVarint(out, p.index);
+        break;
+    }
     }
 }
 
@@ -597,6 +638,36 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
     case CommandType::DebugGrantProperty: {
         BaseOrderPayload p;
         if (!getString(in, pos, p.ids)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::SetMatchRules: {
+        MatchRulesPayload p;
+        std::uint64_t n = 0;
+        if (!getU(in, pos, 8, n)) return false;
+        for (std::uint64_t i = 0; i < n; ++i) {
+            if (!getU(in, pos, 7, v)) return false;
+            p.teams.push_back(static_cast<std::uint8_t>(v));
+        }
+        if (!getFixed(in, pos, p.cityVictoryRatio) || !getU(in, pos, 1, v)) return false;
+        p.teamVictory = v != 0;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::DebugSetHealth: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getFixed(in, pos, p.amount)) return false;
+        out.payload = std::move(p);
+        return true;
+    }
+    case CommandType::DebugSetOwner: {
+        BaseOrderPayload p;
+        if (!getU(in, pos, 0xFFFFFFFFu, v)) return false;
+        p.target = EntityId{static_cast<std::uint32_t>(v)};
+        if (!getU(in, pos, 0xFF, v)) return false;
+        p.index = static_cast<std::uint8_t>(v);
         out.payload = std::move(p);
         return true;
     }

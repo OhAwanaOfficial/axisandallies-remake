@@ -26,8 +26,8 @@
 // research, and the kingdom's research that applies to it). The money is taken when queued. The
 // front regiment is recruited one unit at a time: an empty regiment appears at the building's
 // creation offset, heading for its deployment offset, and a unit joins every
-// recruit_time / units (the first after one interval) [CALIBRATE]. Recruiting ignores supply
-// until supply zones exist (part 2).
+// recruit_time / units (the first after one interval) [CALIBRATE]. Recruiting pauses while the
+// building is outside every active supply zone of its team (systems/supply).
 //
 // Research: a deployed building researches one ResearchItem at a time; the money is taken at the
 // start; after research_time the property is granted: GLOBAL to the kingdom, LOCAL to the
@@ -71,6 +71,11 @@ std::vector<RecruitElement> recruitPlan(const DefSet& defs, std::uint32_t regime
 ResourceAmounts recruitLimits(const DefSet& defs, std::uint32_t regiment, std::uint32_t from, bool withRegiment);
 // The money it costs: the regiment's cost and every unit's.
 Fixed recruitCost(const DefSet& defs, std::uint32_t regiment);
+// Plan element `e` joins regiment `org` as a new unit at `pos` (recruiting, free replacement) with
+// its def's health x `healthFactor`; `first`: the regiment had no unit yet (its move class is this
+// one's). Returns it (null: no entity left).
+EntityId addRegimentUnit(Sim& sim, EntityId org, const RecruitElement& e, bool first, FVec2 pos, Angle facing, CommandType cause,
+                         Fixed healthFactor = Fixed::fromInt(1));
 
 void applyStartPlayer(Sim& sim, const Command& c, const BaseOrderPayload& p);
 void applyRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p);

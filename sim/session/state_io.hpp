@@ -9,8 +9,11 @@
 //   one section per component pool, in World::forEachPool order, entries by ascending EntityId:
 //     "XFRM" Transform   "DREF" DefRef   "HLTH" Health   "MEMB" Member   "FTPR" Footprint   "PATH" Path
 //     "REGT" Regiment    "ORDR" Order    "MOVR" Mover    "GRUP" Group
-//     "COMB" Combat      "ENGT" Engagement   "PROJ" Projectile
-//   "KING" per player (kMaxPlayers): u8 active, fixed armyXp
+//     "COMB" Combat      "ENGT" Engagement   "PROJ" Projectile   "STRC" Structure   "DPLY" Deploy
+//     "SUPL" Supply
+//   "KING" per player (kMaxPlayers): u8 active, fixed armyXp, u8 started, fixed money, u8 bankrupt,
+//          properties, u8 team, u8 eliminated
+//   "MTCH" match rules and result
 //   "NAVS" u8 hasNav, then if set: u32 navVersion, u32 n + dirty clusters, PathService state
 //          (queue, job in progress, budget debt, next id; see nav/path_service.cpp)
 //
@@ -30,8 +33,8 @@ namespace corps {
 
 // 2: mapHash, FTPR, PATH, NAVS; 3: REGT, ORDR, MOVR, GRUP (M4); 4: tuning hash, COMB, ENGT, PROJ (M5);
 // 5: morale, efficiency, XP, entrenchment timer in ENGT, KING (M5 part 2); 6: STRC, DPLY, economy in
-// KING (M6 part 1)
-constexpr std::uint32_t kStateFormatVersion = 6;
+// KING (M6 part 1); 7: supply and capture in STRC, SUPL, team and elimination in KING, MTCH (M6 part 2)
+constexpr std::uint32_t kStateFormatVersion = 7;
 
 std::vector<std::uint8_t> saveState(const Sim& sim);
 std::uint64_t stateHash(const Sim& sim);

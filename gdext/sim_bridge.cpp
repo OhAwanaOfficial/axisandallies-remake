@@ -103,6 +103,11 @@ const char* eventName(corps::SimEvent::Type t) {
     case corps::SimEvent::Type::Bankrupt: return "bankrupt";
     case corps::SimEvent::Type::Solvent: return "solvent";
     case corps::SimEvent::Type::DeployFailed: return "deploy_failed";
+    case corps::SimEvent::Type::Replaced: return "replaced";
+    case corps::SimEvent::Type::CityCaptured: return "city_captured";
+    case corps::SimEvent::Type::KingdomDefeated: return "kingdom_defeated";
+    case corps::SimEvent::Type::TeamVictory: return "team_victory";
+    case corps::SimEvent::Type::CityRatioVictory: return "city_ratio_victory";
     }
     return "?";
 }

@@ -3,8 +3,9 @@
 // Economy (M6, GAME_DESIGN §5). Each kingdom that has started (StartPlayer) has a money
 // stockpile; oil and ammo are income only. Per minute:
 //
-//   production  = the start location's + every deployed Structure's + every truck's (units with
-//                 an EconomyComponent Production: trucks produce while packed)
+//   production  = the start location's + every deployed Structure's (one with supply_required only
+//                 while in supply; cities held included) + every truck's (units with an
+//                 EconomyComponent Production: trucks produce while packed)
 //   upkeep      = every regiment's (OrganizationComponent's EconomyComponent) + every unit's +
 //                 every Structure's (whatever its state)
 //   oil, ammo   = production - upkeep; a deficit is bought with money at EconomyDef::oilPrice /
@@ -13,7 +14,7 @@
 //
 // The Economy stage adds net / 600 to the stockpile every tick (10 ticks per second), clamped to
 // 0 .. EconomyDef::stockpileMax. A kingdom with no money and a negative net income is bankrupt
-// (events Bankrupt / Solvent). Its other effects (resupply, attrition) come with supply (part 2).
+// (events Bankrupt / Solvent). Its effects on resupply and attrition: systems/supply.
 //
 // Limits: the unit limit provided (capped at EconomyDef::limitedMax) and consumed (regiments'
 // unit_limit_consumed), and the building limit provided (the start location's 20) and consumed

@@ -66,6 +66,8 @@ Fixed moraleMaxOf(const Sim& sim, EntityId regiment);
 
 // Sets a regiment's XP (DebugSetExperience) and applies the level it reaches.
 void setExperience(Sim& sim, EntityId regiment, Fixed xp);
+// Adds XP to a regiment (and its share to the army XP), as a kill does (city capture, M6).
+void grantExperience(Sim& sim, EntityId regiment, Fixed xp);
 // Ordered Retreat (command 9): retreat formation, passive, MoraleRetreatPenalty.
 void startRetreat(Sim& sim, EntityId regiment, FVec2 goal);
 

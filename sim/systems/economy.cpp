@@ -111,7 +111,8 @@ std::array<Ledger, kMaxPlayers> ledgers(const Sim& sim) {
             if (s == nullptr || s->player >= kMaxPlayers || r.index >= d->buildings.size()) continue;
             const BuildingDef& b = d->buildings[r.index];
             add(out[s->player].upkeep, b.upkeep);
-            if (s->state == Structure::State::Deployed) add(out[s->player].production, b.production);
+            // supply_required: produces only in supply (as of the last Supply stage).
+            if (s->state == Structure::State::Deployed && (!b.supplyRequired || s->inSupply)) add(out[s->player].production, b.production);
         }
     }
     // Reservations: regiments queued, and the units not yet out of the one being recruited.

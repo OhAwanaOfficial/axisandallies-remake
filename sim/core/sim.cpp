@@ -11,6 +11,7 @@
 #include "systems/movement.hpp"
 #include "systems/orders.hpp"
 #include "systems/stages.hpp"
+#include "systems/supply.hpp"
 
 namespace corps {
 
@@ -45,6 +46,13 @@ Sim::Sim(const SimConfig& config)
     if (config_.tuning != nullptr) tuning_ = *config_.tuning;
     config_.tuning = nullptr;  // the Sim keeps its own copy; tuning() is the one to read
     combatRules_ = std::make_unique<CombatRules>(config_.defs, config_.map, tuning_);
+    if (config_.defs != nullptr) {
+        // Victory rules: the map's (RULES) over the SVars; SetMatchRules may replace them at tick 0.
+        const EconomyDef& e = config_.defs->economy;
+        world_.match.cityVictoryRatio = config_.map != nullptr ? config_.map->rule("CityVictoryRatio", e.cityVictoryRatio) : e.cityVictoryRatio;
+        world_.match.teamVictory = e.teamVictory;
+    }
+    spawnMapCities(*this);    // part of map load: the map's cities, before the clearance is derived
     refreshClearance(*this);  // part of map load, not of the first tick
 }
 
@@ -207,6 +215,15 @@ void Sim::apply(const Command& c) {
         return;
     case CommandType::DebugGrantProperty:
         applyDebugGrantProperty(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::SetMatchRules:
+        applySetMatchRules(*this, c, std::get<MatchRulesPayload>(c.payload));
+        return;
+    case CommandType::DebugSetHealth:
+        applyDebugSetHealth(*this, c, std::get<BaseOrderPayload>(c.payload));
+        return;
+    case CommandType::DebugSetOwner:
+        applyDebugSetOwner(*this, c, std::get<BaseOrderPayload>(c.payload));
         return;
     }
     reject();

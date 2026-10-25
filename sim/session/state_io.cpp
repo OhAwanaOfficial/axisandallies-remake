@@ -264,6 +264,11 @@ void put(ByteWriter& w, const Structure& s) {
     w.u32(s.research);
     w.u32(s.researchTicks);
     w.fixed(s.researchPaid);
+    w.boolean(s.inSupply);
+    w.boolean(s.underSiege);
+    w.u32(s.lastDamaged);
+    w.u8(s.capturer);
+    w.u32(s.captureTicks);
 }
 void get(ByteReader& r, Structure& s) {
     s.state = static_cast<Structure::State>(r.u8());
@@ -285,6 +290,11 @@ void get(ByteReader& r, Structure& s) {
     s.research = r.u32();
     s.researchTicks = r.u32();
     s.researchPaid = r.fixed();
+    s.inSupply = r.boolean();
+    s.underSiege = r.boolean();
+    s.lastDamaged = r.u32();
+    s.capturer = r.u8();
+    s.captureTicks = r.u32();
 }
 void put(ByteWriter& w, const Deploy& d) {
     w.u32(d.building);
@@ -295,6 +305,16 @@ void get(ByteReader& r, Deploy& d) {
     d.building = r.u32();
     d.at = r.vec2();
     d.facing = r.angle();
+}
+void put(ByteWriter& w, const Supply& s) {
+    w.boolean(s.inSupply);
+    w.boolean(s.besieged);
+    w.u32(s.replaceTicks);
+}
+void get(ByteReader& r, Supply& s) {
+    s.inSupply = r.boolean();
+    s.besieged = r.boolean();
+    s.replaceTicks = r.u32();
 }
 
 template <class T>
@@ -323,7 +343,7 @@ bool getPool(ByteReader& r, Pool<T>& pool, const EntityRegistry& reg) {
 }
 
 constexpr const char* kPoolTags[] = {"XFRM", "DREF", "HLTH", "MEMB", "FTPR", "PATH", "REGT", "ORDR", "MOVR", "GRUP",
-                                    "COMB", "ENGT", "PROJ", "STRC", "DPLY"};
+                                    "COMB", "ENGT", "PROJ", "STRC", "DPLY", "SUPL"};
 
 std::uint64_t mapHashOf(const Sim& sim) {
     return sim.config().map != nullptr ? sim.config().map->mapHash : 0;
@@ -379,7 +399,16 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
         w.fixed(k.money);
         w.boolean(k.bankrupt);
         putU32s(w, k.properties);
+        w.u8(k.team);
+        w.boolean(k.eliminated);
     }
+    const Match& m = sim.world().match;
+    w.tag("MTCH");
+    w.fixed(m.cityVictoryRatio);
+    w.boolean(m.teamVictory);
+    w.boolean(m.over);
+    w.u8(m.winner);
+    w.u32(m.endTick);
 
     w.tag("NAVS");
     w.boolean(sim.nav() != nullptr);
@@ -438,7 +467,15 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
         k.money = r.fixed();
         k.bankrupt = r.boolean();
         getU32s(r, k.properties);
+        k.team = r.u8();
+        k.eliminated = r.boolean();
     }
+    if (!r.expectTag("MTCH")) return fail("missing MTCH");
+    world.match.cityVictoryRatio = r.fixed();
+    world.match.teamVictory = r.boolean();
+    world.match.over = r.boolean();
+    world.match.winner = r.u8();
+    world.match.endTick = r.u32();
 
     if (!r.expectTag("NAVS")) return fail("missing NAVS");
     const bool hasNav = r.boolean();
