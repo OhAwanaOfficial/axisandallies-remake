@@ -154,12 +154,24 @@ Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::
     for (const Command& c : extra) {
         if (queue.schedule(c, 0)) rep.commands.push_back(c);
     }
-    const auto randomPos = [&host, map]() {
+    // Every draw is its own statement: operands and function arguments are unsequenced in C++, and
+    // Clang evaluates them left to right where MSVC and GCC went right to left. The order below is
+    // the one MSVC and GCC used when the committed fixtures were recorded: a coordinate's fraction
+    // before its integer part, x before y, and a command's angle or move class before its position.
+    const auto coord = [&host](std::int32_t lo, std::int32_t hi) {
+        const Fixed frac = host.fixed01();
+        return Fixed::fromInt(host.range(lo, hi)) + frac;
+    };
+    const auto randomPos = [&coord, map]() {
         if (map != nullptr) {  // inside the map, off the border ring
             const auto w = static_cast<std::int32_t>(map->width), h = static_cast<std::int32_t>(map->height);
-            return FVec2{Fixed::fromInt(host.range(1, w - 2)) + host.fixed01(), Fixed::fromInt(host.range(1, h - 2)) + host.fixed01()};
+            const Fixed x = coord(1, w - 2);
+            const Fixed y = coord(1, h - 2);
+            return FVec2{x, y};
         }
-        return FVec2{Fixed::fromInt(host.range(-200, 200)) + host.fixed01(), Fixed::fromInt(host.range(-200, 200)) + host.fixed01()};
+        const Fixed x = coord(-200, 200);
+        const Fixed y = coord(-200, 200);
+        return FVec2{x, y};
     };
     for (std::uint32_t t = 0; t < ticks; ++t) {
         const std::uint32_t due = t + kInputDelay;
@@ -171,15 +183,19 @@ Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::
             Command c;
             if (map != nullptr) {
                 switch (host.below(12)) {
-                case 0: case 1: case 2:
-                    c = makeDebugSpawn(due, player, s, randomPos(), Angle::fromUnits(host.nextU32()));
+                case 0: case 1: case 2: {
+                    const Angle facing = Angle::fromUnits(host.nextU32());
+                    c = makeDebugSpawn(due, player, s, randomPos(), facing);
                     break;
+                }
                 case 3:
                     c = makeDebugDestroy(due, player, s, target);
                     break;
-                case 4: case 5:
-                    c = makeDebugSetTransform(due, player, s, target, randomPos(), Angle::fromUnits(host.nextU32()));
+                case 4: case 5: {
+                    const Angle facing = Angle::fromUnits(host.nextU32());
+                    c = makeDebugSetTransform(due, player, s, target, randomPos(), facing);
                     break;
+                }
                 case 6: {
                     const FVec2 pos = randomPos();
                     c = makeDebugPlaceBlocker(due, player, s, pos, {Fixed::fromInt(host.range(1, 4)), Fixed::fromInt(host.range(1, 4))});
@@ -188,24 +204,29 @@ Replay recordSynthetic(std::uint64_t matchSeed, std::uint64_t commandSeed, std::
                 case 7:
                     c = makeDebugRngDraw(due, player, s, static_cast<std::uint16_t>(host.below(5)));
                     break;
-                default:
-                    c = makeDebugRequestPath(due, player, s, target, randomPos(),
-                                             static_cast<std::uint8_t>(host.below(static_cast<std::uint32_t>(nav::kMoveClassCount))));
+                default: {
+                    const auto moveClass = static_cast<std::uint8_t>(host.below(static_cast<std::uint32_t>(nav::kMoveClassCount)));
+                    c = makeDebugRequestPath(due, player, s, target, randomPos(), moveClass);
                     break;
+                }
                 }
                 if (queue.schedule(c, t)) rep.commands.push_back(c);
                 continue;
             }
             switch (host.below(10)) {
-            case 0: case 1: case 2: case 3:
-                c = makeDebugSpawn(due, player, s, randomPos(), Angle::fromUnits(host.nextU32()));
+            case 0: case 1: case 2: case 3: {
+                const Angle facing = Angle::fromUnits(host.nextU32());
+                c = makeDebugSpawn(due, player, s, randomPos(), facing);
                 break;
+            }
             case 4: case 5:
                 c = makeDebugDestroy(due, player, s, target);
                 break;
-            case 6: case 7: case 8:
-                c = makeDebugSetTransform(due, player, s, target, randomPos(), Angle::fromUnits(host.nextU32()));
+            case 6: case 7: case 8: {
+                const Angle facing = Angle::fromUnits(host.nextU32());
+                c = makeDebugSetTransform(due, player, s, target, randomPos(), facing);
                 break;
+            }
             default:
                 c = makeDebugRngDraw(due, player, s, static_cast<std::uint16_t>(host.below(5)));
                 break;
