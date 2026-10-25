@@ -57,7 +57,7 @@ private:
             if (p >= s.size() || s[p++] != ':') return fail("expected ':'");
             Value v;
             if (!value(v, depth + 1)) return false;
-            out.members.emplace_back(std::move(key), std::move(v));
+            out.members.push_back(Member{std::move(key), std::move(v)});
             ws();
             if (p < s.size() && s[p] == ',') {
                 ++p;
@@ -199,8 +199,8 @@ private:
 }  // namespace
 
 const Value* Value::get(std::string_view key) const {
-    for (const auto& [k, v] : members) {
-        if (k == key) return &v;
+    for (const Member& m : members) {
+        if (m.key == key) return &m.value;
     }
     return nullptr;
 }

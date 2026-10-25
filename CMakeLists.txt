@@ -38,23 +38,28 @@ if(CORPS_BUILD_TESTS)
     COMMAND simcli determinism-check ${CMAKE_SOURCE_DIR}/sim/tests/fixtures/synthetic_nav_300.rpl --per-stage)
   # Six mixed regiments cross the test map (needs the game install; skipped without it), then the
   # recorded film must replay identically.
+  # The determinism checks of these films skip too when there is no film (a skipped setup test
+  # doesn't stop CTest from running the tests that require its fixture).
   add_test(NAME simcli_scenario COMMAND simcli scenario --out ${CMAKE_BINARY_DIR}/scenario.rpl)
   set_tests_properties(simcli_scenario PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP scenario_rpl)
   add_test(NAME simcli_scenario_determinism
     COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/scenario.rpl --per-stage)
-  set_tests_properties(simcli_scenario_determinism PROPERTIES FIXTURES_REQUIRED scenario_rpl)
+  set_tests_properties(simcli_scenario_determinism PROPERTIES FIXTURES_REQUIRED scenario_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
   # Combat (M5): a tank duel with a non-default tuning, then its film must replay identically.
   add_test(NAME simcli_duel COMMAND simcli duel regiment_ger_tank_medium regiment_gbr_infantry_at forest
     --tune defenseK=12 --out ${CMAKE_BINARY_DIR}/duel.rpl)
   set_tests_properties(simcli_duel PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP duel_rpl)
   add_test(NAME simcli_duel_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel.rpl --per-stage)
-  set_tests_properties(simcli_duel_determinism PROPERTIES FIXTURES_REQUIRED duel_rpl)
+  set_tests_properties(simcli_duel_determinism PROPERTIES FIXTURES_REQUIRED duel_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
   # Morale (M5 part 2): a veteran regiment against one that retreats, fought until wiped out.
   add_test(NAME simcli_duel_morale COMMAND simcli duel regiment_ger_infantry regiment_gbr_infantry open
     --xp-a 300 --retreat-b 25 --until-wiped --out ${CMAKE_BINARY_DIR}/duel_morale.rpl)
   set_tests_properties(simcli_duel_morale PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP duel_morale_rpl)
   add_test(NAME simcli_duel_morale_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel_morale.rpl --per-stage)
-  set_tests_properties(simcli_duel_morale_determinism PROPERTIES FIXTURES_REQUIRED duel_morale_rpl)
+  set_tests_properties(simcli_duel_morale_determinism PROPERTIES FIXTURES_REQUIRED duel_morale_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

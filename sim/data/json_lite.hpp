@@ -10,10 +10,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace corps::json {
+
+struct Member;
 
 struct Value {
     enum class Type : std::uint8_t { Null, Bool, Number, String, Array, Object };
@@ -21,11 +22,18 @@ struct Value {
     bool boolean = false;
     std::string text;  // Number: source text; String: decoded UTF-8
     std::vector<Value> items;                            // Array
-    std::vector<std::pair<std::string, Value>> members;  // Object, source order
+    std::vector<Member> members;  // Object, source order (std::vector allows the incomplete type)
 
     const Value* get(std::string_view key) const;  // Object member or nullptr
     std::optional<std::int64_t> asInt() const;     // Number without fraction/exponent
     bool isArray() const { return type == Type::Array; }
+};
+
+// An Object member. (Not std::pair<std::string, Value>: libstdc++ rejects that while Value is
+// still incomplete, as Clang showed.)
+struct Member {
+    std::string key;
+    Value value;
 };
 
 struct ParseResult {
