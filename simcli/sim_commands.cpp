@@ -416,12 +416,33 @@ int cmdShowDef(const SimArgs& a) {
         found = true;
         std::printf("BuildingDef %s (template %s) health %s defense %s\n", b->ids.c_str(), b->templateName.c_str(),
                     formatFixed(b->health).c_str(), formatFixed(b->defense).c_str());
-        for (const auto& r : b->recruits) std::printf("  recruits %s\n", r.c_str());
+        for (const RecruitRef& r : b->recruitRefs) std::printf("  recruits %s (regiment %s)\n", r.ids.c_str(), d.regiments[r.regiment].ids.c_str());
         for (const std::uint32_t i : b->abilities) ability(i);
         combat(b->weapons, b->turrets, b->checkDamageResistance);
         if (b->controlRange > Fixed{}) std::printf("  control range %s\n", formatFixed(b->controlRange).c_str());
         res("cost", b->cost);
+        res("upkeep", b->upkeep);
         res("production", b->production);
+        static const char* kShapes[] = {"square", "rect", "circle"};
+        std::printf("  footprint %s %s x %s (square %s), padding %s%s%s%s\n", kShapes[static_cast<int>(b->shape)],
+                    formatFixed(b->rectWidth).c_str(), formatFixed(b->rectHeight).c_str(), formatFixed(b->squareSize).c_str(),
+                    formatFixed(b->padding).c_str(), b->tileLocked ? " tile_locked" : "", b->axisLocked ? " axis_locked" : "",
+                    b->providesCorps ? " corps" : "");
+        if (b->mobile) {
+            std::printf("  packs in %s s (health >= %s), unpacks in %s s; truck %s, packed regiment %s, unpacked regiment %s\n",
+                        formatFixed(b->packingLength).c_str(), formatFixed(b->packHealthMin).c_str(), formatFixed(b->unpackingLength).c_str(),
+                        b->truck != kNoDef ? d.units[b->truck].ids.c_str() : "-",
+                        b->packedRegiment != kNoDef ? d.regiments[b->packedRegiment].ids.c_str() : "-",
+                        b->unpackedRegiment != kNoDef ? d.regiments[b->unpackedRegiment].ids.c_str() : "-");
+        }
+        std::printf("  recruits appear at (%s, %s), form up at (%s, %s)\n", formatFixed(b->creationOffset.x).c_str(),
+                    formatFixed(b->creationOffset.y).c_str(), formatFixed(b->deploymentOffset.x).c_str(),
+                    formatFixed(b->deploymentOffset.y).c_str());
+        static const char* kScopes[] = {"GLOBAL", "LOCAL", "SUPPORT"};
+        for (const ResearchItemDef& r : b->research) {
+            std::printf("  research %s%s %s %s s, %s money\n", r.propertyIds.c_str(), r.property == kNoDef ? " (UNDEFINED)" : "",
+                        kScopes[static_cast<int>(r.scope)], formatFixed(r.time).c_str(), formatFixed(r.cost.money).c_str());
+        }
     }
     if (const AbilityDef* ab = d.ability(ids)) {
         found = true;

@@ -60,6 +60,15 @@ if(CORPS_BUILD_TESTS)
   add_test(NAME simcli_duel_morale_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/duel_morale.rpl --per-stage)
   set_tests_properties(simcli_duel_morale_determinism PROPERTIES FIXTURES_REQUIRED duel_morale_rpl
     SKIP_REGULAR_EXPRESSION "cannot read")
+  # Economy and bases (M6): a GBR base recruits a division HQ, an oil depot and infantry and researches,
+  # then its film must replay identically.
+  add_test(NAME simcli_economy COMMAND simcli economy gbr --minutes 4
+    --recruit regiment_gbr_hq_infantry@0,gbr_truck_oil@5,regiment_gbr_infantry@60 --research tech_improved_logistics@10
+    --out ${CMAKE_BINARY_DIR}/economy.rpl)
+  set_tests_properties(simcli_economy PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP economy_rpl)
+  add_test(NAME simcli_economy_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/economy.rpl --per-stage)
+  set_tests_properties(simcli_economy_determinism PROPERTIES FIXTURES_REQUIRED economy_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

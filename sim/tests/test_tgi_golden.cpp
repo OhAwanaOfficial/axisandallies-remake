@@ -19,6 +19,8 @@
 #include "data/def_compiler.hpp"
 #include "session/replay.hpp"
 #include "session/state_io.hpp"
+#include "systems/bases.hpp"
+#include "systems/economy.hpp"
 #include "data/tgi/resolved_dump.hpp"
 #include "data/tgi/value_parse.hpp"
 #include "tgi_fixture.hpp"
@@ -667,4 +669,115 @@ TEST_CASE("golden terrain defense on a real map: forest cells of Golden Fields g
     CHECK(rules.statsOf(rifle, forest, false).defense == rules.statsOf(rifle, open, false).defense + 4_fx);
     const std::uint32_t ap = defs.damageTypeIndex("armor_piercing");
     CHECK(rules.statsOf(rifle, forest, false).resist[ap] > rules.statsOf(rifle, open, false).resist[ap]);
+}
+
+TEST_CASE("golden defs: bases and economy (GBR Corps HQ, division HQ truck and regiments, convoys, research, start location)") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const BuildingDef& corps = *defs.building("gbr_corps");
+    CHECK(corps.shape == FootprintShape::Square);
+    CHECK(corps.squareSize == 10_fx);
+    CHECK(corps.padding == 1_fx);
+    CHECK(corps.tileLocked);
+    CHECK(corps.axisLocked);
+    CHECK(corps.providesCorps);
+    CHECK(corps.mobile);
+    CHECK(corps.packHealthMin == 0.5_fx);
+    CHECK(corps.packingLength == 10_fx);  // not GAME_DESIGN's 7 s: each building has its own
+    CHECK(corps.cost.money == 450_fx);
+    CHECK(corps.production.money == 25_fx);
+    CHECK(corps.production.oil == 10_fx);
+    CHECK(corps.production.ammo == 20_fx);
+    REQUIRE(corps.research.size() == 6);
+    CHECK(corps.research[0].propertyIds == "tech_improved_logistics");
+    CHECK(corps.research[0].scope == ResearchItemDef::Scope::Global);
+    CHECK(corps.research[0].time == 60_fx);
+    CHECK(corps.research[0].cost.money == 50_fx);
+    CHECK(corps.research[0].property == defs.propertyIndex("tech_improved_logistics"));
+    const auto recruits = [&](const BuildingDef& b, const char* ids) {
+        return std::any_of(b.recruitRefs.begin(), b.recruitRefs.end(), [&](const RecruitRef& r) { return defs.regiments[r.regiment].ids == ids; });
+    };
+    CHECK(recruits(corps, "regiment_gbr_hq_infantry"));
+    CHECK(recruits(corps, "convoy_gbr_truck_engineer"));  // a bare truck, recruited as its convoy
+    CHECK(corps.packedRegiment == defs.regimentIndex("convoy_gbr_truck_corps"));
+    const BuildingDef& hq = *defs.building("gbr_hq_infantry");
+    CHECK(hq.truck == defs.unitIndex("gbr_truck_infantry"));
+    CHECK(hq.packedRegiment == defs.regimentIndex("regiment_gbr_hq_infantry"));
+    CHECK(hq.unpackedRegiment == defs.regimentIndex("regiment_gbr_hq_infantry_unpacked"));
+    CHECK(hq.packingLength == 8_fx);
+    CHECK(hq.creationOffset == FVec2{1.5_fx, -2.5_fx});    // DeploymentInfo 2.5, 1.5 (right, forward)
+    CHECK(hq.deploymentOffset == FVec2{6_fx, -2.5_fx});
+    CHECK(recruits(hq, "regiment_gbr_infantry"));
+    CHECK(defs.units[hq.truck].unpackTo == defs.buildingIndex("gbr_hq_infantry"));
+    CHECK(defs.units[hq.truck].cost.money == 225_fx);
+    const UnitDef& heavy = *defs.unit("gbr_tank_heavy");
+    CHECK(heavy.requiredStructureIds == std::vector<std::string>{"gbr_motor_pool"});
+    CHECK(heavy.requiredProperties == std::vector<std::string>{"tech_heavy_tank"});
+    const EconomyDef& e = defs.economy;
+    CHECK(e.startMoney == 500_fx);
+    CHECK(e.stockpileMax == 99999_fx);
+    CHECK(e.limitedMax == 20_fx);
+    CHECK(e.buildingPadding == 2_fx);
+    CHECK(e.ammoPrice == 2_fx);
+    CHECK(e.oilPrice == 3_fx);
+    CHECK(e.startLocation.buildingLimitProvided == 20_fx);
+}
+
+TEST_CASE("golden economy: a GBR base earns, recruits a division HQ that unpacks, and fills an infantry regiment unit by unit") {
+    REQUIRE_DEFS();
+    using namespace fixed_literals;
+    const nav::MapDef map = nav::generateArenaMap("open", 160);
+    Sim sim({1, &defs, &map});
+    std::uint16_t seq = 0;
+    const auto at = [&](Command c) {
+        c.tick = sim.tick();
+        c.seq = seq++;
+        return c;
+    };
+    sim.step({at(makeStartPlayer(0, 0, 0, "gbr_corps", {80_fx, 80_fx}, Angle{}))});
+    REQUIRE(sim.world().structures.size() == 1);
+    const EntityId corps = sim.world().structures.ids()[0];
+    Ledger l = ledgerOf(sim, 0);
+    CHECK(l.moneyNet() == 25_fx);
+    CHECK(l.oilNet() == 10_fx);
+    CHECK(l.ammoNet() == 20_fx);
+    CHECK(l.buildingLimit == 20_fx);
+    sim.step({at(makeRecruit(0, 0, 0, corps, "regiment_gbr_hq_infantry"))});
+    CHECK(sim.world().kingdoms[0].money < 276_fx);  // 225 for the truck
+    EntityId truckReg;
+    for (int i = 0; i < 400 && truckReg.isNull(); ++i) {
+        sim.step();
+        for (const SimEvent& ev : sim.events()) {
+            if (ev.type == SimEvent::Type::Recruited) truckReg = ev.entity;
+        }
+    }
+    REQUIRE_FALSE(truckReg.isNull());
+    sim.step({at(makeUnpack(0, 0, 0, truckReg, {110_fx, 80_fx}, Angle{}))});
+    EntityId hq;
+    for (int i = 0; i < 1500 && hq.isNull(); ++i) {
+        sim.step();
+        for (const SimEvent& ev : sim.events()) {
+            if (ev.type == SimEvent::Type::Unpacked) hq = ev.entity;
+        }
+    }
+    REQUIRE_FALSE(hq.isNull());
+    l = ledgerOf(sim, 0);
+    CHECK(l.unitLimit == 5_fx);
+    CHECK(l.moneyNet() == 50_fx);
+    sim.step({at(makeRecruit(0, 0, 0, hq, "regiment_gbr_infantry"))});
+    EntityId inf;
+    std::size_t units = 0;
+    for (int i = 0; i < 400 && inf.isNull(); ++i) {
+        sim.step();
+        for (const SimEvent& ev : sim.events()) {
+            if (ev.type == SimEvent::Type::Spawned && ev.command == CommandType::Recruit && sim.world().members.has(ev.entity)) ++units;
+            if (ev.type == SimEvent::Type::Recruited) inf = ev.entity;
+        }
+    }
+    REQUIRE_FALSE(inf.isNull());
+    CHECK(units == recruitPlan(defs, defs.regimentIndex("regiment_gbr_infantry")).size());
+    CHECK(ledgerOf(sim, 0).ammoNet() == 30_fx - 10_fx);  // corps 20 + HQ 10, infantry upkeep 10
+    // Heavy tanks: not this HQ's, and they need a motor pool and tech_heavy_tank anyway.
+    sim.step({at(makeRecruit(0, 0, 0, hq, "regiment_gbr_tank_heavy"))});
+    CHECK(std::any_of(sim.events().begin(), sim.events().end(), [](const SimEvent& ev) { return ev.type == SimEvent::Type::CommandRejected; }));
 }

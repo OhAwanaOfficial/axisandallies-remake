@@ -88,7 +88,7 @@ unit i steers toward slotTarget_i (arrive behaviour) + local avoidance
 ### 4.1 Trucks with trailers (packed buildings)
 * A packed building is a regiment of truck(s), where each truck tows a trailer (`trailer_actor`, `TrailerHitch` node offset) **[DATA]**.
 * Trailer kinematics: the trailer follows the hitch point with a fixed-length bar constraint (integer approximation). It's view-relevant only. The sim footprint is truck plus trailer length, used for clearance checks.
-* **Unpack placement:** check the footprint against the static and dynamic layers plus `placement_groups` rules (spacing to other buildings, not on water or mountain). The trucks path to the placement point, then the 7 s unpack timer runs and the footprint is stamped at the start of unpacking, so other units route around it.
+* **Unpack placement** (M6 part 1, GAME_DESIGN §7): the footprint and its padding must be on passable ground for foot and wheeled units, at least `BuildingPaddingMeters` (2) from any other building stamp. `placement_groups` turned out to be editor palettes, not rules. The trucks path to the footprint's centre, then the building's unpack timer runs (7–10 s) and the footprint is stamped at the start of unpacking, so other units route around it. Trailers are view-only for now.
 
 ### 4.2 Aircraft
 * No grid. Steering with a **minimum turn radius** and cruise speed. Missions are scripted state machines: take off from the airfield or carrier → fly a waypoint path → strike or recon → return → land.
@@ -299,7 +299,7 @@ Ordering several regiments together makes them one `Group`, reused when the same
 
 **Stuck → repath.**
 * Each 20-tick window compares the anchor's actual progress with its speed allowance (lag excluded). Under 10% → new path from the current position.
-* A building appearing on the next step also re-paths at once.
+* A building appearing on the next step also re-paths at once. But first the anchor tries to slide along the free axis (M6 part 1): a path's corners are checked between cell centres while the anchor walks from where it actually is, so its line can clip the corner of a building cell it passes. Before this, a truck leaving its Corps HQ diagonally re-pathed into the same corner until the order ended blocked.
 * After 3 consecutive failures the order ends as blocked.
 
 **Measured.** `simcli scenario` on gen:7:256, six regiments (PER/USA/GBR-AT infantry, GER medium tank, GBR heavy tank, USA halftrack):

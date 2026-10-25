@@ -92,6 +92,13 @@ Example values (GBR template, same for PER) **[DATA]**:
 
 Income is applied **per sim tick, pro-rated** (income/min ÷ 600 ticks) using fixed-point. The HUD shows per-minute values.
 
+**Implemented (M6 part 1, `sim/systems/economy.*`):**
+* **Start:** `StartPlayer` gives a kingdom its Corps HQ (deployed) and **500 money** **[DATA `ResourceStockpileDefault`]**. The start location (Thing `start_loc`) provides **building limit 20** **[DATA]**.
+* **Who produces and pays:** every deployed building (not while packing or unpacking), every truck (packed HQs keep producing: the Corps truck +12 money, +5 oil, +10 ammo; an HQ truck also +5 unit limit) **[DATA]**, every regiment (its organization's upkeep: infantry 10 ammo, unit limit 1) and every unit with an upkeep.
+* **Shortfall prices** come from the Resource records' `PurchaseCost` (ammo 2, oil 3). The money stockpile is clamped to 0 .. `EconomyStockpileResourceMax` (99999); the unit limit provided is capped at `EconomyLimitedResourceMax` (20).
+* **Limits:** a regiment's `unit_limit_consumed` (infantry 1) and a truck's or building's `building_limit_consumed` (1; a supply depot 0) count while they exist; queued and half-recruited regiments reserve what they will consume.
+* **Bankrupt** (no money, negative net income) is a kingdom flag with events. Its effects (slow resupply, attrition out of supply, no construction or repair) arrive with supply and construction (M6 part 2).
+
 ---
 
 ## 6. Units, regiments, combat
@@ -275,7 +282,15 @@ Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from R
 | **Bunkers** (MG, AA, Artillery) | Built by **Engineers**, static defense | Have ammo upkeep |
 | **Cities** (neutral settlements) | Capture by occupying the centre with no enemies present. Big money and supply zone | `SettlementComponent`, village layouts per region |
 
-**Pack/unpack** **[DATA `MobileDeploymentComponent`]**: a building packs onto trucks (+ trailer) in `packing_length = 7 s`, can't pack below `pack_health_min = 50%` health, moves like a regiment, then unpacks at a valid placement (red ghost if invalid). Placement rules come from `placement_groups*.tgi` and building `Size` (e.g. `square_size = 10`).
+**Pack/unpack** **[DATA `MobileDeploymentComponent`]**: a building packs onto trucks (+ trailer) in its `packing_length`, can't pack below `pack_health_min = 50%` health, moves like a regiment, then unpacks at a valid placement (red ghost if invalid). The times differ per building **[DATA]**: Corps HQ 10 s, division HQs 8 s, depots and brigades 7 s (their trucks' own `unpacking_length` is 7 s).
+
+**Implemented (M6 part 1, `sim/systems/bases.*`):**
+* **HQ regiments:** a division HQ is a regiment in two forms **[DATA]**. Packed, `regiment_gbr_hq_infantry` holds the truck `gbr_truck_infantry`, whose `unpack_to_actor_ids` names the building `gbr_hq_infantry`. Unpacked, `regiment_gbr_hq_infantry_unpacked` holds the building. The Corps HQ recruits the packed form; the truck costs what the building does (225).
+* **Convoys:** a truck no regiment holds (the Corps truck, depot and brigade trucks, which the Corps HQ recruits bare) travels as a synthetic one-truck regiment `convoy_<truck>`, with the truck on the anchor.
+* **Placement** (`placeBuilding`): the footprint is `Size` (SQUARE `square_size`: HQs 10, depots 8; RECT `rect_width` × `rect_height`; CIRCLE 2 × `blocking_radius`), turned by the facing (`axis_locked`: snapped to 90°) and snapped to whole cells. It and its `BaseTerrain` `padding` (1) must be inside the map and passable for foot and wheeled units; no building may be within `BuildingPaddingMeters` (2) of it; a kingdom has one Corps HQ (property `corpshq`). **`placement_groups` are only the editor's palettes** (`group_nation_gbr`, …: an IDS and a name); they add no rule.
+* **Unpack:** the truck regiment drives to the footprint's centre; on arrival the placement is checked again, then the trucks give way to the building, which stamps its footprint at once and unpacks for its `unpacking_length`. It keeps the trucks' health fraction and the regiment's XP. Re-ordering the trucks cancels; a spot taken meanwhile gives `DeployFailed`.
+* **Pack:** health at least `pack_health_min`, nothing queued or researching; after `packing_length` the building gives way to its packed HQ regiment (or its truck's convoy), health fraction and XP kept.
+* **Recruit** (`RecruitComponent`): up to 5 regiments queued per building, paid when queued (the regiment's cost plus its units', e.g. a truck's), refundable until it starts. The front regiment appears empty at the building's `DenizenComponent/DeploymentInfo` `creation_offset` and heads for its `deployment_offset`; a unit joins every `recruit_time` ÷ units (infantry regiments: 15 s), the first after one interval **[CALIBRATE]**. Every unit's `required_structures` must all be owned and deployed (a unit listing several needs all of them), and its `required_properties` must be on the recruiting building (its own, its LOCAL research, or the kingdom's research that applies to it). Recruiting ignores supply until supply zones exist.
 
 **Biomes:** buildings and trailers have `Arctic/` and `Desert/` texture variants. Choose by map biome.
 
@@ -294,6 +309,7 @@ Terrain groups: dirt, snow, water, desert (+ forest/jungle/mountain blobs from R
 * Each player picks **1 of 4 generals** for their nation. Each general has **4 special operations** (hotkeys Y/H/N/J), with a cooldown bar plus an **army XP cost** per use.
 * Special ops are defined in data (`SpecialOps/*.tgi`, `ability_special_op` templates) and implemented as abilities/enchantments (e.g. `ench_type_courage/fear/radiation`).
 * **Research** **[DATA `ResearchComponent`]**: per-building research items, each with a property, a type (`LOCAL` = this actor, `SUPPORT` = settlement, `GLOBAL` = kingdom), required structures/properties, time and cost. Research grants **properties**, and properties modify stats. This is the general modifier system: one `PropertyDef` applies stat deltas and multipliers and unlocks.
+  * **Implemented (M6 part 1):** one item at a time per building, paid at the start (refunded on cancel), granted after `research_time` (the Corps HQ's six GLOBAL items: 60 s, 50–150 money). A technology property applies to the kingdom's actors that have its own `required_properties`: `tech_improved_machineguns` (AV +4) to actors with `mg`, `tech_heavy_tank` to the armour HQ (`armorhq`), which is what lets that HQ recruit heavy tanks (their `required_properties`). Research AV and DV add to combat now; other attributes (supply range, resupply rate, detection) wait for their systems. The items' `required_structures` / `required_properties` are "false" in the data. SUPPORT items wait for cities.
 
 ---
 

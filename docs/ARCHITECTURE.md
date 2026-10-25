@@ -115,7 +115,8 @@ flowchart LR
   * M3: `Transform`, `DefRef`, `Health`, `Member`.
   * M4: `Footprint`, `Path`, `Regiment`, `Order`, `Mover`, `Group`.
   * M5: `Combat` (per weapon: target, cooldown; per turret: yaw, idle time; the target a local gun turns the body to), `Engagement` (a regiment's engagement state machine, Attack / AttackMove, the move it put on hold; part 2 adds morale, actual efficiency, XP and level, the entrenchment timer and its last attacker) and `Projectile` (a shot in flight).
-  * Per player (not a pool): `World::kingdoms`, each active or not and with its army XP (M5 part 2).
+  * Per player (not a pool): `World::kingdoms`, each active or not and with its army XP (M5 part 2); M6: started, money, bankrupt, and the properties its GLOBAL research granted.
+  * M6 part 1: `Structure` (a player building: deployed / unpacking / packing and its timer, its HQ regiment's XP, LOCAL research, the recruit queue with the regiment being filled, the research in progress) and `Deploy` (a truck regiment driving to unpack: building, centre, facing).
   * More arrive with their systems.
 
 Components mirror the original:
@@ -142,7 +143,10 @@ Components mirror the original:
 
 1. **Apply commands** for this tick, sorted by player id, then sequence, then position in the bundle. `Sim::step(commands)` receives exactly one tick's commands. The **CommandQueue** that holds future commands belongs to the session (replay player, lockstep scheduler), not to the sim. Peers receive future bundles at different times, so future commands must not be part of the hashed state. A command for any other tick is rejected deterministically.
 2. **Economy**: production, upkeep, oil/ammo shortfall → money conversion, limits.
+   * Implemented in M6 part 1 (`sim/systems/economy.*`, GAME_DESIGN §5): each kingdom's totals are summed over every def-backed entity in ascending order (not stored), and its money moves by net ÷ 600 per tick.
 3. **Construction / pack / unpack / recruit / research** timers.
+   * Implemented in M6 part 1 (`sim/systems/bases.*`, GAME_DESIGN §7, §9): truck regiments arriving to unpack, then per Structure (ascending) its unpack / pack timer, the next recruit, the research. A timer started during a tick is counted down in that tick's stage, so it starts one higher and ends exactly its data time later.
+   * Commands 10–16 (`StartPlayer`, `Recruit`, `CancelRecruit`, `Unpack`, `Pack`, `Research`, `CancelResearch`, payload `BaseOrderPayload`) and debug 209–210 (`DebugSetMoney`, `DebugGrantProperty`).
 4. **Orders → plans**: regiment/group order state machines (move, attack, guard, run, retreat).
 5. **Pathfinding service**: process the request queue with a fixed node-expansion budget ([PATHFINDING.md](PATHFINDING.md)).
 6. **Movement**: regiment anchor advance, formation slots, unit steering and local avoidance.
@@ -163,7 +167,7 @@ Components mirror the original:
 12. **Capture, objectives, victory** (`game_events`).
 13. **Cleanup** (deaths → events), then the **state hash** (every N ticks).
 
-Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are appended to a per-tick buffer that the view drains. Implemented so far: Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired (shooter → target), Died (unit → killer), Routed (regiment → its last attacker) and LevelUp; SimBridge passes them to the view as `fired`, `died`, `routed`, `level_up` with `other`.
+Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are appended to a per-tick buffer that the view drains. Implemented so far: Spawned, Destroyed, CommandRejected, Arrived, Blocked, Fired (shooter → target), Died (unit → killer), Routed (regiment → its last attacker), LevelUp, Hit; M6: Recruited, Unpacked, Packed, ResearchDone, Bankrupt, Solvent, DeployFailed. SimBridge passes them to the view by name (`fired`, `died`, `routed`, `level_up`, `recruited`, `unpacked`, …) with `other`.
 
 **Math library (`sim/math`, M3).**
 * **`Fixed`:** Q32.32 in `int64`, range ±2³¹, resolution 2⁻³².
@@ -184,7 +188,7 @@ Events (`UnitFired`, `UnitDied`, `RegimentRouted`, `BuildingPacked`, ...) are ap
 * **Cross-platform check:** a fixed checksum over 10k mixed operations must match on every compiler and build type.
 
 **Canonical state, replays and determinism tooling (`sim/session`, M3).**
-* **`saveState`/`loadState`:** one byte layout (format v5) used for the state hash, saves and desync dumps. It holds the header (tick, seed, data hash, map hash, combat tuning hash, RNG), the entity registry, each component pool by ascending id (Transform, DefRef, Health, Member, Footprint, Path, Regiment, Order, Mover, Group, Combat, Engagement, Projectile), the kingdoms (`KING`: per player, active and army XP), then the nav section: graph version, clusters dirty since the last rebuild, and the PathService queue and suspended job. The nav grid and HPA* graph are not stored; loading rebuilds them from the map and the live footprints. **The state hash is `xxh3_64`** of those bytes; xxHash 0.8.2 is vendored in `third_party/`.
+* **`saveState`/`loadState`:** one byte layout (format v6) used for the state hash, saves and desync dumps. It holds the header (tick, seed, data hash, map hash, combat tuning hash, RNG), the entity registry, each component pool by ascending id (Transform, DefRef, Health, Member, Footprint, Path, Regiment, Order, Mover, Group, Combat, Engagement, Projectile, Structure, Deploy), the kingdoms (`KING`: per player, active, army XP, started, money, bankrupt, research properties), then the nav section: graph version, clusters dirty since the last rebuild, and the PathService queue and suspended job. The nav grid and HPA* graph are not stored; loading rebuilds them from the map and the live footprints. **The state hash is `xxh3_64`** of those bytes; xxHash 0.8.2 is vendored in `third_party/`.
 * **Replays (`.rpl`, format v3):** header (sim version = git tree hash of `sim/`, data hash, seed, map spec and hash, the combat tuning that differs from the defaults), commands, and `(tick, hash)` every 10 ticks, followed by an integrity hash. Map specs `gen:SEED:SIZE` (test maps) and `arena:TERRAIN:SIZE` (duel arenas) are regenerated on playback.
 * **`simcli` commands:** `record` / `play` / `determinism-check [--every-tick] [--per-stage]`. The determinism check runs the replay twice from fresh Sims and compares per-tick hashes, and per-stage hashes with `--per-stage`. It also compares against the hashes stored in the file, which may come from another build or OS. A committed synthetic fixture (`sim/tests/fixtures/synthetic_300.rpl`) is replayed on every CI job.
 * **Tick rate:** we run **10 Hz** as specified here and in NETCODE. The original's `SVars` says `GameTicksPerGameSecond = 16`. It's one constant (`kTicksPerSecond`), so it can change before movement (M4) bakes in per-tick numbers.

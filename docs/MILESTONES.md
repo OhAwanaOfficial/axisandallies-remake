@@ -30,6 +30,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
 | **M5** | Parts 1–3 done | — | See below. Left: the first calibration pass against the original (CALIBRATION.md). |
+| **M6** | Part 1 done (sim) | — | See below. Left: supply zones, healing and replacement, under siege, bankrupt effects, construction (bunkers), cities, victory, the HUD, the scripted opponent. |
 
 **M4 details:**
 * **Nav:**
@@ -104,6 +105,15 @@ Carried over from M4:
 * **Input:** right click on an enemy attacks; A + click attack-moves or attacks; the original attack cursor; the selected regiment's info panel.
 * **Checks:** 9 new self-test checks (23 in all); `--fight`, `--speed`, `--warmup`, `--no-fx` for screenshots and profiling.
 * **Numbers:** on Low, effects and banners cost about 0.5 ms a frame, in the 71-unit demo fight and with 160 regiments fighting (28.8 fps vs 29.1 off).
+
+**M6 part 1 details (sim only; GAME_DESIGN §5, §7, §9):**
+* **Data:** buildings' Size, padding, lock flags, pack / unpack times and health floor, DeploymentInfo offsets, research items, resolved recruit lists; trucks' `unpack_to` and production; units' required structures (split) and properties; `EconomyDef` (start money 500, caps, prices 2 / 3, padding 2, the start location's building limit 20); trucks linked to buildings and HQ regiments (packed / unpacked); `convoy_<truck>` regiments with a one-element layout for trucks no regiment holds.
+* **Economy** (`sim/systems/economy.*`): per-kingdom ledger (production, upkeep, shortfall bought with money, unit / building limits with reservations), money per tick, bankruptcy; research AV / DV in combat.
+* **Bases** (`sim/systems/bases.*`): placement, StartPlayer, pack / unpack via trucks with stamping, recruiting unit by unit with requirements, research granting properties (GLOBAL / LOCAL).
+* **Commands** 10–16 and 209–210; events Recruited, Unpacked, Packed, ResearchDone, Bankrupt, Solvent, DeployFailed.
+* **Formats:** state v6 (`STRC`, `DPLY`, economy in `KING`); DefSet layout v5.
+* **Movement fix:** an anchor slides around a building corner its smoothed path clips instead of re-pathing into it (PATHFINDING §5).
+* **Tests:** `test_economy.cpp` (13 cases on hand-built defs: income, the manual's shortfall example, bankruptcy, limits, placement, recruiting, requirements, research, pack / unpack, save / load, encoding, a replay fixture `sim/tests/fixtures/economy_m6.rpl`), 2 golden cases on the GBR data, `simcli economy` + determinism check in CTest. Golden movement hash and the M3–M5 fixtures re-recorded (format change; behaviour checks unchanged).
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

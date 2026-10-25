@@ -68,6 +68,7 @@ TickBundle { u32 tick; u8 nPlayers; (u8 player, u8 count, Command[count])* ; u32
 Typical command: 6–20 bytes. Selections of up to 6 regiments go in **one command** (`MoveGroup{ids[], goal, facing, formation}`).
 
 **Command set** (initial): `MoveGroup, AttackTarget, AttackMove, Run, Stop, Guard, SetFormation, SetGroupBehaviour, Pack, Unpack(pos, rot), Deploy(buildingId, orgType), CancelDeploy, Research(buildingId, item), Build(engineerReg, structType, pos, rot), Repair, UseSpecialOp(opId, target), Tribute, Flare, Surrender, SetInputDelay, Pause, SetSpeed`.
+Implemented so far (`sim/core/command.hpp`): MoveGroup, Run, Stop, SetFormation, SetGroupBehaviour, Attack, AttackMove, Retreat (M4–M5); StartPlayer, Recruit (the original's Deploy), CancelRecruit, Unpack, Pack, Research, CancelResearch (M6 part 1).
 
 **Validation** happens **inside the sim** when a command is applied (ownership, affordability, placement legality). An invalid command is ignored deterministically on every machine and also flagged to the issuing player's UI. A cheating client can't do anything a legal command couldn't.
 

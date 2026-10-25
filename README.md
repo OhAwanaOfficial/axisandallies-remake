@@ -119,6 +119,16 @@ XP. Options: `--distance`, `--formation-a/-b`, `--entrench-a/-b`, `--xp-a/-b N`,
 for `determinism-check`) and `--verbose`. The calibration procedure and the ten scenarios to compare with the original
 are in [docs/CALIBRATION.md](docs/CALIBRATION.md).
 
+## Economy and bases (M6)
+```bash
+build\windows\simcli\Release\simcli.exe economy gbr --minutes 5 --recruit regiment_gbr_hq_infantry@0,gbr_truck_oil@5,regiment_gbr_infantry@60 --research tech_improved_logistics@10
+```
+One kingdom's base on a flat arena: it starts with its Corps HQ and 500 money, recruits and researches on a script
+(`IDS@SECONDS`), unpacks every truck that comes out at the first free spot around the HQ, and prints a ledger every
+minute (money, net income, oil and ammo balance, the shortfall bought with money, unit and building limits) with the
+events. `--out` writes a replay for `determinism-check`; `simcli show-def gbr_corps` shows a building's footprint,
+packing, recruits and research.
+
 ## Import the original art and browse it (M2)
 ```bash
 python -m venv .venv
