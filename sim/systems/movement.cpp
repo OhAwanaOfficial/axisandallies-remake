@@ -405,9 +405,18 @@ void followPath(Ctx& ctx, EntityId id, Transform& a, Order& o, std::uint8_t cls,
         const Fixed len = d.length();
         const bool reaches = len <= remaining;
         const FVec2 next = reaches ? target : a.position + d * (remaining / len);
-        if (passable(ctx.g, cls, a.position) && !passable(ctx.g, cls, next)) {  // a building appeared ahead
-            repath(ctx, id, o);
-            return;
+        if (passable(ctx.g, cls, a.position) && !passable(ctx.g, cls, next)) {
+            // The path's corners were checked between cell centres, but the anchor walks from where
+            // it is: its line can clip the corner of a blocked cell (a building's). Slide along the
+            // free axis for this tick; only when both are blocked (a building appeared ahead) re-path.
+            const FVec2 slid = slide(ctx.g, cls, a.position, next);
+            if (slid == a.position) {
+                repath(ctx, id, o);
+                return;
+            }
+            moved += distance(a.position, slid);
+            a.position = slid;
+            break;
         }
         a.position = next;
         const Fixed step = reaches ? len : remaining;
