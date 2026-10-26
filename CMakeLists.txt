@@ -17,6 +17,7 @@ option(CORPS_BUILD_TESTS "Build unit tests" ON)
 include(FetchContent)
 
 add_subdirectory(sim)
+add_subdirectory(ai)
 add_subdirectory(simcli)
 
 if(CORPS_BUILD_TESTS)
@@ -81,6 +82,34 @@ if(CORPS_BUILD_TESTS)
     --map ${CORPS_GOLDEN_FIELDS})
   set_tests_properties(simcli_skirmish_determinism PROPERTIES FIXTURES_REQUIRED skirmish_rpl
     SKIP_REGULAR_EXPRESSION "cannot read")
+  # The vertical slice (M6 close-out): a scripted GBR player against the dummy GER AI on Golden Fields,
+  # from the setup to the victory; the whole match must replay identically. Optimized builds only:
+  # the Debug sim (~40x slower) would take about 25 minutes.
+  add_test(NAME simcli_slice COMMAND simcli slice gbr ger --map ${CORPS_GOLDEN_FIELDS} --seed 2 --minutes 45
+    --out ${CMAKE_BINARY_DIR}/slice.rpl CONFIGURATIONS Release RelWithDebInfo)
+  set_tests_properties(simcli_slice PROPERTIES SKIP_RETURN_CODE 77 FIXTURES_SETUP slice_rpl)
+  add_test(NAME simcli_slice_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/slice.rpl --per-stage
+    --map ${CORPS_GOLDEN_FIELDS} CONFIGURATIONS Release RelWithDebInfo)
+  set_tests_properties(simcli_slice_determinism PROPERTIES FIXTURES_REQUIRED slice_rpl
+    SKIP_REGULAR_EXPRESSION "cannot read")
+  # The same slice through the game itself, headless: setup screen -> battle (the scripted slice
+  # player against the dummy AI) -> victory screen -> its replay; and the mirror (the dummy plays
+  # you) -> defeat screen -> New skirmish back to the setup screen. Both replays must replay
+  # identically. Needs Godot on PATH and the GDExtension built.
+  find_program(CORPS_GODOT NAMES Godot_v4.7.2-stable_win64_console godot4 godot)
+  if(CORPS_GODOT AND CORPS_BUILD_GDEXT)
+    foreach(_kind slice defeat)
+      add_test(NAME godot_${_kind}_test COMMAND ${CORPS_GODOT} --headless --path ${CMAKE_SOURCE_DIR}/godot --
+        --${_kind}-test=${CMAKE_BINARY_DIR}/godot_${_kind}.rpl CONFIGURATIONS Release RelWithDebInfo)
+      set_tests_properties(godot_${_kind}_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900
+        PASS_REGULAR_EXPRESSION "SLICE TEST PASSED" FAIL_REGULAR_EXPRESSION "SLICE TEST FAILED;SCRIPT ERROR"
+        FIXTURES_SETUP godot_${_kind}_rpl)
+      add_test(NAME godot_${_kind}_determinism COMMAND simcli determinism-check ${CMAKE_BINARY_DIR}/godot_${_kind}.rpl --per-stage
+        --map ${CORPS_GOLDEN_FIELDS} CONFIGURATIONS Release RelWithDebInfo)
+      set_tests_properties(godot_${_kind}_determinism PROPERTIES FIXTURES_REQUIRED godot_${_kind}_rpl
+        SKIP_REGULAR_EXPRESSION "cannot read")
+    endforeach()
+  endif()
   # The many-regiments benchmark runs (a short version; `simcli perf` alone is the 160-regiment one).
   add_test(NAME simcli_perf_smoke COMMAND simcli perf --gen 7 --size 512 --regiments 40 --ticks 60)
   set_tests_properties(simcli_perf_smoke PROPERTIES SKIP_RETURN_CODE 77)

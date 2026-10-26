@@ -22,6 +22,7 @@
 //                  [--out F.rpl]
 //   simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]
 //                   [--city-ratio R] [--seed S] [--out F.rpl]
+//   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -81,7 +82,8 @@ void usage() {
                  "  simcli economy [NATION] [--minutes M] [--recruit IDS@S,...] [--research PROP@S,...]\n"
                  "                 [--size N] [--seed S] [--out F.rpl]\n"
                  "  simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]\n"
-                 "                  [--city-ratio R] [--seed S] [--out F.rpl]\n");
+                 "                  [--city-ratio R] [--seed S] [--out F.rpl]\n"
+                 "  simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -167,8 +169,8 @@ const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-se
                                              "map", "gen", "size", "queries", "class", "budget",
                                              "distance", "formation-a", "formation-b", "max-seconds", "tune",
                                              "xp-a", "xp-b", "retreat-a", "retreat-b", "minutes", "recruit", "research",
-                                             "city-ratio", "regiments-b"};
-const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose",
+                                             "city-ratio", "regiments-b", "money"};
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose", "trace",
                                             "until-wiped"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -368,6 +370,7 @@ int main(int argc, char** argv) {
     if (args->command == "duel") return simcli::cmdDuel(sa);
     if (args->command == "economy") return simcli::cmdEconomy(sa);
     if (args->command == "skirmish") return simcli::cmdSkirmish(sa);
+    if (args->command == "slice") return simcli::cmdSlice(sa);
     usage();
     return kExitUsage;
 }
