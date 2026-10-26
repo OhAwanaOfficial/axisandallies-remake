@@ -15,7 +15,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M6** | Economy & bases → **Vertical slice** | Corps HQ, trucks pack/unpack with trailers, placement rules, Division HQs recruit regiments (unit-by-unit fill while in supply), depots, upkeep + shortfall conversion, unit/building limits, supply zones + under siege, healing/replacement, research (properties), city capture, victory. Full HUD (stats bar, command panel, info panel, minimap). **Playable 1v1 skirmish vs a dummy scripted opponent.** | Sonnet · medium/high |
 | **M7** | Skirmish AI v1 | AIController per AI.md: Egos, Economy/Production/Base managers, influence maps, task forces, formation discipline, retreat-before-rout. Debug overlay. Headless AI-vs-AI soak. **Beats Easy-you; loses to good-you.** | **Opus · high** for design, Sonnet to implement |
 | **M8** | Multiplayer | Lobby, lockstep scheduler, ENet transport, adaptive input delay, hash exchange + desync dumps + `simcli diff/bisect`, drop → AI takeover, replays UI (Films). **2-player LAN game for 30 min with zero desyncs**, then a 4-player internet test. | **Opus · high** |
-| **M9** | Content breadth | All 5 nations + mods, all regiments, airfield/air missions, naval units and amphibious transports, engineers and bunkers, generals and all special ops, fog modes, team commands/flares/tribute, flow fields if needed. | Sonnet · medium |
+| **M9** | Content breadth | All 5 nations + mods, all regiments, airfield/air missions, naval units and amphibious transports, engineers and bunkers (construction, repair), generals and all special ops (the HUD's special-ops and group bars), fog modes, team commands/flares/tribute, flow fields if needed. | Sonnet · medium |
 | **M10** | Original maps | Reverse the map binary format, load skirmish maps (`(1v1)Golden Fields`, `(4v4)NorthernFrance`, ...), full RMC random-map generator. | Opus · high (reverse engineering) |
 | **M11** | World War II mode | World map (WorldMap NIFs), territories, armies, purchase/upgrade/tech, turn flow, Quick Resolve, RTS battle hand-off, metagame AI. | Sonnet · medium, Opus for AI |
 | **M12** | Campaigns & polish | Trigger/objective system from `game_events`, campaign missions, Bink → OGV cutscenes, music, options, localization, accessibility, performance pass. | Sonnet · medium |
@@ -30,7 +30,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
 | **M5** | Parts 1–3 done | — | See below. Left: the first calibration pass against the original (CALIBRATION.md). |
-| **M6** | Parts 1–3 done | — | See below. Left: construction (bunkers) and repair, the special-ops and group bars, the scripted opponent. |
+| **M6** | Done | v0.6 | See below. Not in the slice, moved to M9: construction (bunkers) and repair, the special-ops and group bars. |
 
 **M4 details:**
 * **Nav:**
@@ -129,6 +129,22 @@ Carried over from M4:
 * **Battle view:** both kingdoms start with their Corps HQ at the map's start positions; buildings are drawn; building selection; the camera's default heading is diagonal as in the original.
 * **Sim:** `recruitBlocker` / `researchBlocker` / `packBlocker` (the commands use them too) and a test of their reasons.
 * **Checks:** 17 new selftest checks (41 in all).
+
+**M6 close-out (the vertical slice; v0.6):**
+* **Skirmish setup screen** (`godot/scripts/menu/skirmish_setup.gd`, the `Skirmish` autoload): map (every `cache/maps/*/map.json`, or a generated test map), your nation and the opponent's (GBR, GER, USA, RUS, JPN; the staging screen's flags), starting money (the map's, 500, 1000, 2000, 5000), seed. Launching the game without options opens it.
+* **Dummy opponent** (`ai/`, AI.md §7a): deploys an Infantry HQ and a Motor Pool, keeps oil and ammo out of the red, recruits rifle and AT infantry, defends its buildings, sends a wave every 4 minutes from minute 6.
+* **Victory / defeat screens** (`godot/scripts/hud/end_screen.gd`): result, how it ended, match time, regiments recruited, units and buildings lost, cities held; continue watching, new skirmish (back to the setup screen), quit.
+* **Play-tests:**
+  * `simcli slice`: a scripted player plays the slice path headless against the dummy and checks it: Infantry and Armour HQs deployed, the four regiment types recruited, both cities taken, the enemy eliminated, victory. It records the match.
+  * `godot --headless --path godot -- --slice-test`: the same through the game itself. The setup screen is filled in and started, the battle runs to the victory screen, and the replay is written.
+  * `--defeat-test`: the mirror (the dummy plays you) ends on the defeat screen, and New skirmish returns to the setup screen.
+  * All of these run in CTest with determinism checks of their replays. GBR against GER on Golden Fields (seed 2): victory at 18:57, 11,476 ticks, deterministic at every stage. The Godot run's replay ends on the live game's hash.
+* **Sim:**
+  * Starting money is a match rule: `SetMatchRules` gains `startMoney`, the state goes to v8 (`MTCH`).
+  * A building that dies drops the regiment it was still filling with no unit yet. An empty HQ regiment kept a kingdom alive forever; HQ regiments now count only with a unit left.
+  * The M3–M6 fixtures and the movement golden hash are re-recorded.
+* **SimBridge:** `set_controller` (the AI on the host, thinking before each step), `queue_match_rules`, `save_replay` (every command queued since start, re-run to fill the hashes and checked against the live state), `drain_ai_notes`, `mount` (the install's files before a match).
+* **Against the definition below:** one map (Golden Fields), you against a scripted dummy, GBR against GER (the setup screen offers the other three nations too). The data's chain needs the Mechanized HQ before the Armour HQ and the Motor Pool for AT infantry, and both are part of the slice path. Supply, upkeep, morale, XP and formations are all in play. The cities and the Corps HQ fall, and the match ends on the elimination rule (every HQ, division HQs included; GAME_DESIGN §12). The deterministic replay of the whole match is checked in CTest. **Not met: stable 60 fps.** The dev laptop's 50 Hz panel holds V-Sync to about 24 fps with or without the HUD; uncapped, Low runs the 71-unit demo at 74–86 fps and 499 units at 48 fps (ARCHITECTURE §4.4).
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

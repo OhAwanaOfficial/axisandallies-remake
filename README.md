@@ -129,6 +129,26 @@ minute (money, net income, oil and ammo balance, the shortfall bought with money
 events. `--out` writes a replay for `determinism-check`; `simcli show-def gbr_corps` shows a building's footprint,
 packing, recruits and research.
 
+## Play a skirmish (M6, the vertical slice)
+```bash
+godot --path godot
+```
+Without options the game opens the skirmish setup screen: pick the map, your nation and the opponent's, the starting
+money and a seed, then Start. Both sides begin with their Corps HQ; the opponent is a dummy AI that builds a few
+regiments, defends its base and attacks every few minutes. Destroy every enemy HQ (Corps and division HQs) to win; the
+victory or defeat screen shows the match's statistics. Use the optimized GDExtension (`windows-relwithdebinfo`).
+
+Play-test the whole slice without a window, then check its replay:
+```bash
+godot --headless --path godot -- --slice-test=slice.rpl
+```
+```bash
+build\windows\simcli\RelWithDebInfo\simcli.exe determinism-check slice.rpl --per-stage --map cache/maps/golden_fields/map.json
+```
+`--defeat-test` plays the mirror (you lose). `simcli slice gbr ger --map cache/maps/golden_fields/map.json --seed 2`
+plays the same match in the sim alone and prints its timeline (both sides' decisions, captures, the result) and a
+checklist of the slice path.
+
 ## The battle HUD (M6 part 3)
 ```bash
 godot --path godot -- --select-hq --supply

@@ -27,7 +27,7 @@ Depot order (later wins): `Data.rwd` → `data/` → `skins/*.rwd` → `Music.rw
 `data/` contains the user's PER/SAU nation mods. They must keep loading.
 
 ## Layout
-`sim/` C++20 core · `simcli/` headless runner · `gdext/` Godot bindings · `godot/` Godot project · `tools/` Python importers · `cache/` generated (gitignored)
+`sim/` C++20 core · `ai/` host-side AI controllers (emit Commands; not part of the sim) · `simcli/` headless runner · `gdext/` Godot bindings · `godot/` Godot project · `tools/` Python importers · `cache/` generated (gitignored)
 
 ## Conventions
 - C++: `snake_case` files, `PascalCase` types, `camelCase` functions, `m_` not used; prefer `struct` + free functions in systems

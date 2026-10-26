@@ -139,6 +139,20 @@ Mission scripts (from `game_events` / triggers in campaign maps) can: lock egos,
 
 ---
 
+## 7a. Implemented: the M6 dummy opponent and the slice player
+
+`ai/controller.{hpp,cpp}` (library `corps_ai`, linked by `simcli` and the GDExtension): host-side `Controller`s that read the sim before each tick and emit Commands like a player, at most once a second. They are rule-based, not the layered AI above, and deterministic (integer and Fixed maths over the sim's ascending-id pools, no RNG), so a headless play-test reproduces exactly; replays still replay their commands, not them. One `RuleAi` runs a `Plan`:
+
+* **Base:** the Corps HQ deploys the plan's buildings in order (each truck unpacks on the first spot round the Corps HQ with 6 cells of room from every other building; the placement rule's 2 m gap could wall regiments in), then an oil or ammo depot while that balance is negative (recruiting waits for it). A blocked step is noted once with its `Blocker` reason (e.g. "can't deploy gbr_hq_armor: requires_structure gbr_hq_mechanized").
+* **Army:** the roster is recruited strictly in turn (the next entry waits for money rather than letting a cheaper one go first), one regiment queued per division HQ, up to the army cap; at most two while a planned building is missing (its truck needs money and a unit-limit slot).
+* **Cities** (slice player): one home regiment per city its team doesn't hold, standing 8 m from the centre on the walkable point nearest it, the next point on each retry.
+* **Defence:** home regiments attack-move onto any enemy within 45 m of an own building.
+* **Waves** (dummy): from minute 6, every 4 minutes, all but two home regiments attack-move at the enemy Corps HQ; idle wave regiments go again.
+* **Push** (slice player): at 8 regiments, every non-city regiment goes for the enemy's HQs: the Corps HQ first (it deploys the others), then the nearest, keeping its target until it is gone. Far away (over 30 m) they attack-move to a walkable point near it, close by they Attack it. Reinforcements join in groups of four. Routing, retreating or exhausted regiments are never ordered (the sim refuses).
+* **Plans:** the dummy deploys an Infantry Division HQ and a Motor Pool and recruits rifle and AT infantry (5 regiments). The slice player deploys the Infantry HQ, the Motor Pool, the Mechanized HQ and the Armour HQ (the data's chain: AT infantry needs the motor pool, the Armour HQ the Mechanized one) and recruits rifle infantry, light tanks, AT infantry and medium tanks (12).
+* **Not yet:** fog (vision isn't implemented, so they see everything), difficulty, personalities, everything in §3–§6.
+* **Play-tests:** `simcli slice` (scripted player against the dummy, headless, checks the slice path, records the match) and the Godot `--slice-test` / `--defeat-test` runs (setup screen, battle, end screen, replay), all in CTest with determinism checks. GBR against GER on Golden Fields wins in 19–38 minutes depending on the seed; USA, RUS and JPN pairings play through too. With 500 starting money the slice player doesn't finish within 45 minutes.
+
 ## 8. Tooling & testing (as important as the AI itself)
 
 * **Debug overlay** (toggle per AI player): influence maps, objectives with scores, task forces with state and target, the last 20 decisions with their reason strings (e.g. "Retreat: morale 22% < break 30%").
