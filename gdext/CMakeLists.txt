@@ -2,7 +2,7 @@ add_library(simbridge SHARED
   register_types.cpp
   sim_bridge.cpp
 )
-target_link_libraries(simbridge PRIVATE sim godot-cpp)
+target_link_libraries(simbridge PRIVATE sim corps_ai godot-cpp)
 # godot-cpp compiles with HOT_RELOAD_ENABLED as a private flag; class_db.hpp reads it too.
 if(GODOT_ENABLE_HOT_RELOAD)
   target_compile_definitions(simbridge PRIVATE HOT_RELOAD_ENABLED)

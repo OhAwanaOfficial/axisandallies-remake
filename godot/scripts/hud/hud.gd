@@ -44,7 +44,6 @@ var info_root: Control
 var info := {}             # named info-panel nodes
 var queue_slots: Array[HudButton] = []
 var round_buttons := {}
-var banner: Label
 var supply_on := false
 var paused := false
 var selection := {"regiments": PackedInt64Array(), "building": 0}
@@ -87,16 +86,6 @@ func setup(p_bridge: SimBridge, p_art: UiArt, p_player: int) -> void:
 	bleed.visible = false
 	bleed.tooltip_text = bridge.localize("#game_interface_UpkeepShortageIcon_ToolTip")
 	screen.add_child(bleed)
-	banner = Label.new()
-	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	banner.add_theme_font_size_override("font_size", 40)
-	banner.add_theme_color_override("font_outline_color", Color.BLACK)
-	banner.add_theme_constant_override("outline_size", 8)
-	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	banner.visible = false
-	banner.position = Vector2(0, 250)
-	banner.size = Vector2(1024, 60)
-	screen.add_child(banner)
 	get_viewport().size_changed.connect(layout)
 	layout()
 	art.flush()
@@ -529,11 +518,6 @@ func _refresh_economy() -> void:
 		bridge.localize("#template_game_Unit_Limit_Consumed_ToolTip"))
 	bleed.visible = float(e.shortfall) > 0.0 or bool(e.bankrupt)
 	bleed.modulate = Color(1, 0.4, 0.4) if e.bankrupt else Color.WHITE
-	if bool(e.match_over) and not banner.visible:
-		banner.visible = true
-		var won := int(e.winner) == int(e.team)
-		banner.text = "VICTORY" if won else "DEFEAT"
-		banner.add_theme_color_override("font_color", Color(0.4, 1.0, 0.4) if won else Color(1.0, 0.35, 0.3))
 
 
 func _econ(key: String, text: String, color: Color, tip: String) -> void:

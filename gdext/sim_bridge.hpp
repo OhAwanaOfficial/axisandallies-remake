@@ -17,7 +17,9 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_int64_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector2.hpp>
 
@@ -25,6 +27,9 @@
 
 namespace corps {
 class Sim;
+namespace ai {
+class Controller;
+}
 struct DefSet;
 namespace nav {
 struct MapDef;
@@ -49,6 +54,9 @@ public:
     // map.json path), and creates the Sim. false + last_error() on failure.
     bool start(const String& game_dir, const String& map_spec, int64_t seed);
     String last_error() const;
+    // Mounts the game install's files only (no TGI data, no sim): enough for read_file_for_nation
+    // before a match (the setup screen's art). start() mounts again.
+    bool mount(const String& game_dir);
 
     // --- static data (view) -----------------------------------------------------------------
     Dictionary map_info() const;
@@ -146,6 +154,21 @@ public:
     // A file as `nation`'s skin sees it: skins/<NATION>.rwd first, other nations' skins ignored.
     PackedByteArray read_file_for_nation(const String& path, const String& nation) const;
 
+    // --- skirmish (M6 close-out) -----------------------------------------------------------------
+    // SetMatchRules (tick 0 only): teams (empty: each its own), city victory ratio, team victory,
+    // starting money (0: the map's).
+    void queue_match_rules(const PackedInt32Array& teams, double city_ratio, bool team_victory, double start_money, int64_t player);
+    // A host-side controller (ai/controller.hpp) plays `player`: "dummy" (the dummy opponent),
+    // "slice" (the scripted slice player) or "" (none). It thinks before each step and queues its
+    // commands like a player's.
+    bool set_controller(int64_t player, const String& kind, const String& nation);
+    // The controllers' notes since the last call (one line each).
+    PackedStringArray drain_ai_notes();
+    // Writes the match so far as a replay (every command queued since start(), the map spec and
+    // hash, the seed): re-runs it to fill the hashes and checks it ends on the live state.
+    // {ok, error, path, ticks, commands, hash}.
+    Dictionary save_replay(const String& path) const;
+
 private:
     struct Snap {
         uint32_t bits = 0;
@@ -169,6 +192,10 @@ private:
     mutable std::map<uint32_t, float> regimentHealthMax;  // most health each regiment had (banner / panel)
     Array events;
     uint16_t seq[256] = {};
+    std::vector<corps::Command> recorded;      // every command queued since start (the replay)
+    std::vector<std::unique_ptr<corps::ai::Controller>> controllers;
+    PackedStringArray aiNotes;
+    uint64_t seed_ = 0;
     std::string error;
     std::string biome;
 };

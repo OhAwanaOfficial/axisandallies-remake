@@ -14,6 +14,7 @@
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include "ai/controller.hpp"
 #include "core/ascii.hpp"
 #include "core/hello.hpp"
 #include "core/sim.hpp"
@@ -21,6 +22,7 @@
 #include "data/json_lite.hpp"
 #include "data/tgi/pipeline.hpp"
 #include "nav/nav_world.hpp"
+#include "session/replay.hpp"
 #include "session/state_io.hpp"
 #include "systems/bases.hpp"
 #include "systems/economy.hpp"
@@ -125,6 +127,7 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("hello"), &SimBridge::hello);
     ClassDB::bind_method(D_METHOD("start", "game_dir", "map_spec", "seed"), &SimBridge::start);
     ClassDB::bind_method(D_METHOD("last_error"), &SimBridge::last_error);
+    ClassDB::bind_method(D_METHOD("mount", "game_dir"), &SimBridge::mount);
     ClassDB::bind_method(D_METHOD("map_info"), &SimBridge::map_info);
     ClassDB::bind_method(D_METHOD("terrain_table", "biome"), &SimBridge::terrain_table);
     ClassDB::bind_method(D_METHOD("unit_visual", "unit_def"), &SimBridge::unit_visual);
@@ -173,6 +176,11 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("property_info", "ids"), &SimBridge::property_info);
     ClassDB::bind_method(D_METHOD("localize", "key"), &SimBridge::localize);
     ClassDB::bind_method(D_METHOD("read_file_for_nation", "path", "nation"), &SimBridge::read_file_for_nation);
+    ClassDB::bind_method(D_METHOD("queue_match_rules", "teams", "city_ratio", "team_victory", "start_money", "player"),
+                         &SimBridge::queue_match_rules);
+    ClassDB::bind_method(D_METHOD("set_controller", "player", "kind", "nation"), &SimBridge::set_controller);
+    ClassDB::bind_method(D_METHOD("drain_ai_notes"), &SimBridge::drain_ai_notes);
+    ClassDB::bind_method(D_METHOD("save_replay", "path"), &SimBridge::save_replay);
 }
 
 String SimBridge::hello() const {
@@ -181,6 +189,18 @@ String SimBridge::hello() const {
 
 String SimBridge::last_error() const {
     return str(error);
+}
+
+bool SimBridge::mount(const String& game_dir) {
+    error.clear();
+    auto d = std::make_unique<Data>();
+    std::vector<std::string> log;
+    if (!corps::vfs::mountGameInstall(d->vfs, corps::vfs::pathFromUtf8(utf8(game_dir)), {}, log)) {
+        error = "nothing could be mounted from " + utf8(game_dir);
+        return false;
+    }
+    if (!sim) data = std::move(d);
+    return true;
 }
 
 bool SimBridge::start(const String& game_dir, const String& map_spec, int64_t seed) {
@@ -228,6 +248,10 @@ bool SimBridge::start(const String& game_dir, const String& map_spec, int64_t se
     map = std::move(m);
     sim = std::make_unique<corps::Sim>(corps::SimConfig{static_cast<std::uint64_t>(seed), &data->defs, map.get()});
     pending.clear();
+    recorded.clear();
+    controllers.clear();
+    aiNotes = PackedStringArray();
+    seed_ = static_cast<uint64_t>(seed);
     prev = capture();
     events.clear();
     std::fill(std::begin(seq), std::end(seq), uint16_t{0});
@@ -244,6 +268,8 @@ Dictionary SimBridge::map_info() const {
     out["width"] = static_cast<int64_t>(map->width);
     out["height"] = static_cast<int64_t>(map->height);
     out["hash"] = String::num_uint64(map->mapHash, 16);
+    out["city_victory_ratio"] = toF(map->rule("CityVictoryRatio", data ? data->defs.economy.cityVictoryRatio : Fixed{}));
+    out["start_money"] = toF(map->rule("ResourceStockpileDefault", data ? data->defs.economy.startMoney : Fixed{}));
     out["height_width"] = static_cast<int64_t>(map->heightWidth);
     PackedFloat32Array heights;
     heights.resize(static_cast<int64_t>(map->heights.size()));
@@ -392,6 +418,7 @@ void SimBridge::queue(corps::Command c) {
     if (!sim) return;
     c.tick = sim->tick();
     c.seq = seq[c.player]++;
+    recorded.push_back(c);
     pending.push_back(std::move(c));
 }
 
@@ -484,6 +511,13 @@ std::vector<SimBridge::Snap> SimBridge::capture() const {
 
 void SimBridge::step() {
     if (!sim) return;
+    for (const auto& ctl : controllers) {  // host-side players: commands for this tick
+        std::vector<corps::Command> out;
+        ctl->think(*sim, out);
+        for (corps::Command& cmd : out) queue(std::move(cmd));
+        for (const std::string& n : ctl->notes) aiNotes.push_back(str(n));
+        ctl->notes.clear();
+    }
     prev = capture();
     std::vector<corps::Command> cmds;
     cmds.swap(pending);
@@ -994,6 +1028,7 @@ Dictionary SimBridge::economy(int64_t player) const {
     out["match_over"] = m.over;
     out["winner"] = static_cast<int64_t>(m.winner);
     out["city_ratio"] = toF(m.cityVictoryRatio);
+    out["end_tick"] = static_cast<int64_t>(m.endTick);
     PackedStringArray techs;  // GLOBAL research granted
     for (const std::uint32_t p : k.properties) {
         if (p < data->defs.properties.size()) techs.push_back(str(data->defs.properties[p].ids));
@@ -1301,6 +1336,77 @@ PackedByteArray SimBridge::read_file_for_nation(const String& path, const String
         std::copy(bytes.begin(), bytes.end(), out.ptrw());
         return out;
     }
+    return out;
+}
+
+// ------------------------------------------------------------------------------ skirmish (M6 close-out)
+
+void SimBridge::queue_match_rules(const PackedInt32Array& teams, double cityRatio, bool teamVictory, double startMoney, int64_t player) {
+    std::vector<uint8_t> t;
+    for (int64_t i = 0; i < teams.size(); ++i) t.push_back(static_cast<uint8_t>(std::clamp<int32_t>(teams[i], 0, 255)));
+    queue(corps::makeSetMatchRules(0, static_cast<uint8_t>(player), 0, std::move(t), fromF(cityRatio), teamVictory, fromF(startMoney)));
+}
+
+bool SimBridge::set_controller(int64_t player, const String& kind, const String& nation) {
+    if (player < 0 || player >= static_cast<int64_t>(corps::kMaxPlayers)) return false;
+    const auto p = static_cast<uint8_t>(player);
+    controllers.erase(std::remove_if(controllers.begin(), controllers.end(), [&](const auto& c) { return c->player() == p; }),
+                      controllers.end());
+    const std::string k = utf8(kind);
+    if (k.empty()) return true;
+    if (k == "dummy") controllers.push_back(corps::ai::makeDummyAi(p, utf8(nation)));
+    else if (k == "slice") controllers.push_back(corps::ai::makeSlicePlayer(p, utf8(nation)));
+    else return false;
+    // Ascending players: their commands go in a fixed order.
+    std::sort(controllers.begin(), controllers.end(), [](const auto& a, const auto& b) { return a->player() < b->player(); });
+    return true;
+}
+
+PackedStringArray SimBridge::drain_ai_notes() {
+    PackedStringArray out = aiNotes;
+    aiNotes = PackedStringArray();
+    return out;
+}
+
+Dictionary SimBridge::save_replay(const String& path) const {
+    Dictionary out;
+    out["ok"] = false;
+    out["path"] = path;
+    if (!sim || !map || !data) {
+        out["error"] = "no match";
+        return out;
+    }
+    corps::Replay rep;
+    rep.header.simVersion = corps::simVersion();
+    rep.header.dataHash = data->defs.dataHash;
+    rep.header.mapSpec = map->name;
+    rep.header.mapHash = map->mapHash;
+    rep.header.matchSeed = seed_;
+    rep.header.tickCount = sim->tick();
+    rep.header.players = {"player 0", "player 1"};
+    rep.commands = recorded;  // pending ones (queued for a tick not run yet) are past tickCount: dropped
+    rep.commands.erase(std::remove_if(rep.commands.begin(), rep.commands.end(), [&](const corps::Command& c) { return c.tick >= sim->tick(); }),
+                       rep.commands.end());
+    corps::RunOptions opt;
+    opt.map = map.get();
+    const corps::RunResult run = corps::runReplay(rep, &data->defs, opt);
+    rep.hashes = run.hashes;
+    const uint64_t live = corps::stateHash(*sim);
+    out["ticks"] = static_cast<int64_t>(rep.header.tickCount);
+    out["commands"] = static_cast<int64_t>(rep.commands.size());
+    out["hash"] = String::num_uint64(live, 16);
+    if (run.finalHash != live) {
+        out["error"] = "the replay doesn't reproduce the live match";
+        return out;
+    }
+    const auto bytes = corps::encodeReplay(rep);
+    std::ofstream f(corps::vfs::pathFromUtf8(utf8(path)), std::ios::binary);
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!f) {
+        out["error"] = "cannot write " + path;
+        return out;
+    }
+    out["ok"] = true;
     return out;
 }
 

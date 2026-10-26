@@ -7,6 +7,12 @@ extends Node3D
 ## nation's Corps HQ at the map's start positions (GBR and GER by default). The view only ever
 ## *queues commands*.
 ##
+## Skirmish (M6 close-out): started from the setup screen (scripts/menu/skirmish_setup.gd, the
+## `Skirmish` autoload), or with `--skirmish`, it plays a match against a host-side dummy AI
+## (SimBridge.set_controller) and ends on the victory / defeat screen (EndScreen). Launched
+## without any command-line option, the battle goes to the setup screen first. Without a skirmish
+## setup it is the development scene (demo armies, the options below).
+##
 ## Controls
 ##   Left click / drag: select regiments (click a unit, or box). Shift adds. Double-click: all
 ##     visible regiments of that type. Ctrl+1..9 saves the selection, 1..9 recalls it (twice: jump).
@@ -29,6 +35,9 @@ extends Node3D
 ##   --screenshot=PATH (renders after --frames=N frames and quits), --demo (orders a move at start),
 ##   --fight (both sides attack-move into each other at start and the camera follows the first own
 ##   regiment in a fight; with --regiments every group attack-moves), --speed=X (sim speed at start),
+##   --setup (the setup screen first, with other options), --skirmish (a skirmish with the default
+##   setup: --nation, --enemy, --seed, the map options), --slice-test[=PATH] (the headless slice
+##   play-test, scripts/menu/skirmish_setup.gd), --ai-log (print the AI's decisions),
 ##   --zoom=DIST, --select-all, --select-hq (select the own Corps HQ and look at it), --supply (the
 ##   supply overlay on), --cost / --paths / --slots (overlays on at start),
 ##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits),
@@ -57,6 +66,8 @@ const ENEMY_REGIMENTS := ["regiment_ger_infantry", "regiment_ger_tank_medium", "
 ## (UnitViews). Low also turns shadows off and uses the one-sample terrain shader.
 const QUALITIES := ["low", "medium", "high"]
 const HUD_REFRESH_MS := 250
+const FAST_TICKS := 60        # the headless slice play-test: ticks per frame
+const SLICE_TEST_LIMIT := 45 * 600
 const SETTINGS_PATH := "user://settings.cfg"
 
 var bridge := SimBridge.new()
@@ -94,6 +105,12 @@ var structs: Array = []       # SimBridge.structures(), refreshed with the HUD
 var _place := {}              # placement mode: {regiment, ids, facing, pl}
 var _run_mode := false        # the Run button: the next left click runs there
 var _hud_refresh_ms := 0
+var skirmish := {}            # the Skirmish setup, or {} (development scene)
+var _fast := false            # the slice play-test: as many ticks per frame as FAST_TICKS
+var _end_shown := false
+var _victory_kind := ""       # the last victory event: team_victory / city_ratio_victory
+var match_stats := {"recruited": [0, 0], "units_lost": [0, 0], "buildings_lost": [0, 0]}
+var slice_log := {"unpacked": {}, "recruited": {}, "cities": {}}  # your side, for the slice play-test
 var cost_class := -1
 var cost_mesh: MeshInstance3D
 var lines: MeshInstance3D
@@ -115,11 +132,23 @@ var _prewarmed := {}       # unit def -> true once FxRunner loaded its effects
 func _ready() -> void:
 	var args := _args()
 	loader = CacheLoader.new(args.get("cache", ""))
+	skirmish = Skirmish.settings.duplicate()
+	if skirmish.is_empty() and args.has("skirmish"):
+		skirmish = Skirmish.defaults(_map_spec(args))
+		skirmish.nation = str(args.get("nation", "gbr")).to_lower()
+		skirmish.enemy = str(args.get("enemy", "ger")).to_lower()
+		skirmish.seed = int(args.get("seed", "1"))
+	if skirmish.is_empty() and (OS.get_cmdline_user_args().is_empty() or args.has("slice-test") or args.has("defeat-test") or args.has("setup")):
+		get_tree().change_scene_to_file.call_deferred("res://scenes/skirmish_setup.tscn")
+		return
 	if loader.load_manifest() != OK:
 		push_warning("cache/manifest.json not found in %s: units fall back to boxes, terrain to colours" % loader.cache_dir)
 	var game := _game_dir()
-	var map_spec := _map_spec(args)
+	var map_spec := _map_spec(args) if skirmish.is_empty() else str(skirmish.map)
 	nations = [str(args.get("nation", "gbr")).to_lower(), str(args.get("enemy", "ger")).to_lower()]
+	if not skirmish.is_empty():
+		nations = [str(skirmish.nation), str(skirmish.enemy)]
+		_fast = str(skirmish.slice_test) != ""
 	# Loading the TGI data and the map takes seconds: show that before blocking.
 	var loading_layer := CanvasLayer.new()
 	var loading := Label.new()
@@ -130,14 +159,20 @@ func _ready() -> void:
 	for i in 3:
 		await get_tree().process_frame
 	var t0 := Time.get_ticks_msec()
-	if not bridge.start(game, map_spec, int(args.get("seed", "1"))):
+	var seed := int(skirmish.seed) if not skirmish.is_empty() else int(args.get("seed", "1"))
+	if not bridge.start(game, map_spec, seed):
 		_fatal("SimBridge.start failed: %s (game %s, map %s)" % [bridge.last_error(), game, map_spec])
+		if _fast:
+			print("SLICE TEST SKIPPED: " + bridge.last_error())
+			get_tree().quit(77)
 		return
 	var map: Dictionary = bridge.map_info()
 	print("map %s (%dx%d cells, biome %s) loaded in %d ms" % [map.name, map.width, map.height, map.biome, Time.get_ticks_msec() - t0])
 
 	_build_scene(map)
-	if args.has("regiments"):
+	if not skirmish.is_empty():
+		_start_skirmish(map)
+	elif args.has("regiments"):
 		_spawn_many(int(args.regiments))
 	else:
 		_spawn_demo(args.has("demo"))
@@ -512,9 +547,12 @@ func _process(delta: float) -> void:
 	var steps := 0
 	var step_us := 0
 	var snap_us := 0
+	var cap := FAST_TICKS if _fast else 8
 	if not paused:
 		accum += delta * speed
-		while accum >= TICK and steps < 8:
+		if _fast:
+			accum = TICK * cap
+		while accum >= TICK and steps < cap:
 			var t0 := Time.get_ticks_usec()
 			bridge.step()
 			step_us += Time.get_ticks_usec() - t0
@@ -527,7 +565,7 @@ func _process(delta: float) -> void:
 			_learn_regiments()
 			_drain_events(before)
 			snap_us = Time.get_ticks_usec() - t1
-		if steps == 8:
+		if steps == cap:
 			accum = 0.0
 	var alpha := clampf(accum / TICK, 0.0, 1.0) if not paused else 1.0
 	var t2 := Time.get_ticks_usec()
@@ -556,7 +594,7 @@ func _process(delta: float) -> void:
 		_measure_frame(delta, step_us / 1000.0, steps)
 	if args.has("fight") and not args.has("regiments") and _frames % 30 == 0:
 		_follow_fight()
-	if args.has("screenshot") and not args.has("selftest") and _frames == int(args.get("frames", "120")):
+	if args.has("screenshot") and not args.has("selftest") and not _fast and _frames == int(args.get("frames", "120")):
 		_save_screenshot(str(args.screenshot))
 
 
@@ -607,6 +645,9 @@ func _learn_regiments() -> void:
 ## which still has the units they killed), the rest to the HUD log.
 func _drain_events(before: Dictionary) -> void:
 	var events: Array = bridge.drain_events()
+	for n in bridge.drain_ai_notes():
+		if _fast or _args().has("ai-log"):
+			print("  AI ", n)
 	if not _args().has("no-fx"):
 		fx.handle(events, snap, before)
 	for e in events:
@@ -1122,6 +1163,7 @@ func _update_base_hud(force := false) -> void:
 	mm.view_quad = _camera_quad()
 	mm.queue_redraw()
 	game_hud.refresh({"regiments": _selected_ids(), "building": selected_building})
+	_check_end()
 
 
 ## The ground the camera sees (above the control panel), as 4 map points; empty if the view
@@ -1258,6 +1300,7 @@ func _message_for(e: Dictionary) -> void:
 	if game_hud == null:
 		return
 	var mine := int(e.player) == PLAYER
+	_count(e)
 	match str(e.type):
 		"recruited":
 			if mine:
@@ -1301,6 +1344,150 @@ func _message_for(e: Dictionary) -> void:
 		"rejected":
 			if mine and int(e.command) >= 10 and int(e.command) < 200:
 				game_hud.message("Command refused", "error", Color(1.0, 0.5, 0.4))
+
+
+## Match statistics (end screen) and the slice play-test's checklist.
+func _count(e: Dictionary) -> void:
+	var p := int(e.player)
+	var side := 0 if p == PLAYER else 1
+	match str(e.type):
+		"recruited":
+			match_stats.recruited[side] += 1
+			if p == PLAYER:
+				var ids: String = bridge.regiment_def(int(bridge.regiment_info(int(e.entity)).get("def", -1))).get("ids", "")
+				slice_log.recruited[ids] = true
+		"died":
+			var building := structs.any(func(s: Dictionary) -> bool: return int(s.id) == int(e.entity))
+			match_stats["buildings_lost" if building else "units_lost"][side] += 1
+		"unpacked":
+			if p == PLAYER:
+				slice_log.unpacked[str(bridge.structure_info(int(e.entity)).get("ids", ""))] = true
+		"city_captured":
+			if p == PLAYER:
+				slice_log.cities[int(e.entity)] = true
+		"team_victory", "city_ratio_victory":
+			_victory_kind = str(e.type)
+
+
+# ---------------------------------------------------------------- skirmish (M6 close-out)
+
+## Rules (the starting money, the map's city ratio), both bases, the dummy AI on the enemy side
+## (and the slice player on yours in the play-test), the camera on your Corps HQ.
+func _start_skirmish(map: Dictionary) -> void:
+	bridge.queue_match_rules(PackedInt32Array(), float(map.get("city_victory_ratio", 0.0)), true, float(skirmish.money), PLAYER)
+	var w := float(terrain.cells.x)
+	var h := float(terrain.cells.y)
+	_start_bases(Vector2(w * 0.25, h * 0.5), Vector2(w * 0.75, h * 0.5))
+	bridge.set_controller(1, str(skirmish.ai), nations[1])
+	if skirmish.scripted:
+		bridge.set_controller(PLAYER, "slice", nations[0])
+	if skirmish.get("defeat_test", false):  # the sides swapped: you lose
+		bridge.set_controller(PLAYER, str(skirmish.ai), nations[0])
+		bridge.set_controller(1, "slice", nations[1])
+	bridge.step()
+	_learn_regiments()
+	var home := Vector2(w * 0.25, h * 0.5)
+	for s in bridge.structures():
+		if int(s.player) == PLAYER:
+			home = s.position
+			selected_building = int(s.id)
+	cam.setup(terrain, home + Vector2(sin(RtsCamera.DEFAULT_YAW), cos(RtsCamera.DEFAULT_YAW)) * 12.0)
+	cam.distance = 65.0
+	game_hud.message("%s against %s (dummy AI). Destroy every enemy HQ to win." % [Skirmish.NATION_NAMES.get(nations[0], nations[0]),
+		Skirmish.NATION_NAMES.get(nations[1], nations[1])], "quest_good")
+	if _fast:
+		print("SLICE TEST: battle started: %s, %s vs %s, seed %d" % [map.name, nations[0], nations[1], int(skirmish.seed)])
+
+
+## The end screen, once (and, in the play-test, its verdict).
+func _check_end() -> void:
+	if _end_shown or skirmish.is_empty():
+		return
+	var e: Dictionary = bridge.economy(PLAYER)
+	var timed_out := _fast and int(snap.get("tick", 0)) >= SLICE_TEST_LIMIT
+	if not bool(e.get("match_over", false)) and not timed_out:
+		return
+	_end_shown = true
+	var won := bool(e.get("match_over", false)) and int(e.winner) == int(e.team)
+	var reason := ""
+	if timed_out:
+		reason = "No winner after %d minutes." % (SLICE_TEST_LIMIT / 600)
+	elif _victory_kind == "city_ratio_victory":
+		reason = "You hold enough of the cities." if won else "The enemy holds enough of the cities."
+	else:
+		reason = "The enemy's last HQ has been destroyed." if won else "Your last HQ has been destroyed."
+	var cities := [0, 0]
+	for s in structs:
+		if bool(s.city) and int(s.player) != 255:
+			cities[0 if int(s.player) == PLAYER else 1] += 1
+	var t := int(e.get("end_tick", snap.get("tick", 0))) if bool(e.get("match_over", false)) else int(snap.get("tick", 0))
+	var stats := {"time": "%d:%02d" % [t / 600, (t / 10) % 60], "rows": [
+		["Regiments recruited", match_stats.recruited[0], match_stats.recruited[1]],
+		["Units lost", match_stats.units_lost[0], match_stats.units_lost[1]],
+		["Buildings lost", match_stats.buildings_lost[0], match_stats.buildings_lost[1]],
+		["Cities held", cities[0], cities[1]]]}
+	var end_layer := CanvasLayer.new()  # above the HUD
+	end_layer.layer = 10
+	add_child(end_layer)
+	var end := EndScreen.new()
+	end.name = "EndScreen"
+	end_layer.add_child(end)
+	end.setup(art, won, reason, stats)
+	end.new_skirmish.connect(func() -> void:
+		Skirmish.settings = {}
+		get_tree().change_scene_to_file("res://scenes/skirmish_setup.tscn"))
+	end.quit_game.connect(func() -> void: get_tree().quit())
+	if _fast:
+		_finish_slice_test(end, won, stats)
+
+
+## The slice play-test's verdict: the path MILESTONES.md describes, the end screen, the replay.
+func _finish_slice_test(end: EndScreen, won: bool, stats: Dictionary) -> void:
+	var n: String = nations[0]
+	var missing: Array[String] = []
+	var defeat_test: bool = skirmish.get("defeat_test", false)
+	if defeat_test:
+		if won:
+			missing.append("lose")
+		if not (end.visible and end.title.text == "DEFEAT"):
+			missing.append("the defeat screen")
+	else:
+		for hq in ["_hq_infantry", "_hq_armor"]:
+			if not slice_log.unpacked.has(n + hq):
+				missing.append("deploy " + n + hq)
+		for r in ["_infantry", "_infantry_at", "_tank_light", "_tank_medium"]:
+			if not slice_log.recruited.has("regiment_" + n + r):
+				missing.append("recruit regiment_" + n + r)
+		if slice_log.cities.size() < 2:
+			missing.append("take both cities (%d)" % slice_log.cities.size())
+		if not won:
+			missing.append("win")
+		if not (end.visible and end.title.text == "VICTORY"):
+			missing.append("the victory screen")
+	var path := str(skirmish.slice_test)
+	var res: Dictionary = bridge.save_replay(ProjectSettings.globalize_path(path))
+	if not bool(res.get("ok", false)):
+		missing.append("the replay (%s)" % res.get("error", "?"))
+	print("SLICE TEST: end screen: %s at %s; %s" % [end.title.text, stats.time, ", ".join(stats.rows.map(func(r: Array) -> String:
+		return "%s %s/%s" % r))])
+	print("SLICE TEST REPLAY %s (%d ticks, %d commands, final hash %s)" % [ProjectSettings.globalize_path(path), int(res.get("ticks", 0)),
+		int(res.get("commands", 0)), res.get("hash", "?")])
+	if _args().has("screenshot"):  # the end screen, when not headless
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(str(_args().screenshot))
+	if missing.is_empty() and defeat_test:
+		print("SLICE TEST PASSED: setup screen, your side eliminated by the slice player, the defeat screen, the replay")
+	if defeat_test:  # and New skirmish goes back to the setup screen (which quits with this code)
+		Skirmish.back_test_code = 0 if missing.is_empty() else 1
+		for btn in end.find_children("*", "Button", true, false):
+			if (btn as Button).text == "New skirmish":  # after this frame, as a click would come
+				(btn as Button).pressed.emit.call_deferred()
+		return
+	elif missing.is_empty():
+		print("SLICE TEST PASSED: setup screen, both division HQs, the four regiment types, both cities, the enemy eliminated, the victory screen, the replay")
+	else:
+		print("SLICE TEST FAILED: " + "; ".join(missing))
+	get_tree().quit(0 if missing.is_empty() else 1)
 
 
 func _name_of_regiment(bits: int) -> String:
