@@ -76,7 +76,8 @@ BuildingDef building(std::string ids, Fixed size) {
 // depot, 4x4, a relay of range 20), mine (4x4, +30 money, supply_required), city (8x8, zone 30,
 // supply 35, +15 money, captureable, indestructible). reg_inf: 4 riflemen (100 health), recruit
 // time 8 s (a replacement every 2 s), shortfall 0.01/s, XP levels at 0 and 10 (x1.5 health).
-// reg_costly: one rifleman, 400 money upkeep (it makes its kingdom bankrupt).
+// reg_costly: one rifleman, 400 money upkeep (it makes its kingdom bankrupt). reg_staff: an HQ
+// regiment of two riflemen the Corps HQ recruits (20 s).
 DefSet makeDefs(bool supplyUnderSiege) {
     DefSet d;
     d.properties = {PropertyDef{"corpshq"}};
@@ -98,13 +99,18 @@ DefSet makeDefs(bool supplyUnderSiege) {
     costly.recruitTime = 2_fx;
     costly.shortfallDamageRate = 0.01_fx;
     costly.upkeep.money = 400_fx;
-    d.regiments = {inf, costly};
+    RegimentDef staff;  // an HQ regiment (HQComponent) the Corps HQ recruits
+    staff.ids = "reg_staff";
+    staff.slotIds = {"rifle", "rifle"};
+    staff.recruitTime = 20_fx;
+    staff.hq = true;
+    d.regiments = {inf, costly, staff};
     BuildingDef corps = building("corps", 8_fx);
     corps.providesCorps = true;
     corps.properties = {"corpshq"};
     corps.supplyRange = 40_fx;
     corps.production.money = 25_fx;
-    corps.recruits = {"mine_truck", "relay_truck"};
+    corps.recruits = {"mine_truck", "relay_truck", "reg_staff"};
     BuildingDef relay = building("relay", 4_fx);
     relay.supplyRange = 20_fx;
     relay.supplyRelay = true;
@@ -267,6 +273,22 @@ TEST_CASE("supply: the Corps HQ's zone supplies its regiments; outside it, nothi
     CHECK(zones[0].source == corps);
     CHECK(zones[0].radius == 40_fx);
     CHECK(zones[0].active);
+}
+
+TEST_CASE("match rules: the starting money replaces the map's and the SVar's") {
+    const nav::MapDef m = cityMap();
+    Run r(m);
+    r.step({makeSetMatchRules(0, 0, r.seq(0), {}, 0_fx, true, 2500_fx), makeStartPlayer(0, 0, r.seq(0), "corps", {30_fx, 30_fx}, kEast),
+            makeStartPlayer(0, 1, r.seq(1), "corps", {100_fx, 100_fx}, kEast)});
+    REQUIRE_FALSE(r.rejected());
+    CHECK(abs(r.sim.world().kingdoms[0].money - 2500_fx) < 1_fx);
+    CHECK(abs(r.sim.world().kingdoms[1].money - 2500_fx) < 1_fx);
+    Run d(m);
+    d.start(0, {30_fx, 30_fx});
+    CHECK(abs(d.sim.world().kingdoms[0].money - 500_fx) < 1_fx);  // the SVar (this map has no rule)
+    Run bad(m);
+    bad.step({makeSetMatchRules(0, 0, bad.seq(0), {}, 0_fx, true, -5_fx)});
+    CHECK(bad.rejected());
 }
 
 TEST_CASE("supply: allies share zones (SetMatchRules teams at tick 0 only)") {
@@ -516,6 +538,25 @@ TEST_CASE("victory: a kingdom without an HQ is defeated; the last team standing 
     CHECK(r.count(SimEvent::Type::TeamVictory) == 1);  // once
 }
 
+TEST_CASE("victory: an HQ truck regiment still being recruited, empty, doesn't keep a kingdom alive") {
+    const nav::MapDef m = cityMap();
+    Run r(m);
+    r.start(0, {30_fx, 30_fx});
+    const EntityId enemy = r.start(1, {90_fx, 90_fx});
+    // The enemy's Corps HQ starts recruiting an HQ regiment, and dies before its first unit joins.
+    r.step({makeRecruit(0, 1, r.seq(1), enemy, "reg_staff")});
+    REQUIRE_FALSE(r.rejected());
+    r.step();
+    const EntityId forming = r.sim.world().structures.get(enemy)->recruit;
+    REQUIRE_FALSE(forming.isNull());
+    CHECK(r.members(forming).empty());
+    r.step({makeDebugDestroy(0, 1, r.seq(1), enemy)});
+    r.steps(3);
+    CHECK_FALSE(r.sim.world().registry.alive(forming));
+    CHECK(r.sim.world().kingdoms[1].eliminated);
+    CHECK(r.sim.world().match.over);
+}
+
 TEST_CASE("victory: allies win together; a packing HQ still counts") {
     const nav::MapDef m = cityMap();
     Run r(m);
@@ -584,7 +625,7 @@ TEST_CASE("supply save / load: mid-capture and mid-replacement states continue i
 
 TEST_CASE("supply commands encode and decode") {
     const std::vector<Command> cmds = {
-        makeSetMatchRules(0, 0, 0, {0, 1, 1, 0}, 0.65_fx, false),
+        makeSetMatchRules(0, 0, 0, {0, 1, 1, 0}, 0.65_fx, false, 2500_fx),
         makeSetMatchRules(0, 2, 1, {}, 0_fx, true),
         makeDebugSetHealth(3, 1, 2, EntityId{77}, 12.5_fx),
         makeDebugSetOwner(3, 1, 3, EntityId{78}, kNeutral),

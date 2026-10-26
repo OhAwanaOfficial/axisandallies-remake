@@ -406,6 +406,7 @@ std::vector<std::uint8_t> saveState(const Sim& sim) {
     w.tag("MTCH");
     w.fixed(m.cityVictoryRatio);
     w.boolean(m.teamVictory);
+    w.fixed(m.startMoney);
     w.boolean(m.over);
     w.u8(m.winner);
     w.u32(m.endTick);
@@ -473,6 +474,7 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     if (!r.expectTag("MTCH")) return fail("missing MTCH");
     world.match.cityVictoryRatio = r.fixed();
     world.match.teamVictory = r.boolean();
+    world.match.startMoney = r.fixed();
     world.match.over = r.boolean();
     world.match.winner = r.u8();
     world.match.endTick = r.u32();

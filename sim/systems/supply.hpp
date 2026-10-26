@@ -40,7 +40,9 @@
 //
 // Victory (Capture stage, GAME_DESIGN §12; game_types_aa.tgi defines no rule fields, so these are
 // ours): a kingdom that started (StartPlayer) is eliminated once it has no HQ left: no Structure
-// with HQComponent (or its truck's) and no regiment that is one or carries one (KingdomDefeated).
+// with HQComponent (or its truck's) and no regiment with a unit left that is one or carries one
+// (KingdomDefeated). A building that dies drops the regiment it was recruiting if that is still
+// empty (core/sim.cpp cleanup).
 // With TeamVictory (true) the last team with a kingdom standing wins (else the last kingdom), once
 // at least two have played. With a city victory ratio > 0 (map rule or SetMatchRules; Golden
 // Fields: 0) a team (or kingdom) holding at least that share of the cities' value (their money

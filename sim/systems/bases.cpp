@@ -442,9 +442,11 @@ void applyStartPlayer(Sim& sim, const Command& c, const BaseOrderPayload& p) {
     if (!pl.ok) return sim.reject(c);
     if (spawnStructure(sim, bi, pl, c.player, Structure::State::Deployed, 0, 1_fx, c.type).isNull()) return sim.reject(c);
     k.started = true;
-    // The map's ResourceStockpileDefault rule (Golden Fields: 1000) over the SVar.
-    k.money = std::clamp(sim.config().map != nullptr ? sim.config().map->rule("ResourceStockpileDefault", d->economy.startMoney) : d->economy.startMoney,
-                         Fixed{}, d->economy.stockpileMax);
+    // The match's starting money (SetMatchRules), else the map's ResourceStockpileDefault rule
+    // (Golden Fields: 1000), else the SVar.
+    Fixed money = sim.config().map != nullptr ? sim.config().map->rule("ResourceStockpileDefault", d->economy.startMoney) : d->economy.startMoney;
+    if (sim.world().match.startMoney > Fixed{}) money = sim.world().match.startMoney;
+    k.money = std::clamp(money, Fixed{}, d->economy.stockpileMax);
 }
 
 Blocker recruitBlocker(const Sim& sim, std::uint8_t player, EntityId building, std::string_view ids) {

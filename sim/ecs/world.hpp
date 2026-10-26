@@ -289,11 +289,12 @@ struct Match {
     static constexpr std::uint8_t kNoTeam = 0xFF;
     Fixed cityVictoryRatio;     // share of the cities' value a team must hold to win (0: off)
     bool teamVictory = true;    // allies win together (else the last kingdom standing)
+    Fixed startMoney;           // StartPlayer's money (0: the map's ResourceStockpileDefault, else the SVar)
     bool over = false;
     std::uint8_t winner = kNoTeam;  // the winning team (teamVictory) or player
     std::uint32_t endTick = 0;
     friend bool operator==(const Match& a, const Match& b) noexcept {
-        return a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory && a.over == b.over &&
+        return a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory && a.startMoney == b.startMoney && a.over == b.over &&
                a.winner == b.winner && a.endTick == b.endTick;
     }
 };

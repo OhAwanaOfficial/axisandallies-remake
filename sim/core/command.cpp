@@ -286,9 +286,9 @@ Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t
 }
 
 Command makeSetMatchRules(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<std::uint8_t> teams,
-                          Fixed cityVictoryRatio, bool teamVictory) {
+                          Fixed cityVictoryRatio, bool teamVictory, Fixed startMoney) {
     Command c = base(tick, player, seq, CommandType::SetMatchRules);
-    c.payload = MatchRulesPayload{std::move(teams), cityVictoryRatio, teamVictory};
+    c.payload = MatchRulesPayload{std::move(teams), cityVictoryRatio, teamVictory, startMoney};
     return c;
 }
 
@@ -452,6 +452,7 @@ void encodeCommand(const Command& c, std::vector<std::uint8_t>& out) {
         for (const std::uint8_t t : p.teams) putVarint(out, t);
         putFixed(out, p.cityVictoryRatio);
         putVarint(out, p.teamVictory ? 1 : 0);
+        putFixed(out, p.startMoney);
         break;
     }
     case CommandType::DebugSetHealth: {
@@ -651,6 +652,7 @@ bool decodeCommand(const std::vector<std::uint8_t>& in, std::size_t& pos, Comman
         }
         if (!getFixed(in, pos, p.cityVictoryRatio) || !getU(in, pos, 1, v)) return false;
         p.teamVictory = v != 0;
+        if (!getFixed(in, pos, p.startMoney)) return false;
         out.payload = std::move(p);
         return true;
     }

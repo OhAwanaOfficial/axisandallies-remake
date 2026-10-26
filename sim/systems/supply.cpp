@@ -153,7 +153,11 @@ bool hasHq(const Sim& sim, std::uint8_t player) {
     for (std::size_t i = 0; i < w.regiments.size(); ++i) {
         const EntityId id = w.regiments.ids()[i];
         const RegimentDef* rd = regimentOf(sim, id);
-        if (w.regiments.data()[i].player == player && w.registry.alive(id) && rd != nullptr && rd->hq) return true;
+        if (w.regiments.data()[i].player != player || !w.registry.alive(id) || rd == nullptr || !rd->hq) continue;
+        for (std::size_t m = 0; m < w.members.size(); ++m) {  // only with a unit left
+            const Health* h = w.health.get(w.members.ids()[m]);
+            if (w.members.data()[m].organization == id && h != nullptr && h->current > Fixed{}) return true;
+        }
     }
     return false;
 }
@@ -343,7 +347,9 @@ void spawnMapCities(Sim& sim) {
 // --- commands ----------------------------------------------------------------------------------------
 
 void applySetMatchRules(Sim& sim, const Command& c, const MatchRulesPayload& p) {
-    if (sim.tick() != 0 || p.teams.size() > kMaxPlayers || p.cityVictoryRatio < Fixed{} || p.cityVictoryRatio > Fixed::fromInt(1)) {
+    const DefSet* d = sim.config().defs;
+    if (sim.tick() != 0 || p.teams.size() > kMaxPlayers || p.cityVictoryRatio < Fixed{} || p.cityVictoryRatio > Fixed::fromInt(1) ||
+        p.startMoney < Fixed{} || (d != nullptr && p.startMoney > d->economy.stockpileMax)) {
         return sim.reject(c);
     }
     for (const std::uint8_t t : p.teams) {
@@ -353,6 +359,7 @@ void applySetMatchRules(Sim& sim, const Command& c, const MatchRulesPayload& p) 
     for (std::size_t i = 0; i < p.teams.size(); ++i) w.kingdoms[i].team = p.teams[i];
     w.match.cityVictoryRatio = p.cityVictoryRatio;
     w.match.teamVictory = p.teamVictory;
+    w.match.startMoney = p.startMoney;
 }
 
 void applyDebugSetHealth(Sim& sim, const Command& c, const BaseOrderPayload& p) {

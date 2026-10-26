@@ -37,7 +37,7 @@ enum class CommandType : std::uint8_t {
     Pack = 14,              // a building packs onto its truck(s)
     Research = 15,          // a building researches a property (ids); paid now
     CancelResearch = 16,    // a building stops its research (refunded)
-    SetMatchRules = 17,     // tick 0 only: teams, city victory ratio, team victory (MatchRulesPayload)
+    SetMatchRules = 17,     // tick 0 only: teams, city victory ratio, team victory, starting money (MatchRulesPayload)
     // 18..199: gameplay commands, assigned when their systems land.
     DebugSpawn = 200,
     DebugDestroy = 201,
@@ -190,8 +190,10 @@ struct MatchRulesPayload {
     std::vector<std::uint8_t> teams;  // at most 8 (kMaxPlayers), each < 8
     Fixed cityVictoryRatio;           // 0: no city victory; at most 1
     bool teamVictory = true;
+    Fixed startMoney;                 // StartPlayer's money; 0: the map's rule, else the SVar
     friend bool operator==(const MatchRulesPayload& a, const MatchRulesPayload& b) noexcept {
-        return a.teams == b.teams && a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory;
+        return a.teams == b.teams && a.cityVictoryRatio == b.cityVictoryRatio && a.teamVictory == b.teamVictory &&
+               a.startMoney == b.startMoney;
     }
 };
 
@@ -250,7 +252,7 @@ Command makeCancelResearch(std::uint32_t tick, std::uint8_t player, std::uint16_
 Command makeDebugSetMoney(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, Fixed money);
 Command makeDebugGrantProperty(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::string propertyIds);
 Command makeSetMatchRules(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, std::vector<std::uint8_t> teams,
-                          Fixed cityVictoryRatio, bool teamVictory);
+                          Fixed cityVictoryRatio, bool teamVictory, Fixed startMoney = {});
 Command makeDebugSetHealth(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId target, Fixed health);
 Command makeDebugSetOwner(std::uint32_t tick, std::uint8_t player, std::uint16_t seq, EntityId structure, std::uint8_t owner);
 

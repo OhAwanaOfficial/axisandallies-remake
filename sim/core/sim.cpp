@@ -369,6 +369,14 @@ void Sim::cleanup() {
         const Footprint* fp = world_.footprints.get(id);
         if (nav_ && fp != nullptr) nav_->grid.unstamp({fp->x0, fp->y0, fp->x1, fp->y1});
         onEntityDestroyed(*this, id);  // leave groups
+        // A building that dies drops the regiment it was filling if no unit has joined yet (it
+        // would stay forever, empty; an HQ one would keep its kingdom in the game). It goes in the
+        // next tick's cleanup.
+        if (const Structure* s = world_.structures.get(id); s != nullptr && !s->recruit.isNull() && world_.registry.alive(s->recruit)) {
+            bool members = false;
+            for (const Member& m : world_.members.data()) members = members || m.organization == s->recruit;
+            if (!members) world_.registry.destroyLater(s->recruit);
+        }
     };
     for (const EntityId id : world_.cleanup(unstamp)) {
         events_.push_back({SimEvent::Type::Destroyed, id, 0, CommandType::Noop});

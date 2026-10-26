@@ -33,8 +33,9 @@ namespace corps {
 
 // 2: mapHash, FTPR, PATH, NAVS; 3: REGT, ORDR, MOVR, GRUP (M4); 4: tuning hash, COMB, ENGT, PROJ (M5);
 // 5: morale, efficiency, XP, entrenchment timer in ENGT, KING (M5 part 2); 6: STRC, DPLY, economy in
-// KING (M6 part 1); 7: supply and capture in STRC, SUPL, team and elimination in KING, MTCH (M6 part 2)
-constexpr std::uint32_t kStateFormatVersion = 7;
+// KING (M6 part 1); 7: supply and capture in STRC, SUPL, team and elimination in KING, MTCH (M6 part 2);
+// 8: starting money in MTCH (M6 close-out)
+constexpr std::uint32_t kStateFormatVersion = 8;
 
 std::vector<std::uint8_t> saveState(const Sim& sim);
 std::uint64_t stateHash(const Sim& sim);
