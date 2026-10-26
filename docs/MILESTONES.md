@@ -30,7 +30,7 @@ Suggested model per milestone: **Opus** = design-heavy or tricky correctness, **
 | **M3** | Done | — (in v0.4) | Fixed Q32.32, trig tables, PCG32; ECS pools; 13-stage tick; commands; canonical state and xxh3 hash; replays; `determinism-check`; typed Def compiler; `spawn-test` identical in Debug and Release. |
 | **M4** | Done | v0.4 | See below. |
 | **M5** | Parts 1–3 done | — | See below. Left: the first calibration pass against the original (CALIBRATION.md). |
-| **M6** | Parts 1–2 done (sim) | — | See below. Left: construction (bunkers) and repair, the HUD, the scripted opponent. |
+| **M6** | Parts 1–3 done | — | See below. Left: construction (bunkers) and repair, the special-ops and group bars, the scripted opponent. |
 
 **M4 details:**
 * **Nav:**
@@ -123,6 +123,12 @@ Carried over from M4:
 * **Commands** 17 (`SetMatchRules`) and 211–212 (`DebugSetHealth`, `DebugSetOwner`); events Replaced, CityCaptured, KingdomDefeated, TeamVictory, CityRatioVictory. StartPlayer uses the map's starting money.
 * **Formats:** state v7 (supply and capture in `STRC`, `SUPL`, team and elimination in `KING`, `MTCH`).
 * **Tests:** `test_supply.cpp` (17 cases on hand-built defs and a two-city map: zones, allies, relays, healing, replacement, bankruptcy, siege both ways, supply_required, capture, contest, recapture, elimination, allies' victory, city ratio, save / load, encoding, map.json things, a replay fixture `sim/tests/fixtures/supply_m6.rpl`), 2 golden cases on the real data and Golden Fields, `simcli skirmish` (Golden Fields, 8 GBR vs 2 GER regiments until the German HQ falls) + determinism check in CTest. Golden movement hash and the M3–M6 fixtures re-recorded (format change; behaviour checks unchanged).
+
+**M6 part 3 details (Godot HUD; ARCHITECTURE §4.4, GAME_DESIGN §14):**
+* **HUD** in the original art (`godot/scripts/hud/`): control panel, stats bar, command panel with the reasons a button is greyed, info panel with the production queue and research, diamond minimap with the camera box and click-to-move, message log with history, placement ghost, Ctrl+S supply overlay; the player's nation skin through `SimBridge.read_file_for_nation`; the 1024 or 1280 set.
+* **Battle view:** both kingdoms start with their Corps HQ at the map's start positions; buildings are drawn; building selection; the camera's default heading is diagonal as in the original.
+* **Sim:** `recruitBlocker` / `researchBlocker` / `packBlocker` (the commands use them too) and a test of their reasons.
+* **Checks:** 17 new selftest checks (41 in all).
 
 ### Vertical-slice definition (end of M6)
 One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Corps HQ → Infantry/Armour Division HQs → 4 regiment types (rifle infantry, AT infantry, light tank, medium tank) → supply, upkeep, morale, XP, formations → capture 2 cities → destroy the enemy Corps HQ to win. Stable 60 fps, deterministic replay of the whole match.

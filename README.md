@@ -129,6 +129,16 @@ minute (money, net income, oil and ammo balance, the shortfall bought with money
 events. `--out` writes a replay for `determinism-check`; `simcli show-def gbr_corps` shows a building's footprint,
 packing, recruits and research.
 
+## The battle HUD (M6 part 3)
+```bash
+godot --path godot -- --select-hq --supply
+```
+The battle view starts both kingdoms (GBR and GER; `--nation=` / `--enemy=` change them) with their Corps HQ at the
+map's start positions, under the original HUD in your nation's skin: stats bar, command panel, info panel, minimap
+and message log. Click a building for its Deploy / Recruit / Research / Pack buttons; a greyed button's tooltip says
+what is missing. A deployed truck's Unpack button shows the placement ghost (R turns it, left click places it). Ctrl+S
+shows the supply zones. `--select-hq` starts with your Corps HQ selected, `--supply` with the zones shown.
+
 ## Supply, cities and victory on a real map (M6 part 2)
 ```bash
 python -I tools/rmp.py "C:/Users/lenovo/Desktop/Axis & Allies/Data.rwd" "Maps/DeveloperMaps/(1v1)Golden Fields.RMP" --out cache/maps/golden_fields

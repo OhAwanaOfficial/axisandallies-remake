@@ -356,6 +356,7 @@ Elimination (destroy all HQs/units per `game_types`), **city control ratio** (pe
 ## 14. Presentation
 * **Camera:** pan, edge-scroll, zoom (wheel/PgUp/PgDn), rotate (MMB, Num4/Num6).
 * **HUD layout as in the original** (minimap bottom-left, info panel centre, command panel bottom-right, stats bar, special-ops and group bars top-left). Use the original UI textures. Support any resolution with 16:9 anchoring; the original used 800/1024/1280 asset sets, so pick the closest set.
+  * **Implemented (M6 part 3):** the control panel, stats bar, command panel (greyed buttons name what is missing), info panel, minimap, message log, placement ghost and supply-zone overlay, in the player's nation's skin, at the 1024 or 1280 set (whichever is nearer the window height; ARCHITECTURE §4.4). Not yet: the special-ops and group bars, team commands, flares.
 * **Audio:** unit acknowledgements (`*_select`, `*_move`, `*_attack`), weapons, deaths, music. Bink videos convert to OGV for intros and cutscenes.
 
 ### Modern QoL **[NEW]** (none change the balance)
