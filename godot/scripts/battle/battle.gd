@@ -1,8 +1,11 @@
 extends Node3D
-## Battle view (M4 part 3, M5 part 3): the sim through SimBridge, terrain from the map, unit models
-## with render interpolation, RTS camera, selection, move and attack orders, combat effects
-## (FxRunner), regiment banners (Banners) and the selected regiment's info panel. The view only
-## ever *queues commands*.
+## Battle view (M4 part 3, M5 part 3, M6 part 3): the sim through SimBridge, terrain from the map,
+## unit models with render interpolation, RTS camera, selection, move and attack orders, combat
+## effects (FxRunner), regiment banners (Banners), buildings (StructureViews) and the HUD in the
+## original's art (Hud: stats bar, command panel, info panel, minimap, message log), with the
+## placement ghost and the supply-zone overlay (BaseOverlays). Both kingdoms start with their
+## nation's Corps HQ at the map's start positions (GBR and GER by default). The view only ever
+## *queues commands*.
 ##
 ## Controls
 ##   Left click / drag: select regiments (click a unit, or box). Shift adds. Double-click: all
@@ -13,20 +16,28 @@ extends Node3D
 ##     keeps the mode; right click or Esc cancels). The cursor turns to the attack cursor.
 ##   Q / W / E: Assault / Normal / Column.  V: group behaviour (division) on/off.  S: stop.
 ##   B: drop a debug blocker at the cursor.  Space: pause.  + / -: sim speed.
+##   Click a building to select it; the command panel shows its Deploy / Recruit / Research / Pack
+##     buttons (greyed ones say what is missing). A truck regiment's Unpack button shows the
+##     placement ghost: left click places it, R turns it, right click or Esc cancels.
+##   Ctrl+S (or the panel's supply-border button): supply zones. Minimap: left click / drag moves
+##     the camera, right click moves the selection.
 ##   Camera: arrows or screen edges pan, wheel zooms, middle drag or PgUp/PgDn rotates, Home resets.
-##   F1 cost grid (selected regiment's class), F2 paths, F3 slot targets and anchors, F4 HUD.
+##   F1 cost grid (selected regiment's class), F2 paths, F3 slot targets and anchors, F4 debug text.
 ##   F6: graphics quality Low / Medium / High (saved to user://settings.cfg).
 ##
 ## Command line (after `--`): --map=PATH.json | --gen=SEED:SIZE, --seed=N, --cache=DIR,
 ##   --screenshot=PATH (renders after --frames=N frames and quits), --demo (orders a move at start),
 ##   --fight (both sides attack-move into each other at start and the camera follows the first own
 ##   regiment in a fight; with --regiments every group attack-moves), --speed=X (sim speed at start),
-##   --zoom=DIST, --select-all, --cost / --paths / --slots (overlays on at start),
+##   --zoom=DIST, --select-all, --select-hq (select the own Corps HQ and look at it), --supply (the
+##   supply overlay on), --cost / --paths / --slots (overlays on at start),
 ##   --selftest (drives the controls with synthetic input events, prints PASS/FAIL and quits),
 ##   --regiments=N (N mixed regiments, half per side, crossing the map in groups of six),
-##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits),
+##   --measure=FRAMES (after a warm-up, prints fps and sim step time over FRAMES frames and quits;
+##   with --no-vsync, frames aren't held to the display refresh),
 ##   --pause-sim (with --regiments: freeze the sim after 20 ticks to measure rendering alone),
-##   --no-hud (hide the HUD label), --no-fx (no combat effects or banners, for profiling), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
+##   --nation=gbr / --enemy=ger (the two kingdoms' nations: Corps HQ and UI skin),
+##   --no-hud (hide the HUD), --no-fx (no combat effects or banners, for profiling), --quality=low|medium|high (graphics, ARCHITECTURE §4.4),
 ##   --profile=FRAMES (frame time split by cost; with --no-anim, --hide-units, --no-shadows, --plain-terrain),
 ##   --warmup=FRAMES (frames --profile / --measure skip first; default 90 / 60),
 ##   --no-gpu-pacer (turn off the GpuPacer autoload, which keeps Godot's 2D renderer from crashing
@@ -45,6 +56,7 @@ const ENEMY_REGIMENTS := ["regiment_ger_infantry", "regiment_ger_tank_medium", "
 ## with baked vertex animation (UnitBatches); High keeps a node tree and AnimationPlayer per unit
 ## (UnitViews). Low also turns shadows off and uses the one-sample terrain shader.
 const QUALITIES := ["low", "medium", "high"]
+const HUD_REFRESH_MS := 250
 const SETTINGS_PATH := "user://settings.cfg"
 
 var bridge := SimBridge.new()
@@ -54,7 +66,11 @@ var units                    # UnitBatches (Low, Medium) or UnitViews (High)
 var models: UnitModels
 var fx: FxRunner
 var banners: Banners
-var info_panel: Label        # the selected regiment's info panel (bottom left)
+var game_hud: Hud            # the original-art HUD (M6 part 3)
+var art: UiArt
+var structures: StructureViews
+var base_overlays: BaseOverlays
+var nations := ["gbr", "ger"]
 var quality := ""
 var sun: DirectionalLight3D
 var cam: RtsCamera
@@ -72,7 +88,12 @@ var last_group_key := -1
 var last_group_time := 0
 var regiment_defs := {}       # regiment bits -> regiment def index
 var events_log: Array[String] = []
-var overlay := {"cost": false, "paths": false, "slots": false, "hud": true}
+var overlay := {"cost": false, "paths": false, "slots": false, "hud": false, "supply": false}
+var selected_building := 0    # a selected building (own or not), or 0
+var structs: Array = []       # SimBridge.structures(), refreshed with the HUD
+var _place := {}              # placement mode: {regiment, ids, facing, pl}
+var _run_mode := false        # the Run button: the next left click runs there
+var _hud_refresh_ms := 0
 var cost_class := -1
 var cost_mesh: MeshInstance3D
 var lines: MeshInstance3D
@@ -88,7 +109,6 @@ var _frames := 0
 var _attack_mode := false  # A pressed: the next left click attack-moves / attacks
 var _cursor := ""          # "" (the system arrow) or "attack"
 var _cursor_check_ms := 0
-var _regiment_units := {}  # regiment bits -> most units it had (info panel)
 var _prewarmed := {}       # unit def -> true once FxRunner loaded its effects
 
 
@@ -99,6 +119,7 @@ func _ready() -> void:
 		push_warning("cache/manifest.json not found in %s: units fall back to boxes, terrain to colours" % loader.cache_dir)
 	var game := _game_dir()
 	var map_spec := _map_spec(args)
+	nations = [str(args.get("nation", "gbr")).to_lower(), str(args.get("enemy", "ger")).to_lower()]
 	# Loading the TGI data and the map takes seconds: show that before blocking.
 	var loading_layer := CanvasLayer.new()
 	var loading := Label.new()
@@ -123,6 +144,14 @@ func _ready() -> void:
 	snap = bridge.snapshot()
 	speed = float(args.get("speed", "1"))
 	loading_layer.queue_free()
+	if args.has("select-hq"):
+		for s in bridge.structures():
+			if int(s.player) == PLAYER and str(s.ids).ends_with("_corps"):
+				selected_building = int(s.id)
+				cam.focus_on((s.position as Vector2) + Vector2(sin(cam.yaw), cos(cam.yaw)) * 12.0)
+				cam.distance = float(args.get("zoom", "60"))
+	if args.has("no-vsync"):
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	if args.has("profile"):
 		_profile_setup()
 	if args.has("selftest"):
@@ -168,6 +197,14 @@ func _build_scene(map: Dictionary) -> void:
 	banners.name = "Banners"
 	add_child(banners)
 	banners.setup(bridge, terrain)
+	structures = StructureViews.new()
+	structures.name = "Structures"
+	add_child(structures)
+	structures.setup(models, terrain)
+	base_overlays = BaseOverlays.new()
+	base_overlays.name = "BaseOverlays"
+	add_child(base_overlays)
+	base_overlays.setup(terrain)
 
 	overlay_root = Node3D.new()
 	overlay_root.name = "Overlays"
@@ -209,20 +246,18 @@ func _build_scene(map: Dictionary) -> void:
 	hud.add_theme_color_override("font_outline_color", Color.BLACK)
 	hud.add_theme_constant_override("outline_size", 4)
 	layer.add_child(hud)
-	info_panel = Label.new()
-	info_panel.add_theme_color_override("font_color", Color.WHITE)
-	info_panel.add_theme_color_override("font_outline_color", Color.BLACK)
-	info_panel.add_theme_constant_override("outline_size", 4)
-	info_panel.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-	info_panel.anchor_top = 1.0
-	info_panel.anchor_bottom = 1.0
-	info_panel.offset_left = 10.0
-	info_panel.offset_bottom = -10.0
-	info_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	info_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	info_panel.visible = false
-	layer.add_child(info_panel)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.visible = false
+	art = UiArt.new(bridge, nations[0])
+	game_hud = Hud.new()
+	game_hud.name = "Hud"
+	layer.add_child(game_hud)
+	game_hud.setup(bridge, art, PLAYER)
+	game_hud.visible = not _args().has("no-hud")
+	game_hud.command.connect(_on_hud_command)
+	game_hud.minimap_clicked.connect(_on_minimap)
+	game_hud.minimap.map_size = Vector2(terrain.cells)
+	game_hud.minimap.map_tex = ImageTexture.create_from_image(Minimap.build_image(map, terrain.name_colors))
 	box_rect = ColorRect.new()
 	box_rect.color = Color(0.4, 0.8, 1.0, 0.18)
 	box_rect.visible = false
@@ -230,16 +265,46 @@ func _build_scene(map: Dictionary) -> void:
 	layer.add_child(box_rect)
 
 
+## Both kingdoms start (StartPlayer): their nation's Corps HQ at the map's start positions, or,
+## on maps without any, at open ground behind `west` / `east`.
+func _start_bases(west: Vector2, east: Vector2) -> void:
+	var starts: Array = bridge.map_starts()
+	var away := (west - east).normalized()
+	for p in 2:
+		var corps: String = bridge.nation_thing(nations[p], "placeholder_corpsunpacked")
+		if corps == "":
+			corps = nations[p] + "_corps"
+		var at: Vector2
+		var facing := 0.0
+		if starts.size() > p:
+			at = starts[p].position
+			facing = float(starts[p].facing)
+		else:
+			var side: Vector2 = west + away * 30.0 if p == 0 else east - away * 30.0
+			at = bridge.find_open_area(side, 8)
+			if at.x < 0:
+				continue
+		bridge.queue_start_player(corps, at, facing, p)
+
+
 func _spawn_demo(order_move: bool) -> void:
 	var w := float(terrain.cells.x)
 	var h := float(terrain.cells.y)
-	var west: Vector2 = bridge.find_open_area(Vector2(28, h / 2), 20)
-	var east: Vector2 = bridge.find_open_area(Vector2(w - 28, h / 2), 12)
+	var starts: Array = bridge.map_starts()
+	var centre := Vector2(w, h) * 0.5
+	var west_at := Vector2(28, h / 2)
+	var east_at := Vector2(w - 28, h / 2)
+	if starts.size() >= 2:  # each army in front of its own base
+		west_at = (starts[0].position as Vector2).lerp(centre, 0.5)
+		east_at = (starts[1].position as Vector2).lerp(centre, 0.5)
+	var west: Vector2 = bridge.find_open_area(west_at, 20)
+	var east: Vector2 = bridge.find_open_area(east_at, 12)
 	if west.x < 0:
 		west = Vector2(w * 0.2, h * 0.5)
 	if east.x < 0:
 		east = Vector2(w * 0.8, h * 0.5)
 	var facing := (east - west).angle()
+	_start_bases(west, east)
 	var spots := [Vector2(-8, -14), Vector2(8, -14), Vector2(-8, 0), Vector2(8, 0), Vector2(-8, 14), Vector2(8, 14),
 		Vector2(-22, 0)]
 	for i in DEMO_REGIMENTS.size():
@@ -258,7 +323,7 @@ func _spawn_demo(order_move: bool) -> void:
 			if _player_of(bits) == PLAYER:
 				selected[bits] = true
 		units.set_selected(selected)
-	for key in ["cost", "paths", "slots"]:
+	for key in ["cost", "paths", "slots", "supply"]:
 		if args.has(key):
 			overlay[key] = true
 	if order_move:
@@ -305,6 +370,7 @@ func _spawn_many(n: int) -> void:
 					west.append(Vector2(x + 0.5, y + 0.5))
 				elif x > w * 2 / 3:
 					east.append(Vector2(x + 0.5, y + 0.5))
+	_start_bases(Vector2(w * 0.15, h * 0.5), Vector2(w * 0.85, h * 0.5))
 	var half := n / 2
 	for i in n:
 		var side := west if i < half else east
@@ -472,6 +538,7 @@ func _process(delta: float) -> void:
 	_update_overlays()
 	var t5 := Time.get_ticks_usec()
 	_update_hud()
+	_update_base_hud()
 	var t6 := Time.get_ticks_usec()
 	var args_fx_off := _args().has("no-fx")
 	fx.update(delta, 0.0 if paused else speed, cam.global_position)
@@ -543,6 +610,7 @@ func _drain_events(before: Dictionary) -> void:
 	if not _args().has("no-fx"):
 		fx.handle(events, snap, before)
 	for e in events:
+		_message_for(e)
 		if e.type in ["arrived", "blocked", "rejected", "routed", "level_up"]:
 			var name: String = bridge.regiment_def(regiment_defs.get(e.entity, -1)).get("ids", "#%d" % e.entity) if e.type != "rejected" else "command %d" % e.command
 			events_log.append("t%d %s %s" % [e.tick, e.type, name])
@@ -555,9 +623,17 @@ func _drain_events(before: Dictionary) -> void:
 func _unhandled_input(ev: InputEvent) -> void:
 	if snap.is_empty():
 		return  # still loading
+	if not _place.is_empty() and _placement_input(ev):
+		return
 	if ev is InputEventMouseButton:
 		var mb := ev as InputEventMouseButton
-		if mb.button_index == MOUSE_BUTTON_LEFT and _attack_mode:
+		if mb.button_index == MOUSE_BUTTON_LEFT and _run_mode:
+			if not mb.pressed:
+				var g: Variant = _ground_at(mb.position)
+				if g != null and not _selected_ids().is_empty():
+					bridge.queue_move(_selected_ids(), g, true, false, 0.0, PLAYER)
+				_run_mode = false
+		elif mb.button_index == MOUSE_BUTTON_LEFT and _attack_mode:
 			if not mb.pressed:
 				_order_attack_at(mb.position)
 				if not mb.shift_pressed:
@@ -606,6 +682,12 @@ func _unhandled_input(ev: InputEvent) -> void:
 
 func _key(k: InputEventKey) -> void:
 	var regs := _selected_ids()
+	if k.keycode == KEY_S and k.ctrl_pressed:
+		_set_supply(not overlay.supply)
+		return
+	if k.keycode == KEY_ESCAPE:
+		_end_placement()
+		_run_mode = false
 	if FORMATIONS.has(k.keycode) and not k.ctrl_pressed:
 		if not regs.is_empty():
 			bridge.queue_formation(regs, FORMATIONS[k.keycode], PLAYER)
@@ -671,6 +753,9 @@ func _select_click(at: Vector2, add: bool, double: bool) -> void:
 	var hit := _unit_at(at)
 	if not add:
 		selected.clear()
+	selected_building = 0
+	if hit == 0 and not add:
+		selected_building = _building_at(at)
 	if hit != 0:
 		if double and regiment_defs.has(hit):
 			# Every own regiment of the same type with a unit on screen.
@@ -692,6 +777,7 @@ func _select_click(at: Vector2, add: bool, double: bool) -> void:
 func _select_box(r: Rect2, add: bool) -> void:
 	if not add:
 		selected.clear()
+	selected_building = 0
 	for i in (snap.id as PackedInt64Array).size():
 		if snap.kind[i] != 0 or snap.player[i] != PLAYER:
 			continue
@@ -944,7 +1030,6 @@ var _hud_next_ms := 0
 func _update_hud() -> void:
 	var show: bool = overlay.hud and not _args().has("no-hud")
 	hud.visible = show
-	info_panel.visible = show and not selected.is_empty()
 	if not show:
 		return
 	# Rebuild the text at most 4 times a second, and only when it changes.
@@ -979,38 +1064,256 @@ func _update_hud() -> void:
 	var text := "\n".join(lines_out)
 	if text != hud.text:
 		hud.text = text
-	var info_text := _info_text()
-	if info_text != info_panel.text:
-		info_panel.text = info_text
 
 
-## The info panel: the first selected regiment's strength, health, morale, efficiency, experience
-## and engagement.
-func _info_text() -> String:
-	var regs := _selected_ids()
-	if regs.is_empty():
-		return ""
-	var info: Dictionary = bridge.regiment_info(regs[0])
-	if info.is_empty() or not info.has("morale"):
-		return ""
-	var bits := regs[0]
-	var alive := int(info.units_alive)
-	_regiment_units[bits] = maxi(int(_regiment_units.get(bits, 0)), alive)
-	var lv := int(info.level)
-	var steps: PackedFloat32Array = info.get("level_xp", PackedFloat32Array())
-	# level_xp[0] is level 0 (0 XP); the next level's requirement follows the current one.
-	var next := "  next level at %d" % int(steps[lv + 1]) if lv + 1 < steps.size() else ("  top level" if steps.size() > 1 else "")
-	var state := str(info.engagement)
-	if str(info.mode) != "none":
-		state += "  (%s)" % str(info.mode).replace("_", "-")
-	var out: Array[String] = []
-	out.append("%s%s" % [bridge.regiment_def(int(info.def)).get("ids", "?"), "  +%d more selected" % (regs.size() - 1) if regs.size() > 1 else ""])
-	out.append("units %d / %d    health %d / %d" % [alive, _regiment_units[bits], roundi(info.health), roundi(info.health_max)])
-	out.append("morale %d / %d  (breaks at %d)    efficiency %d%%" % [roundi(info.morale), roundi(info.morale_max),
-		roundi(float(info.get("breakpoint", 0.0))), roundi(float(info.efficiency) * 100.0)])
-	out.append("level %d    xp %d%s" % [lv, roundi(info.xp), next])
-	out.append("%s  %s%s" % [FORMATION_LABELS.get(info.formation, info.formation), state, "  ENTRENCHED" if info.entrenched else ""])
-	return "\n".join(out)
+# ---------------------------------------------------------------- bases, HUD and messages (M6 part 3)
+
+## The building under the cursor: the one whose footprint the ground point is in (own first), or 0.
+func _building_at(at: Vector2) -> int:
+	var g: Variant = _ground_at(at)
+	if g == null:
+		return 0
+	var best := 0
+	for s in structs:
+		var r: Rect2i = s.get("rect", Rect2i())
+		if Rect2(r).grow(1.0).has_point(g):
+			if int(s.player) == PLAYER:
+				return int(s.id)
+			if best == 0:
+				best = int(s.id)
+	return best
+
+
+## Buildings, minimap, HUD panels, supply rings: a few times a second.
+func _update_base_hud(force := false) -> void:
+	var now := Time.get_ticks_msec()
+	if not force and now < _hud_refresh_ms:
+		return
+	_hud_refresh_ms = now + HUD_REFRESH_MS
+	structs = bridge.structures()
+	if selected_building != 0 and not structs.any(func(s: Dictionary) -> bool: return int(s.id) == selected_building):
+		selected_building = 0
+	structures.sync(structs, selected_building)
+	var zones: Array = bridge.supply_zones() if overlay.supply else []
+	var team := int(bridge.economy(PLAYER).get("team", PLAYER))
+	base_overlays.show_zones(zones, team, overlay.supply)
+	if game_hud == null or not game_hud.visible:
+		return
+	var mm := game_hud.minimap
+	var dots := PackedVector2Array()
+	var cols := PackedColorArray()
+	var ids: PackedInt64Array = snap.get("id", PackedInt64Array())
+	for i in ids.size():
+		if snap.kind[i] == 1:
+			dots.append(snap.cur_pos[i])
+			cols.append(Minimap._color(int(snap.player[i])))
+	mm.dots = dots
+	mm.dot_colors = cols
+	var bl: Array = []
+	for s in structs:
+		var r: Rect2i = s.get("rect", Rect2i())
+		bl.append({"pos": s.position, "player": s.player, "city": s.city, "size": maxi(r.size.x, r.size.y)})
+	mm.buildings = bl
+	var mz: Array = []
+	for z in zones:
+		if int(z.team) == team:
+			mz.append({"center": z.center, "radius": z.radius, "color": Color(0.3, 1.0, 0.4) if z.active else Color(0.6, 0.6, 0.6)})
+	mm.zones = mz
+	mm.view_quad = _camera_quad()
+	mm.queue_redraw()
+	game_hud.refresh({"regiments": _selected_ids(), "building": selected_building})
+
+
+## The ground the camera sees (above the control panel), as 4 map points; empty if the view
+## reaches the horizon.
+func _camera_quad() -> PackedVector2Array:
+	var out := PackedVector2Array()
+	if cam == null or cam.camera == null:
+		return out
+	var vp := get_viewport().get_visible_rect().size
+	var bottom := vp.y - Hud.PANEL.y * art.scale * 0.85
+	var plane := Plane(Vector3.UP, cam.global_position.y)
+	for c in [Vector2(0, 0), Vector2(vp.x, 0), Vector2(vp.x, bottom), Vector2(0, bottom)]:
+		var hit: Variant = plane.intersects_ray(cam.camera.project_ray_origin(c), cam.camera.project_ray_normal(c))
+		if hit == null:
+			return PackedVector2Array()
+		out.append(Vector2((hit as Vector3).x, (hit as Vector3).z))
+	return out
+
+
+func _on_minimap(p: Vector2, button: int) -> void:
+	if button == MOUSE_BUTTON_LEFT:
+		cam.focus_on(p)
+	elif button == MOUSE_BUTTON_RIGHT and not _selected_ids().is_empty():
+		bridge.queue_move(_selected_ids(), p, false, false, 0.0, PLAYER)
+
+
+func _on_hud_command(kind: String, d: Dictionary) -> void:
+	var regs: PackedInt64Array = d.get("regiments", _selected_ids())
+	match kind:
+		"deploy", "recruit":
+			bridge.queue_recruit(int(d.building), str(d.ids), PLAYER)
+		"research":
+			bridge.queue_research(int(d.building), str(d.ids), PLAYER)
+		"pack":
+			bridge.queue_pack(int(d.building), PLAYER)
+		"cancel_recruit":
+			bridge.queue_cancel_recruit(int(d.building), int(d.index), PLAYER)
+		"cancel_research":
+			bridge.queue_cancel_research(int(d.building), PLAYER)
+		"unpack":
+			_begin_placement(int(d.regiment), str(d.ids))
+		"stop":
+			bridge.queue_stop(regs, PLAYER)
+		"attack":
+			_set_attack_mode(true)
+		"run":
+			_run_mode = true
+		"group":
+			bridge.queue_group_behaviour(regs, not bool(d.get("division", false)), PLAYER)
+		"supply":
+			_set_supply(bool(d.on))
+		"pause":
+			paused = not paused
+			game_hud.set_toggle("pause", paused)
+		"menu":
+			overlay.hud = not overlay.hud
+			game_hud.set_toggle("menu", overlay.hud)
+		"objectives":
+			var ratio := float(bridge.economy(PLAYER).get("city_ratio", 0.0))
+			game_hud.message("Objective: destroy every enemy HQ (Corps and division HQs)%s." % (
+				"" if ratio <= 0.0 else ", or hold %d%% of the cities" % roundi(ratio * 100.0)), "quest_good")
+		"technology":
+			var names: Array[String] = []
+			for ids in bridge.economy(PLAYER).get("technologies", PackedStringArray()):
+				names.append(str(bridge.property_info(ids).get("name", ids)))
+			game_hud.message("%s: %s" % [bridge.localize("#ui_tooltip_item_title_properties_technology"),
+				", ".join(names) if not names.is_empty() else "none yet"], "generic")
+		"politics":
+			var e: Dictionary = bridge.economy(PLAYER)
+			game_hud.message("You: %s (team %d). Enemy: %s." % [nations[0].to_upper(), int(e.get("team", 0)), nations[1].to_upper()], "generic")
+	_update_base_hud(true)
+
+
+func _set_supply(on: bool) -> void:
+	overlay.supply = on
+	game_hud.supply_on = on
+	game_hud.set_toggle("supply", on)
+	_update_base_hud(true)
+
+
+# Placement (Unpack): the ghost follows the cursor; left click unpacks there if it fits.
+
+func _begin_placement(regiment: int, ids: String) -> void:
+	_place = {"regiment": regiment, "ids": ids, "facing": 0.0, "pl": {}}
+	_set_attack_mode(false)
+	_update_ghost(get_viewport().get_mouse_position())
+
+
+func _end_placement() -> void:
+	_place = {}
+	base_overlays.show_ghost({}, 0.0)
+
+
+func _update_ghost(at: Vector2) -> void:
+	var g: Variant = _ground_at(at)
+	if g == null:
+		base_overlays.show_ghost({}, 0.0)
+		return
+	var pl: Dictionary = bridge.placement(_place.ids, g, float(_place.facing), PLAYER, int(_place.regiment))
+	_place.pl = pl
+	base_overlays.show_ghost(pl, 4.0)
+
+
+## Placement mode's input; true when it used the event.
+func _placement_input(ev: InputEvent) -> bool:
+	if ev is InputEventMouseMotion:
+		_update_ghost((ev as InputEventMouseMotion).position)
+		return false
+	if ev is InputEventMouseButton:
+		var mb := ev as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_RIGHT:
+			if not mb.pressed:
+				_end_placement()
+			return true
+		if mb.button_index == MOUSE_BUTTON_LEFT:
+			if not mb.pressed:
+				_update_ghost(mb.position)
+				var pl: Dictionary = _place.pl
+				if not pl.is_empty() and pl.ok:
+					bridge.queue_unpack(int(_place.regiment), pl.center, float(_place.facing), PLAYER)
+					_end_placement()
+				elif not pl.is_empty():
+					game_hud.message("%s: %s" % [bridge.localize("#actor_commands_unpack_name"), str(pl.why)], "error", Color(1, 0.5, 0.4))
+			return true
+	if ev is InputEventKey and ev.pressed and (ev as InputEventKey).keycode == KEY_R:
+		_place.facing = fmod(float(_place.facing) + PI / 2.0, TAU)
+		_update_ghost(get_viewport().get_mouse_position())
+		return true
+	return false
+
+
+## The message log line for a sim event, if it is one the player hears about.
+func _message_for(e: Dictionary) -> void:
+	if game_hud == null:
+		return
+	var mine := int(e.player) == PLAYER
+	match str(e.type):
+		"recruited":
+			if mine:
+				game_hud.message("%s ready" % _name_of_regiment(int(e.entity)), "regiment")
+		"unpacked":
+			if mine:
+				game_hud.message("%s deployed" % _name_of_structure(int(e.entity)), "building")
+		"packed":
+			if mine:
+				game_hud.message("%s packed" % _name_of_regiment(int(e.other)), "building")
+		"research_done":
+			if mine:
+				var pi: Dictionary = bridge.property_info(str(e.get("ids", "")))
+				game_hud.message(Hud._fmt(bridge.localize("#research_complete"), [pi.get("name", e.get("ids", "?"))]), "quest_good",
+					Color(0.6, 1.0, 0.6))
+		"city_captured":
+			var city := _name_of_structure(int(e.entity))
+			if mine:
+				game_hud.message(Hud._fmt(bridge.localize("#captured_victor"), [city]), "captured", Color(0.6, 1.0, 0.6))
+			elif int(e.detail) == PLAYER:
+				game_hud.message(Hud._fmt(bridge.localize("#captured_loser"), [city]), "building_bad", Color(1.0, 0.5, 0.4))
+			else:
+				game_hud.message("%s: %s" % [city, nations[int(e.player)].to_upper() if int(e.player) < nations.size() else "?"], "captured")
+		"kingdom_defeated":
+			var who: String = nations[int(e.player)].to_upper() if int(e.player) < nations.size() else "Player %d" % int(e.player)
+			game_hud.message("%s defeated" % who, "defeated", Color(1.0, 0.5, 0.4) if mine else Color(0.6, 1.0, 0.6))
+		"team_victory", "city_ratio_victory":
+			var team := int(bridge.economy(PLAYER).get("team", PLAYER))
+			game_hud.message("Victory" if int(e.detail) == team else "Defeat", "quest_good" if int(e.detail) == team else "quest_bad")
+		"bankrupt":
+			if mine:
+				game_hud.message(bridge.localize("#game_interface_UpkeepShortageIcon_ToolTip"), "warning", Color(1.0, 0.6, 0.3))
+		"routed":
+			if mine:
+				game_hud.message(Hud._fmt(bridge.localize("#organization_routed"), [_name_of_regiment(int(e.entity))]), "routed",
+					Color(1.0, 0.7, 0.4))
+		"deploy_failed":
+			if mine:
+				game_hud.message(Hud._fmt(bridge.localize("#tai_error_unpack"), [_name_of_regiment(int(e.entity))]), "error",
+					Color(1.0, 0.5, 0.4))
+		"rejected":
+			if mine and int(e.command) >= 10 and int(e.command) < 200:
+				game_hud.message("Command refused", "error", Color(1.0, 0.5, 0.4))
+
+
+func _name_of_regiment(bits: int) -> String:
+	var info: Dictionary = bridge.regiment_info(bits)
+	var ids: String = bridge.regiment_def(int(info.get("def", regiment_defs.get(bits, -1)))).get("ids", "?")
+	return str(bridge.thing_info(ids).get("name", ids))
+
+
+func _name_of_structure(id: int) -> String:
+	var s: Dictionary = bridge.structure_info(id)
+	if s.is_empty():
+		return "?"
+	return str(bridge.thing_info(str(s.ids)).get("name", s.ids))
 
 
 # ---------------------------------------------------------------- graphics quality
@@ -1119,6 +1422,162 @@ func _save_screenshot(path: String) -> void:
 
 # ---------------------------------------------------------------- self test (synthetic input)
 
+## M6 part 3: the base HUD. Stats bar, building selection, command panel with greyed reasons,
+## deploying a truck and unpacking it with the placement ghost, the supply overlay, the minimap and
+## the message log.
+func _selftest_bases(check: Callable, click: Callable, key: Callable, settle: Callable) -> void:
+	_update_base_hud(true)
+	var e: Dictionary = bridge.economy(PLAYER)
+	var money_text := (game_hud.econ_labels.money as Label).text
+	check.call("the stats bar shows money and income (%s), units %s, buildings %s" % [money_text,
+		(game_hud.econ_labels.unit as Label).text, (game_hud.econ_labels.building as Label).text],
+		bool(e.started) and money_text.contains("(") and (game_hud.econ_labels.building as Label).text.contains("/"))
+	var corps := 0
+	for s in structs:
+		if int(s.player) == PLAYER and str(s.ids).ends_with("_corps"):
+			corps = int(s.id)
+	check.call("both kingdoms started with a Corps HQ drawn (%d buildings, %d drawn)" % [structs.size(), structures.stats.buildings],
+		corps != 0 and structures.stats.buildings == structs.size())
+	if corps == 0:
+		return
+	var hq: Dictionary = bridge.structure_info(corps)
+	cam.focus_on(hq.position)
+	cam.distance = 70.0
+	await settle.call(1)
+	var hq_screen := cam.camera.unproject_position(terrain.to_world(hq.position, 1.0))
+	await click.call(hq_screen)
+	_update_base_hud(true)
+	var kinds := {}
+	for c in game_hud.commands_now:
+		kinds[c.kind] = true
+	check.call("clicking the Corps HQ selects it; the panel offers %s" % ", ".join(kinds.keys()),
+		selected_building == corps and kinds.has("deploy") and kinds.has("research"))
+	# Deploy a truck: the cheapest enabled Deploy button.
+	var pick := -1
+	var cheapest := 1e9
+	for i in game_hud.grid.size():
+		var gb: HudButton = game_hud.grid[i]
+		if not gb.visible or not gb.has_meta("cmd"):
+			continue
+		var c: Dictionary = gb.get_meta("cmd")
+		if c.kind == "deploy" and c.enabled and float(c.cost) < cheapest:
+			cheapest = float(c.cost)
+			pick = i
+	check.call("a Deploy button is enabled (cost %d)" % roundi(cheapest), pick >= 0)
+	if pick < 0:
+		return
+	var truck_ids: String = (game_hud.grid[pick].get_meta("cmd") as Dictionary).ids
+	var press := func(i: int) -> void:
+		var gb: HudButton = game_hud.grid[i]
+		await click.call(gb.get_global_transform_with_canvas() * (gb.size * 0.5))
+	var money_before := float(bridge.economy(PLAYER).money)
+	await press.call(pick)
+	await settle.call(2)
+	_update_base_hud(true)
+	var spent := money_before - float(bridge.economy(PLAYER).money)
+	check.call("pressing it buys the truck (%s, %d money)" % [truck_ids, roundi(spent)], spent > cheapest - 2.0)
+	# Greyed buttons say why: spend until something can't be afforded or the queue is full.
+	for n in 6:
+		bridge.queue_recruit(corps, truck_ids, PLAYER)
+	await settle.call(2)
+	_update_base_hud(true)
+	var greyed := ""
+	var tip := ""
+	for gb in game_hud.grid:
+		if gb.visible and gb.disabled and gb.tip_warning != "":
+			greyed = (gb.get_meta("cmd") as Dictionary).get("code", "")
+			tip = gb.tip_warning
+			break
+	check.call("a greyed button names what is missing (%s: %s)" % [greyed, tip.replace("\n", " ")], greyed != "" and tip != "")
+	# Cancel the extra ones from the queue's slots (slot 1 is being recruited).
+	for n in 4:
+		var slot: HudButton = game_hud.queue_slots[4 - n]
+		if slot.visible and not slot.disabled:
+			await click.call(slot.get_global_transform_with_canvas() * (slot.size * 0.5))
+	await settle.call(2)
+	var queued: Array = bridge.structure_info(corps).get("queue", [])
+	check.call("clicking queue slots cancels them (%d left)" % queued.size(), queued.size() <= 2)
+	# The truck comes out; select it, Unpack, place it with the ghost.
+	speed = 8.0
+	var truck := 0
+	var until: int = int(snap.tick) + 3000
+	while truck == 0 and int(snap.tick) < until:
+		await get_tree().process_frame
+		for bits in regiment_defs:
+			if _player_of(bits) == PLAYER and not bridge.unpack_info(bits).is_empty() and not bridge.unpack_info(bits).deploying:
+				truck = bits
+				break
+	speed = 1.0
+	check.call("the deployed truck comes out", truck != 0)
+	if truck == 0:
+		return
+	selected.clear()
+	selected[truck] = true
+	selected_building = 0
+	_update_base_hud(true)
+	var unpack := -1
+	for i in game_hud.grid.size():
+		if game_hud.grid[i].visible and (game_hud.grid[i].get_meta("cmd") as Dictionary).kind == "unpack":
+			unpack = i
+	check.call("a truck regiment's panel has Unpack", unpack >= 0)
+	if unpack < 0:
+		return
+	await press.call(unpack)
+	var up: Dictionary = bridge.unpack_info(truck)
+	var spot := Vector2(-1, -1)
+	for ring in range(14, 40, 4):
+		for k in 16:
+			var p: Vector2 = (hq.position as Vector2) + Vector2.from_angle(TAU * k / 16.0) * ring
+			if bridge.placement(str(up.ids), p, 0.0, PLAYER, truck).get("ok", false):
+				spot = p
+				break
+		if spot.x >= 0:
+			break
+	var blocked: Vector2 = hq.position  # on top of the HQ: never fits
+	var screen_bad := cam.camera.unproject_position(terrain.to_world(blocked))
+	var mm := InputEventMouseMotion.new()
+	mm.position = screen_bad
+	Input.parse_input_event(mm)
+	await get_tree().process_frame
+	check.call("the ghost is red where the building can't go (%s)" % base_overlays.ghost_why,
+		not _place.is_empty() and base_overlays.ghost.visible and not base_overlays.ghost_ok)
+	cam.focus_on(spot)
+	await settle.call(1)
+	var screen_ok := cam.camera.unproject_position(terrain.to_world(spot))
+	mm = InputEventMouseMotion.new()
+	mm.position = screen_ok
+	Input.parse_input_event(mm)
+	await get_tree().process_frame
+	check.call("and green where it fits", base_overlays.ghost.visible and base_overlays.ghost_ok)
+	await click.call(screen_ok)
+	speed = 8.0
+	var deployed := false
+	until = int(snap.tick) + 2500
+	while not deployed and int(snap.tick) < until:
+		await get_tree().process_frame
+		deployed = game_hud.log.latest().contains("deployed")
+	speed = 1.0
+	_update_base_hud(true)
+	check.call("clicking places it: it unpacks, and the log says so (%s)" % game_hud.log.latest(),
+		deployed and _place.is_empty() and not base_overlays.ghost.visible)
+	# Ctrl+S: supply zones.
+	await key.call(KEY_S, true)
+	_update_base_hud(true)
+	check.call("Ctrl+S shows the supply zones (%d rings)" % base_overlays.zone_count, overlay.supply and base_overlays.zone_count >= 1)
+	await key.call(KEY_S, true)
+	_update_base_hud(true)
+	check.call("Ctrl+S again hides them", not overlay.supply and base_overlays.zone_count == 0)
+	# Minimap: left click centres the camera there.
+	var mmap := game_hud.minimap
+	var target := Vector2(terrain.cells) * Vector2(0.3, 0.6)
+	await click.call(mmap.get_global_transform_with_canvas() * mmap.to_mini(target))
+	var at := Vector2(cam.position.x, cam.position.z)
+	check.call("a minimap click moves the camera there (%.0f, %.0f)" % [at.x, at.y], at.distance_to(target) < 3.0)
+	check.call("the minimap shows the camera box and the regiments (%d dots)" % mmap.dots.size(),
+		mmap.view_quad.size() == 4 and mmap.dots.size() > 0)
+
+
+
 func _selftest() -> void:
 	# Lambdas capture locals by value, so `check` only appends to the (shared) array; failures are
 	# counted from it at the end.
@@ -1133,6 +1592,15 @@ func _selftest() -> void:
 			mine.append(bits)
 	mine.sort()
 	var first: int = mine[0]
+	# Frame the armies above the control panel: the camera looks at a point just "below" them on
+	# screen (towards the camera), so clicks on units don't land on the HUD.
+	var frame_on := func(p: Vector2) -> void:
+		cam.focus_on(p + Vector2(sin(cam.yaw), cos(cam.yaw)) * 14.0)
+	var army := Vector2.ZERO
+	for bits in mine:
+		army += bridge.regiment_info(bits).anchor
+	frame_on.call(army / mine.size())
+	await get_tree().process_frame
 	var screen_of := func(reg: int) -> Vector2:
 		var info: Dictionary = bridge.regiment_info(reg)
 		var slots: PackedVector2Array = info.slots
@@ -1213,13 +1681,14 @@ func _selftest() -> void:
 	check.call("Q sets Assault", bridge.regiment_info(first).formation == "regiment_aggressive")
 	# Right click: move order.
 	var anchor: Vector2 = bridge.regiment_info(first).anchor
-	var target := cam.camera.unproject_position(terrain.to_world(anchor + Vector2(25, 4)))
+	var move_to := anchor + Vector2(-sin(cam.yaw), -cos(cam.yaw)) * 22.0 + Vector2(cos(cam.yaw), -sin(cam.yaw)) * 4.0  # up-screen, clear of the HUD
+	var target := cam.camera.unproject_position(terrain.to_world(move_to))
 	await click.call(target, MOUSE_BUTTON_RIGHT)
 	await settle.call(3)
 	var st: String = bridge.regiment_info(first).state
 	check.call("right click orders a move (state %s)" % st, st != "idle")
 	var goal: Vector2 = bridge.regiment_info(first).goal
-	check.call("the goal is where the click hit the ground", goal.distance_to(anchor + Vector2(25, 4)) < 1.5)
+	check.call("the goal is where the click hit the ground", goal.distance_to(move_to) < 1.5)
 	# Alt+right click: Run (temporary Column).
 	await click.call(target, MOUSE_BUTTON_RIGHT, false, true)
 	await settle.call(2)
@@ -1242,7 +1711,7 @@ func _selftest() -> void:
 	enemies.sort()
 	var foe: int = enemies[0]
 	await click.call(screen_of.call(first))
-	cam.focus_on((bridge.regiment_info(foe).anchor as Vector2).lerp(bridge.regiment_info(first).anchor, 0.3))
+	frame_on.call((bridge.regiment_info(foe).anchor as Vector2).lerp(bridge.regiment_info(first).anchor, 0.3))
 	await settle.call(1)
 	await click.call(screen_of.call(foe), MOUSE_BUTTON_RIGHT)
 	await settle.call(2)
@@ -1280,13 +1749,20 @@ func _selftest() -> void:
 		fx.stats.sounds, fx.stats.sprites], fx.stats.fired > 0 and fx.stats.hits > 0 and fx.stats.sounds > 0 and fx.stats.sprites > 0)
 	check.call("deaths leave bodies (%d deaths, %d wrecks / corpse nodes, %d baked corpses)" % [fx.stats.deaths, fx.stats.bodies, corpses],
 		fx.stats.deaths > 0 and fx.stats.bodies + corpses > 0)
+	_update_base_hud(true)
+	check.call("the info panel shows the selected regiment (%s)" % (game_hud.info.name as Label).text,
+		game_hud.info_root.visible and (game_hud.info.name as Label).text != "")
+	check.call("the HUD is 2D Controls in the original art (set %s, x%.2f, font %s; GpuPacer %s on %s)" % [art.set_name, art.scale,
+		"A&A.ttf" if art.font() is FontFile else "fallback", "on" if GpuPacer.enabled else "off",
+		RenderingServer.get_current_rendering_method()], game_hud.visible and game_hud.background.texture != null
+		and art.font() is FontFile and GpuPacer.enabled == (RenderingServer.get_current_rendering_method() == "gl_compatibility"))
+	await key.call(KEY_F4)
 	_hud_next_ms = 0
 	_update_hud()
-	check.call("the info panel shows the selected regiment", info_panel.visible and info_panel.text.contains("morale"))
-	check.call("the HUD is a visible 2D Label (GpuPacer %s on %s)" % ["on" if GpuPacer.enabled else "off",
-		RenderingServer.get_current_rendering_method()], hud.visible and hud.text.contains("tick")
-		and GpuPacer.enabled == (RenderingServer.get_current_rendering_method() == "gl_compatibility"))
+	check.call("F4 shows the debug text", hud.visible and hud.text.contains("tick"))
+	await key.call(KEY_F4)
 	await click.call(Vector2(size.x - 20, size.y * 0.5))
+	await _selftest_bases(check, click, key, settle)
 	# Freeze the fight so the unit counts below hold while the presets rebuild.
 	paused = true
 	await get_tree().process_frame

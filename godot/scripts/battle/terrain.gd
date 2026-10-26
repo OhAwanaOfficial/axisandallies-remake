@@ -24,6 +24,7 @@ var heights := PackedFloat32Array()  # (tiles + 1)^2 vertex heights, row-major
 var hw := 0                     # vertices per row
 var mesh_instance: MeshInstance3D
 var info := ""
+var name_colors: Array[Color] = []  # per map terrain name: its layer texture's average colour (minimap)
 var _low_shader: Shader
 
 
@@ -220,10 +221,13 @@ func _build_material(map: Dictionary, table: Dictionary, loader: CacheLoader) ->
 	for ty in tiles.y:
 		for tx in tiles.x:
 			used[cell_terrain[mini(ty * 2, cells.y - 1) * cells.x + mini(tx * 2, cells.x - 1)]] = true
+	var layer_avg: Array[Color] = []
+	name_colors.clear()
 	for ni in names.size():
 		var n := names[ni]
 		if not used.has(ni):
 			layer_of_name.append(0)
+			name_colors.append(Color(0.4, 0.5, 0.3))
 			continue
 		var v := _variation_for(n, variations, str(map.get("biome", "temperate")))
 		var idx := layer_keys.find(v)
@@ -252,9 +256,13 @@ func _build_material(map: Dictionary, table: Dictionary, loader: CacheLoader) ->
 				img.decompress()
 			img.convert(Image.FORMAT_RGBA8)
 			img.resize(LAYER_SIZE, LAYER_SIZE, Image.INTERPOLATE_BILINEAR)
+			var avg := img.duplicate() as Image
+			avg.resize(1, 1, Image.INTERPOLATE_BILINEAR)
+			layer_avg.append(avg.get_pixel(0, 0))
 			img.generate_mipmaps()
 			images.append(img)
 		layer_of_name.append(maxi(idx, 0))
+		name_colors.append(layer_avg[idx] if idx >= 0 and idx < layer_avg.size() else Color(0.4, 0.5, 0.3))
 	if images.is_empty():
 		var img := Image.create(LAYER_SIZE, LAYER_SIZE, true, Image.FORMAT_RGBA8)
 		img.fill(Color(0.4, 0.5, 0.3))

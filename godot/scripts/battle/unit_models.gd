@@ -55,6 +55,42 @@ func proto(def: int) -> Dictionary:
 	return p
 
 
+## The model of building `ids` (its Thing record's resource_prefix): like proto(), with the
+## construction stages hidden (ConstructionComponent: Stage* nodes, the finished one is Final).
+func building_proto(ids: String) -> Dictionary:
+	var key := "b:" + ids
+	if protos.has(key):
+		return protos[key]
+	var info: Dictionary = bridge.thing_info(ids)
+	var p := {"ids": ids, "info": info}
+	protos[key] = p
+	var rel := _resolve_model(str(info.get("model", "")))
+	if rel == "":
+		p.error = "no cached model for %s (%s)" % [ids, info.get("model", "")]
+		return p
+	var r: Dictionary = loader.load_model(rel)
+	if r.has("error"):
+		p.error = r.error
+		return p
+	var root: Node3D = r.root
+	var has_final := false
+	for n in root.find_children("*", "Node3D", true, false):
+		var ex: Dictionary = n.get_meta("extras", {})
+		if ex.get("hidden", false):
+			(n as Node3D).visible = false
+		if str(n.name).to_lower() == "final":
+			has_final = true
+	if has_final:
+		for n in root.find_children("*", "Node3D", true, false):
+			if str(n.name).to_lower().begins_with("stage"):
+				(n as Node3D).visible = false
+	for ap in root.find_children("*", "AnimationPlayer", true, false):
+		ap.queue_free()
+	p.root = root
+	p.model = rel
+	return p
+
+
 ## What the effects need from unit def `def`'s Thing record: properties (lower case), infantry,
 ## rot_time / sink_time (BodyComponent: corpse stays, then sinks), death_sfx (View WhenDestroyed
 ## PLAY_SFX audio ids), death_vfx (BodyComponent WhenHealth at 0 CREATE_VFX ids), attack_height,

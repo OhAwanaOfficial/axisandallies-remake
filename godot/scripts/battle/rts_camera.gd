@@ -3,6 +3,8 @@ extends Node3D
 ## RTS camera rig (ARCHITECTURE §4.4): the rig sits on the ground at the focus point; the camera
 ## orbits it at a fixed pitch. Pan with the arrow keys or the screen edges, zoom with the wheel,
 ## rotate with the middle mouse button (drag) or Page Up / Page Down. Home resets the rotation.
+## The default heading looks diagonally across the map towards its (0, 0) corner, as the original's
+## camera does: its diamond minimap (Minimap) then shows the map the way the screen does.
 
 const EDGE_PX := 10
 const PAN_SPEED := 1.1       # × distance per second
@@ -10,11 +12,12 @@ const ZOOM_MIN := 12.0
 const ZOOM_MAX := 220.0
 const ROTATE_SPEED := 1.8    # rad/s with the keys
 const PITCH := deg_to_rad(52.0)
+const DEFAULT_YAW := PI / 4.0
 
 var camera: Camera3D
 var terrain: BattleTerrain
 var distance := 70.0
-var yaw := 0.0
+var yaw := DEFAULT_YAW
 var bounds := Vector2(256, 256)
 var _rotating := false
 
@@ -84,7 +87,7 @@ func _unhandled_input(ev: InputEvent) -> void:
 	elif ev is InputEventMouseMotion and _rotating:
 		yaw -= (ev as InputEventMouseMotion).relative.x * 0.006
 	elif ev is InputEventKey and ev.pressed and (ev as InputEventKey).keycode == KEY_HOME:
-		yaw = 0.0
+		yaw = DEFAULT_YAW
 
 
 func _apply() -> void:
