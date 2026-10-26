@@ -46,6 +46,30 @@ Structure* ownStructure(Sim& sim, const Command& c, EntityId id) {
     Structure* s = w.registry.alive(id) ? w.structures.get(id) : nullptr;
     return s != nullptr && s->player == c.player ? s : nullptr;
 }
+const Structure* ownStructure(const Sim& sim, std::uint8_t player, EntityId id) {
+    const World& w = sim.world();
+    const Structure* s = w.registry.alive(id) ? w.structures.get(id) : nullptr;
+    return s != nullptr && s->player == player ? s : nullptr;
+}
+
+// The recruit list entry of building `b` named `ids` (its own IDS or the regiment's): its regiment.
+std::uint32_t recruitRegiment(const DefSet& d, const BuildingDef& b, std::string_view ids) {
+    for (const RecruitRef& r : b.recruitRefs) {
+        if (iequals(r.ids, ids) || iequals(d.regiments[r.regiment].ids, ids)) return r.regiment;
+    }
+    return kNoDef;
+}
+
+std::uint32_t researchItem(const BuildingDef& b, std::string_view propertyIds) {
+    for (std::uint32_t i = 0; i < b.research.size(); ++i) {
+        if (iequals(b.research[i].propertyIds, propertyIds)) return i;
+    }
+    return Structure::kNone;
+}
+
+Blocker blocked(std::string code, std::string detail = {}) {
+    return {std::move(code), std::move(detail)};
+}
 
 bool hasDeployed(const Sim& sim, std::uint8_t player, std::string_view buildingIds) {
     const World& w = sim.world();
@@ -423,48 +447,53 @@ void applyStartPlayer(Sim& sim, const Command& c, const BaseOrderPayload& p) {
                          Fixed{}, d->economy.stockpileMax);
 }
 
-void applyRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p) {
-    Structure* s = ownStructure(sim, c, p.target);
-    std::uint32_t bi = 0;
-    const BuildingDef* b = s != nullptr ? buildingOf(sim, p.target, &bi) : nullptr;
-    if (b == nullptr || s->state != Structure::State::Deployed || s->queue.size() >= kMaxRecruitQueue) return sim.reject(c);
+Blocker recruitBlocker(const Sim& sim, std::uint8_t player, EntityId building, std::string_view ids) {
+    const Structure* s = ownStructure(sim, player, building);
+    const BuildingDef* b = s != nullptr ? buildingOf(sim, building) : nullptr;
+    if (b == nullptr || player >= kMaxPlayers) return blocked("unknown");
+    if (s->state != Structure::State::Deployed) return blocked("not_deployed");
+    if (s->queue.size() >= kMaxRecruitQueue) return blocked("queue_full");
     const DefSet& d = *sim.config().defs;
-    std::uint32_t regiment = kNoDef;
-    for (const RecruitRef& r : b->recruitRefs) {
-        if (iequals(r.ids, p.ids) || iequals(d.regiments[r.regiment].ids, p.ids)) {
-            regiment = r.regiment;
-            break;
-        }
-    }
-    if (regiment == kNoDef) return sim.reject(c);
+    const std::uint32_t regiment = recruitRegiment(d, *b, ids);
+    if (regiment == kNoDef) return blocked("unknown");
     const std::vector<RecruitElement> plan = recruitPlan(d, regiment);
-    if (plan.empty()) return sim.reject(c);
+    if (plan.empty()) return blocked("unknown");
     // Requirements of every unit: structures owned and deployed, properties on this building.
-    const std::vector<std::uint32_t> props = effectiveProperties(sim, p.target);
+    const std::vector<std::uint32_t> props = effectiveProperties(sim, building);
     for (const RecruitElement& e : plan) {
         if (e.element.kind != ElementKind::Unit) continue;
         const UnitDef& u = d.units[e.element.index];
         for (const std::string& need : u.requiredStructureIds) {
-            if (!hasDeployed(sim, c.player, need)) return sim.reject(c);
+            if (!hasDeployed(sim, player, need)) return blocked("requires_structure", need);
         }
         for (const std::string& need : u.requiredProperties) {
             const std::uint32_t pi = d.propertyIndex(need);
-            if (pi == kNoDef || !std::binary_search(props.begin(), props.end(), pi)) return sim.reject(c);
+            if (pi == kNoDef || !std::binary_search(props.begin(), props.end(), pi)) return blocked("requires_property", need);
         }
-        if (u.unpackTo != kNoDef && d.buildings[u.unpackTo].providesCorps && hasCorps(sim, c.player, EntityId{})) return sim.reject(c);
+        if (u.unpackTo != kNoDef && d.buildings[u.unpackTo].providesCorps && hasCorps(sim, player, EntityId{})) return blocked("corps_exists");
     }
     // Limits (reservations included) and money.
-    const Ledger l = ledgerOf(sim, c.player);
+    const Ledger l = ledgerOf(sim, player);
     const ResourceAmounts need = recruitLimits(d, regiment, 0, true);
-    if (need.unitLimitConsumed > Fixed{} && l.upkeep.unitLimitConsumed + need.unitLimitConsumed > l.unitLimit) return sim.reject(c);
+    if (need.unitLimitConsumed > Fixed{} && l.upkeep.unitLimitConsumed + need.unitLimitConsumed > l.unitLimit) return blocked("unit_limit");
     if (need.buildingLimitConsumed > Fixed{} && l.upkeep.buildingLimitConsumed + need.buildingLimitConsumed > l.buildingLimit) {
-        return sim.reject(c);
+        return blocked("building_limit");
     }
-    Kingdom& k = sim.world().kingdoms[c.player];
+    const Kingdom& k = sim.world().kingdoms[player];
     const Fixed cost = recruitCost(d, regiment);
-    if (!k.started || k.money < cost) return sim.reject(c);
+    if (!k.started) return blocked("not_started");
+    if (k.money < cost) return blocked("money", std::to_string(cost.roundInt()));
+    return {};
+}
+
+void applyRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p) {
+    if (!recruitBlocker(sim, c.player, p.target, p.ids).ok()) return sim.reject(c);
+    const DefSet& d = *sim.config().defs;
+    const std::uint32_t regiment = recruitRegiment(d, *buildingOf(sim, p.target), p.ids);
+    const Fixed cost = recruitCost(d, regiment);
+    Kingdom& k = sim.world().kingdoms[c.player];
     k.money = k.money - cost;
-    s->queue.push_back({regiment, cost});
+    ownStructure(sim, c, p.target)->queue.push_back({regiment, cost});
 }
 
 void applyCancelRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p) {
@@ -501,48 +530,60 @@ void applyUnpack(Sim& sim, const Command& c, const BaseOrderPayload& p) {
     restartOrder(sim, p.target, pl.center, true, pl.facing);
 }
 
-void applyPack(Sim& sim, const Command& c, const BaseOrderPayload& p) {
-    Structure* s = ownStructure(sim, c, p.target);
-    const BuildingDef* b = s != nullptr ? buildingOf(sim, p.target) : nullptr;
-    const Health* h = sim.world().health.get(p.target);
-    if (b == nullptr || h == nullptr || s->state != Structure::State::Deployed || !b->mobile || b->packedRegiment == kNoDef) {
-        return sim.reject(c);
-    }
-    if (h->current < h->max * b->packHealthMin || !s->queue.empty() || s->research != Structure::kNone) return sim.reject(c);
-    s->state = Structure::State::Packing;
-    s->stateTicks = timerOf(b->packingLength);
+Blocker packBlocker(const Sim& sim, std::uint8_t player, EntityId building) {
+    const Structure* s = ownStructure(sim, player, building);
+    const BuildingDef* b = s != nullptr ? buildingOf(sim, building) : nullptr;
+    const Health* h = sim.world().health.get(building);
+    if (b == nullptr || h == nullptr) return blocked("unknown");
+    if (s->state != Structure::State::Deployed) return blocked("not_deployed");
+    if (!b->mobile || b->packedRegiment == kNoDef) return blocked("not_mobile");
+    if (h->current < h->max * b->packHealthMin) return blocked("health");
+    if (!s->queue.empty() || s->research != Structure::kNone) return blocked("busy");
+    return {};
 }
 
-void applyResearch(Sim& sim, const Command& c, const BaseOrderPayload& p) {
+void applyPack(Sim& sim, const Command& c, const BaseOrderPayload& p) {
+    if (!packBlocker(sim, c.player, p.target).ok()) return sim.reject(c);
     Structure* s = ownStructure(sim, c, p.target);
-    const BuildingDef* b = s != nullptr ? buildingOf(sim, p.target) : nullptr;
-    if (b == nullptr || s->state != Structure::State::Deployed || s->research != Structure::kNone) return sim.reject(c);
-    std::uint32_t item = Structure::kNone;
-    for (std::uint32_t i = 0; i < b->research.size(); ++i) {
-        if (iequals(b->research[i].propertyIds, p.ids)) {
-            item = i;
-            break;
-        }
-    }
-    if (item == Structure::kNone) return sim.reject(c);
+    s->state = Structure::State::Packing;
+    s->stateTicks = timerOf(buildingOf(sim, p.target)->packingLength);
+}
+
+Blocker researchBlocker(const Sim& sim, std::uint8_t player, EntityId building, std::string_view propertyIds) {
+    const Structure* s = ownStructure(sim, player, building);
+    const BuildingDef* b = s != nullptr ? buildingOf(sim, building) : nullptr;
+    if (b == nullptr || player >= kMaxPlayers) return blocked("unknown");
+    if (s->state != Structure::State::Deployed) return blocked("not_deployed");
+    if (s->research != Structure::kNone) return blocked("researching");
+    const std::uint32_t item = researchItem(*b, propertyIds);
+    if (item == Structure::kNone) return blocked("unknown");
     const ResearchItemDef& r = b->research[item];
-    if (r.property == kNoDef || r.scope == ResearchItemDef::Scope::Support) return sim.reject(c);
-    World& w = sim.world();
-    Kingdom& k = w.kingdoms[c.player];
+    if (r.property == kNoDef || r.scope == ResearchItemDef::Scope::Support) return blocked("unknown");
+    const World& w = sim.world();
+    const Kingdom& k = w.kingdoms[player];
     const std::vector<std::uint32_t>& have = r.scope == ResearchItemDef::Scope::Local ? s->properties : k.properties;
-    if (std::binary_search(have.begin(), have.end(), r.property)) return sim.reject(c);
+    if (std::binary_search(have.begin(), have.end(), r.property)) return blocked("researched");
     if (r.scope == ResearchItemDef::Scope::Global) {  // not twice at once
         for (std::size_t i = 0; i < w.structures.size(); ++i) {
             const Structure& o = w.structures.data()[i];
             const BuildingDef* ob = buildingOf(sim, w.structures.ids()[i]);
-            if (o.player == c.player && o.research != Structure::kNone && ob != nullptr && o.research < ob->research.size() &&
+            if (o.player == player && o.research != Structure::kNone && ob != nullptr && o.research < ob->research.size() &&
                 ob->research[o.research].property == r.property) {
-                return sim.reject(c);
+                return blocked("researching");
             }
         }
     }
-    if (!k.started || k.money < r.cost.money) return sim.reject(c);
-    s = ownStructure(sim, c, p.target);
+    if (!k.started) return blocked("not_started");
+    if (k.money < r.cost.money) return blocked("money", std::to_string(r.cost.money.roundInt()));
+    return {};
+}
+
+void applyResearch(Sim& sim, const Command& c, const BaseOrderPayload& p) {
+    if (!researchBlocker(sim, c.player, p.target, p.ids).ok()) return sim.reject(c);
+    Structure* s = ownStructure(sim, c, p.target);
+    const std::uint32_t item = researchItem(*buildingOf(sim, p.target), p.ids);
+    const ResearchItemDef& r = buildingOf(sim, p.target)->research[item];
+    Kingdom& k = sim.world().kingdoms[c.player];
     k.money = k.money - r.cost.money;
     s->research = item;
     s->researchTicks = timerOf(r.time);

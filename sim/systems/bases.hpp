@@ -34,6 +34,8 @@
 // building. SUPPORT (settlements) is not supported yet.
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/command.hpp"
@@ -76,6 +78,22 @@ Fixed recruitCost(const DefSet& defs, std::uint32_t regiment);
 // one's). Returns it (null: no entity left).
 EntityId addRegimentUnit(Sim& sim, EntityId org, const RecruitElement& e, bool first, FVec2 pos, Angle facing, CommandType cause,
                          Fixed healthFactor = Fixed::fromInt(1));
+
+// Why a base command would be refused, for the HUD's greyed buttons and their tooltips (M6 part 3).
+// The commands use these same checks, in the same order, so the HUD never disagrees with the sim.
+// An empty `code` means the command would be accepted. Codes: unknown (no such building / item),
+// not_deployed, queue_full, requires_structure / requires_property (`detail`: the first missing
+// IDS), corps_exists (one Corps HQ only), unit_limit, building_limit, not_started (no economy),
+// money (`detail`: the cost, whole money), researching (it, or the kingdom's same GLOBAL item, is
+// in progress), researched, not_mobile, health (below pack_health_min), busy (queue or research).
+struct Blocker {
+    std::string code;
+    std::string detail;
+    bool ok() const { return code.empty(); }
+};
+Blocker recruitBlocker(const Sim& sim, std::uint8_t player, EntityId building, std::string_view ids);
+Blocker researchBlocker(const Sim& sim, std::uint8_t player, EntityId building, std::string_view propertyIds);
+Blocker packBlocker(const Sim& sim, std::uint8_t player, EntityId building);
 
 void applyStartPlayer(Sim& sim, const Command& c, const BaseOrderPayload& p);
 void applyRecruit(Sim& sim, const Command& c, const BaseOrderPayload& p);

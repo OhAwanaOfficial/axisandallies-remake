@@ -22,8 +22,11 @@
 #include "data/tgi/pipeline.hpp"
 #include "nav/nav_world.hpp"
 #include "session/state_io.hpp"
+#include "systems/bases.hpp"
+#include "systems/economy.hpp"
 #include "systems/morale.hpp"
 #include "systems/movement.hpp"
+#include "systems/supply.hpp"
 #include "vfs/path.hpp"
 #include "vfs/vfs.hpp"
 
@@ -37,6 +40,7 @@ struct SimBridge::Data {
     corps::vfs::Vfs vfs;
     std::unique_ptr<corps::tgi::TgiDatabase> db;
     corps::DefSet defs;
+    std::map<std::string, std::string> strings;  // localization: lower-case key (no "|s") -> text
 };
 
 namespace {
@@ -149,6 +153,26 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("queue_attack", "regiments", "target", "player"), &SimBridge::queue_attack);
     ClassDB::bind_method(D_METHOD("queue_attack_move", "regiments", "goal", "player"), &SimBridge::queue_attack_move);
     ClassDB::bind_method(D_METHOD("queue_retreat", "regiments", "goal", "player"), &SimBridge::queue_retreat);
+    ClassDB::bind_method(D_METHOD("queue_start_player", "building_ids", "pos", "facing", "player"), &SimBridge::queue_start_player);
+    ClassDB::bind_method(D_METHOD("queue_recruit", "building", "ids", "player"), &SimBridge::queue_recruit);
+    ClassDB::bind_method(D_METHOD("queue_cancel_recruit", "building", "index", "player"), &SimBridge::queue_cancel_recruit);
+    ClassDB::bind_method(D_METHOD("queue_unpack", "regiment", "pos", "facing", "player"), &SimBridge::queue_unpack);
+    ClassDB::bind_method(D_METHOD("queue_pack", "building", "player"), &SimBridge::queue_pack);
+    ClassDB::bind_method(D_METHOD("queue_research", "building", "property_ids", "player"), &SimBridge::queue_research);
+    ClassDB::bind_method(D_METHOD("queue_cancel_research", "building", "player"), &SimBridge::queue_cancel_research);
+    ClassDB::bind_method(D_METHOD("map_starts"), &SimBridge::map_starts);
+    ClassDB::bind_method(D_METHOD("nation_thing", "nation", "placeholder"), &SimBridge::nation_thing);
+    ClassDB::bind_method(D_METHOD("economy", "player"), &SimBridge::economy);
+    ClassDB::bind_method(D_METHOD("structures"), &SimBridge::structures);
+    ClassDB::bind_method(D_METHOD("structure_info", "building"), &SimBridge::structure_info);
+    ClassDB::bind_method(D_METHOD("building_commands", "building", "player"), &SimBridge::building_commands);
+    ClassDB::bind_method(D_METHOD("unpack_info", "regiment"), &SimBridge::unpack_info);
+    ClassDB::bind_method(D_METHOD("placement", "building_ids", "at", "facing", "player", "ignore"), &SimBridge::placement);
+    ClassDB::bind_method(D_METHOD("supply_zones"), &SimBridge::supply_zones);
+    ClassDB::bind_method(D_METHOD("thing_info", "ids"), &SimBridge::thing_info);
+    ClassDB::bind_method(D_METHOD("property_info", "ids"), &SimBridge::property_info);
+    ClassDB::bind_method(D_METHOD("localize", "key"), &SimBridge::localize);
+    ClassDB::bind_method(D_METHOD("read_file_for_nation", "path", "nation"), &SimBridge::read_file_for_nation);
 }
 
 String SimBridge::hello() const {
@@ -171,6 +195,16 @@ bool SimBridge::start(const String& game_dir, const String& map_spec, int64_t se
     d->db = corps::tgi::loadTgiDatabase(d->vfs);
     corps::tgi::Diagnostics diags;
     d->defs = corps::compileDefs(*d->db, diags);
+    // Localization: every Text record's fields ("key|s = text"); the first file loaded wins.
+    for (const corps::tgi::Record& r : d->db->records) {
+        if (!corps::iequals(r.typeSpelling, "text")) continue;
+        for (const corps::tgi::ResolvedField& f : r.tree.fields) {
+            if (!f.hasValue()) continue;
+            std::string key = corps::asciiLowerCopy(f.spelling);
+            if (const std::size_t bar = key.find('|'); bar != std::string::npos) key.resize(bar);
+            d->strings.emplace(std::move(key), std::string(corps::trimAscii(f.text())));
+        }
+    }
 
     auto m = std::make_unique<corps::nav::MapDef>();
     const std::string spec = utf8(map_spec);
@@ -463,6 +497,9 @@ void SimBridge::step() {
         d["tick"] = static_cast<int64_t>(sim->tick() - 1);
         d["other"] = static_cast<int64_t>(e.other.bits);  // fired: the target; died: the killer; hit: the shooter
         d["detail"] = static_cast<int64_t>(e.detail);     // fired / hit: the DefSet ability
+        if (e.type == corps::SimEvent::Type::ResearchDone && e.detail < data->defs.properties.size()) {
+            d["ids"] = str(data->defs.properties[e.detail].ids);
+        }
         d["at"] = toV(e.at);
         d["facing"] = angleRad(e.facing);
         events.push_back(d);
@@ -518,7 +555,9 @@ Dictionary SimBridge::snapshot() const {
         const corps::Member* m = w.members.get(id);
         org.set(i, m != nullptr ? m->organization.bits : 0);
         const corps::Regiment* r = w.regiments.get(m != nullptr ? m->organization : id);
-        player.set(i, r != nullptr ? r->player : 0);
+        const corps::Structure* st = w.structures.get(id);
+        const corps::Combat* cb = w.combats.get(id);
+        player.set(i, st != nullptr ? st->player : (r != nullptr ? r->player : (cb != nullptr ? cb->player : 0)));
         const corps::Mover* mv = w.movers.get(id);
         moving.set(i, mv != nullptr && toF(mv->velocity.lengthSq()) > 0.0025 ? 1 : 0);
         const Vector2 cur = toV(t.position);
@@ -852,12 +891,415 @@ Dictionary SimBridge::regiment_info(int64_t regimentBits) const {
         out["entrenched"] = e->entrenched;
         out["attack_target"] = static_cast<int64_t>(e->target.bits);
     }
+    const corps::Supply* sp = w.supplies.get(id);
+    out["in_supply"] = sp != nullptr && sp->inSupply;
+    out["besieged"] = sp != nullptr && sp->besieged;
     if (dr != nullptr && dr->index < data->defs.regiments.size()) {
         const corps::RegimentDef& rd = data->defs.regiments[dr->index];
         out["breakpoint"] = toF(rd.moraleBreakpoint);
         PackedFloat32Array levels;
         for (const corps::ExperienceLevelDef& l : rd.experienceLevels) levels.push_back(static_cast<float>(toF(l.required)));
         out["level_xp"] = levels;
+    }
+    return out;
+}
+
+// ------------------------------------------------------------------------------ bases and HUD (M6 part 3)
+
+namespace {
+
+const char* structureStateName(corps::Structure::State s) {
+    switch (s) {
+    case corps::Structure::State::Deployed: return "deployed";
+    case corps::Structure::State::Unpacking: return "unpacking";
+    case corps::Structure::State::Packing: return "packing";
+    }
+    return "?";
+}
+
+std::string dirOf(const std::string& path) {
+    const std::size_t s = path.find_last_of('/');
+    return s == std::string::npos ? std::string() : path.substr(0, s);
+}
+
+}  // namespace
+
+void SimBridge::queue_start_player(const String& ids, const Vector2& pos, double facing, int64_t player) {
+    queue(corps::makeStartPlayer(0, static_cast<uint8_t>(player), 0, utf8(ids), fromV(pos), fromRad(facing)));
+}
+void SimBridge::queue_recruit(int64_t building, const String& ids, int64_t player) {
+    queue(corps::makeRecruit(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(building)}, utf8(ids)));
+}
+void SimBridge::queue_cancel_recruit(int64_t building, int64_t index, int64_t player) {
+    queue(corps::makeCancelRecruit(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(building)},
+                                   static_cast<uint8_t>(std::clamp<int64_t>(index, 0, 255))));
+}
+void SimBridge::queue_unpack(int64_t regiment, const Vector2& pos, double facing, int64_t player) {
+    queue(corps::makeUnpack(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(regiment)}, fromV(pos), fromRad(facing)));
+}
+void SimBridge::queue_pack(int64_t building, int64_t player) {
+    queue(corps::makePack(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(building)}));
+}
+void SimBridge::queue_research(int64_t building, const String& ids, int64_t player) {
+    queue(corps::makeResearch(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(building)}, utf8(ids)));
+}
+void SimBridge::queue_cancel_research(int64_t building, int64_t player) {
+    queue(corps::makeCancelResearch(0, static_cast<uint8_t>(player), 0, EntityId{static_cast<uint32_t>(building)}));
+}
+
+Array SimBridge::map_starts() const {
+    Array out;
+    if (!map) return out;
+    for (const corps::MapStart& s : corps::mapStarts(*map)) {
+        Dictionary d;
+        d["player"] = static_cast<int64_t>(s.player);
+        d["placeholder"] = str(s.placeholder);
+        d["position"] = toV(s.position);
+        d["facing"] = angleRad(s.facing);
+        out.push_back(d);
+    }
+    return out;
+}
+
+String SimBridge::nation_thing(const String& nation, const String& placeholder) const {
+    return data ? str(corps::placeholderThing(data->defs, utf8(nation), utf8(placeholder))) : String();
+}
+
+Dictionary SimBridge::economy(int64_t player) const {
+    Dictionary out;
+    if (!sim || player < 0 || player >= static_cast<int64_t>(corps::kMaxPlayers)) return out;
+    const corps::Kingdom& k = sim->world().kingdoms[static_cast<std::size_t>(player)];
+    const corps::Ledger l = corps::ledgerOf(*sim, static_cast<uint8_t>(player));
+    out["started"] = k.started;
+    out["money"] = toF(k.money);
+    out["money_net"] = toF(l.moneyNet());
+    out["money_production"] = toF(l.production.money);
+    out["money_upkeep"] = toF(l.upkeep.money);
+    out["oil"] = toF(l.oilNet());
+    out["ammo"] = toF(l.ammoNet());
+    out["oil_production"] = toF(l.production.oil);
+    out["oil_upkeep"] = toF(l.upkeep.oil);
+    out["ammo_production"] = toF(l.production.ammo);
+    out["ammo_upkeep"] = toF(l.upkeep.ammo);
+    out["shortfall"] = toF(l.shortfallCost);
+    out["unit_used"] = toF(l.upkeep.unitLimitConsumed);
+    out["unit_limit"] = toF(l.unitLimit);
+    out["building_used"] = toF(l.upkeep.buildingLimitConsumed);
+    out["building_limit"] = toF(l.buildingLimit);
+    out["bankrupt"] = k.bankrupt;
+    out["eliminated"] = k.eliminated;
+    out["team"] = static_cast<int64_t>(k.team);
+    out["army_xp"] = toF(k.armyXp);
+    const corps::Match& m = sim->world().match;
+    out["match_over"] = m.over;
+    out["winner"] = static_cast<int64_t>(m.winner);
+    out["city_ratio"] = toF(m.cityVictoryRatio);
+    PackedStringArray techs;  // GLOBAL research granted
+    for (const std::uint32_t p : k.properties) {
+        if (p < data->defs.properties.size()) techs.push_back(str(data->defs.properties[p].ids));
+    }
+    out["technologies"] = techs;
+    return out;
+}
+
+namespace {
+
+Dictionary structureDict(const corps::Sim& sim, EntityId id) {
+    Dictionary d;
+    const corps::World& w = sim.world();
+    const corps::Structure* s = w.structures.get(id);
+    const corps::DefRef* r = w.defRefs.get(id);
+    const corps::Transform* t = w.transforms.get(id);
+    const corps::DefSet& defs = *sim.config().defs;
+    if (s == nullptr || r == nullptr || t == nullptr || r->index >= defs.buildings.size()) return d;
+    const corps::BuildingDef& b = defs.buildings[r->index];
+    d["id"] = static_cast<int64_t>(id.bits);
+    d["ids"] = str(b.ids);
+    d["def"] = static_cast<int64_t>(r->index);
+    d["player"] = static_cast<int64_t>(s->player);
+    d["state"] = structureStateName(s->state);
+    d["position"] = toV(t->position);
+    d["facing"] = angleRad(t->facing);
+    const corps::Health* h = w.health.get(id);
+    d["health"] = h != nullptr ? toF(h->current) : 0.0;
+    d["health_max"] = h != nullptr ? toF(h->max) : 0.0;
+    if (const corps::Footprint* fp = w.footprints.get(id)) d["rect"] = Rect2i(fp->x0, fp->y0, fp->x1 - fp->x0 + 1, fp->y1 - fp->y0 + 1);
+    d["city"] = corps::isCity(defs, r->index);
+    d["in_supply"] = s->inSupply;
+    d["under_siege"] = s->underSiege;
+    d["capturer"] = static_cast<int64_t>(s->capturer);
+    d["capture"] = std::min(1.0, static_cast<double>(s->captureTicks) / 50.0);  // systems/supply: 5 s
+    return d;
+}
+
+}  // namespace
+
+Array SimBridge::structures() const {
+    Array out;
+    if (!sim) return out;
+    const corps::World& w = sim->world();
+    for (std::size_t i = 0; i < w.structures.size(); ++i) {
+        const EntityId id = w.structures.ids()[i];
+        if (!w.registry.alive(id)) continue;
+        Dictionary d = structureDict(*sim, id);
+        if (!d.is_empty()) out.push_back(d);
+    }
+    return out;
+}
+
+Dictionary SimBridge::structure_info(int64_t building) const {
+    if (!sim) return Dictionary();
+    const corps::World& w = sim->world();
+    const EntityId id{static_cast<uint32_t>(building)};
+    if (!w.registry.alive(id) || !w.structures.has(id)) return Dictionary();
+    Dictionary d = structureDict(*sim, id);
+    if (d.is_empty()) return d;
+    const corps::Structure& s = *w.structures.get(id);
+    const corps::DefSet& defs = data->defs;
+    const corps::BuildingDef& b = defs.buildings[static_cast<std::size_t>(int64_t(d["def"]))];
+    const auto ticks = [](Fixed seconds) { return std::max(1.0, toF(seconds) * corps::kTicksPerSecond); };
+    double progress = 1.0;
+    if (s.state == corps::Structure::State::Unpacking) progress = 1.0 - s.stateTicks / ticks(b.unpackingLength);
+    if (s.state == corps::Structure::State::Packing) progress = 1.0 - s.stateTicks / ticks(b.packingLength);
+    d["progress"] = std::clamp(progress, 0.0, 1.0);
+    Array queueOut;
+    for (const corps::RecruitOrder& o : s.queue) {
+        Dictionary q;
+        const corps::RegimentDef& g = defs.regiments[o.regiment];
+        const Dictionary ti = thing_info(str(g.ids));
+        q["ids"] = str(g.ids);
+        q["name"] = ti.get("name", str(g.ids));
+        q["icon"] = ti.get("icon", String());
+        q["paid"] = toF(o.paid);
+        queueOut.push_back(q);
+    }
+    d["queue"] = queueOut;
+    double recruit = 0.0;
+    if (!s.queue.empty() && !s.recruit.isNull()) {
+        const std::size_t n = std::max<std::size_t>(1, corps::recruitPlan(defs, s.queue.front().regiment).size());
+        const double interval = ticks(defs.regiments[s.queue.front().regiment].recruitTime) / static_cast<double>(n);
+        recruit = (s.nextElement + std::clamp(1.0 - s.recruitTicks / interval, 0.0, 1.0)) / static_cast<double>(n);
+    }
+    d["recruit_progress"] = std::clamp(recruit, 0.0, 1.0);
+    if (s.research != corps::Structure::kNone && s.research < b.research.size()) {
+        const corps::ResearchItemDef& r = b.research[s.research];
+        Dictionary rd = property_info(str(r.propertyIds));
+        rd["ids"] = str(r.propertyIds);
+        rd["progress"] = std::clamp(1.0 - s.researchTicks / ticks(r.time), 0.0, 1.0);
+        d["research"] = rd;
+    }
+    Dictionary prod;
+    prod["money"] = toF(b.production.money);
+    prod["oil"] = toF(b.production.oil);
+    prod["ammo"] = toF(b.production.ammo);
+    d["production"] = prod;
+    d["supply_range"] = toF(b.supplyRange);
+    return d;
+}
+
+Array SimBridge::building_commands(int64_t building, int64_t player) const {
+    Array out;
+    if (!sim) return out;
+    const corps::World& w = sim->world();
+    const EntityId id{static_cast<uint32_t>(building)};
+    const corps::DefRef* r = w.registry.alive(id) && w.structures.has(id) ? w.defRefs.get(id) : nullptr;
+    const corps::DefSet& defs = data->defs;
+    if (r == nullptr || r->index >= defs.buildings.size()) return out;
+    const corps::BuildingDef& b = defs.buildings[r->index];
+    const auto p = static_cast<uint8_t>(player);
+    const auto describe = [&](Dictionary& d, const corps::Blocker& why) {
+        d["enabled"] = why.ok();
+        d["code"] = str(why.code);
+        d["detail"] = str(why.detail);
+        String name;
+        if (why.code == "requires_structure") name = thing_info(str(why.detail)).get("name", str(why.detail));
+        if (why.code == "requires_property") name = property_info(str(why.detail)).get("name", str(why.detail));
+        d["detail_name"] = name;
+    };
+    for (const corps::RecruitRef& ref : b.recruitRefs) {
+        const corps::RegimentDef& g = defs.regiments[ref.regiment];
+        bool truck = false;
+        for (const corps::RecruitElement& e : corps::recruitPlan(defs, ref.regiment)) {
+            truck = truck || (e.element.kind == corps::ElementKind::Unit && defs.units[e.element.index].unpackTo != corps::kNoDef);
+        }
+        // A bare truck (a convoy) is shown as its truck: its record has the name and icon.
+        const Dictionary ti = thing_info(str(g.convoy ? ref.ids : g.ids));
+        Dictionary d;
+        d["kind"] = truck ? "deploy" : "recruit";
+        d["ids"] = str(ref.ids);
+        d["name"] = ti.get("name", str(ref.ids));
+        d["icon"] = ti.get("icon", String());
+        d["description"] = ti.get("description", String());
+        d["cost"] = toF(corps::recruitCost(defs, ref.regiment));
+        d["time"] = toF(g.recruitTime);
+        describe(d, corps::recruitBlocker(*sim, p, id, ref.ids));
+        out.push_back(d);
+    }
+    for (const corps::ResearchItemDef& item : b.research) {
+        if (item.scope == corps::ResearchItemDef::Scope::Support) continue;  // settlements: not yet
+        Dictionary d = property_info(str(item.propertyIds));
+        d["kind"] = "research";
+        d["ids"] = str(item.propertyIds);
+        d["cost"] = toF(item.cost.money);
+        d["time"] = toF(item.time);
+        describe(d, corps::researchBlocker(*sim, p, id, item.propertyIds));
+        out.push_back(d);
+    }
+    if (b.mobile && b.packedRegiment != corps::kNoDef) {
+        Dictionary d;
+        d["kind"] = "pack";
+        d["ids"] = str(b.ids);
+        d["name"] = localize("#actor_commands_pack_name");
+        d["icon"] = "UI/%s/Game/ActionButtons/IconPack.png";
+        d["description"] = localize("#actor_commands_pack_tooltip");
+        d["cost"] = 0.0;
+        d["time"] = toF(b.packingLength);
+        describe(d, corps::packBlocker(*sim, p, id));
+        out.push_back(d);
+    }
+    return out;
+}
+
+Dictionary SimBridge::unpack_info(int64_t regiment) const {
+    Dictionary out;
+    if (!sim) return out;
+    const corps::World& w = sim->world();
+    const EntityId id{static_cast<uint32_t>(regiment)};
+    if (!w.registry.alive(id) || !w.regiments.has(id)) return out;
+    for (std::size_t i = 0; i < w.members.size(); ++i) {
+        if (w.members.data()[i].organization != id) continue;
+        const corps::DefRef* r = w.defRefs.get(w.members.ids()[i]);
+        if (r == nullptr || r->kind != corps::DefRef::Kind::Unit || data->defs.units[r->index].unpackTo == corps::kNoDef) continue;
+        const corps::BuildingDef& b = data->defs.buildings[data->defs.units[r->index].unpackTo];
+        const Dictionary ti = thing_info(str(b.ids));
+        out["building"] = static_cast<int64_t>(data->defs.units[r->index].unpackTo);
+        out["ids"] = str(b.ids);
+        out["name"] = ti.get("name", str(b.ids));
+        out["icon"] = ti.get("icon", String());
+        out["unpacking_length"] = toF(b.unpackingLength);
+        out["deploying"] = w.deploys.has(id);
+        break;
+    }
+    return out;
+}
+
+Dictionary SimBridge::placement(const String& ids, const Vector2& at, double facing, int64_t player, int64_t ignore) const {
+    Dictionary out;
+    if (!sim) return out;
+    const std::uint32_t bi = data->defs.buildingIndex(utf8(ids));
+    if (bi == corps::kNoDef) return out;
+    const corps::Placement pl = corps::placeBuilding(*sim, bi, fromV(at), fromRad(facing), static_cast<uint8_t>(player),
+                                                     EntityId{static_cast<uint32_t>(ignore)});
+    out["ok"] = pl.ok;
+    out["why"] = String(pl.why);
+    out["center"] = toV(pl.center);
+    out["facing"] = angleRad(pl.facing);
+    out["rect"] = Rect2i(pl.rect.x0, pl.rect.y0, pl.rect.x1 - pl.rect.x0 + 1, pl.rect.y1 - pl.rect.y0 + 1);
+    return out;
+}
+
+Array SimBridge::supply_zones() const {
+    Array out;
+    if (!sim) return out;
+    for (const corps::SupplyZone& z : corps::supplyZones(*sim)) {
+        Dictionary d;
+        d["source"] = static_cast<int64_t>(z.source.bits);
+        d["center"] = toV(z.center);
+        d["radius"] = toF(z.radius);
+        d["team"] = static_cast<int64_t>(z.team);
+        d["active"] = z.active;
+        d["besieged"] = z.besieged;
+        out.push_back(d);
+    }
+    return out;
+}
+
+Dictionary SimBridge::thing_info(const String& ids) const {
+    Dictionary out;
+    if (!data || !data->db) return out;
+    const corps::tgi::TgiDatabase& db = *data->db;
+    const auto* e = db.defs.find(db.symbols.find("thing"), corps::asciiLowerCopy(utf8(ids)));
+    if (e == nullptr) return out;
+    const corps::tgi::Record& rec = db.records[e->record];
+    const auto field = [&](const corps::tgi::ResolvedNode* n, std::string_view key) -> std::string {
+        const corps::tgi::Symbol k = db.symbols.find(key);
+        const corps::tgi::ResolvedField* f = n != nullptr && k != corps::tgi::kNoSymbol ? n->field(k) : nullptr;
+        if (f == nullptr || !f->hasValue()) return {};
+        std::string v(corps::trimAscii(f->text()));
+        return corps::iequals(v, "null") ? std::string() : v;
+    };
+    const corps::tgi::Symbol viewSym = db.symbols.find("view");
+    const corps::tgi::ResolvedNode* view = viewSym != corps::tgi::kNoSymbol ? rec.tree.child(viewSym) : nullptr;
+    out["name"] = localize(str(field(&rec.tree, "name")));
+    out["description"] = localize(str(field(&rec.tree, "description")));
+    out["icon"] = str(field(view, "icon"));
+    out["minimap_icon"] = str(field(view, "minimap_icon"));
+    const std::string prefix = field(view, "resource_prefix");
+    const std::string dir = rec.file != nullptr ? dirOf(rec.file->path) : std::string();
+    out["model"] = prefix.empty() ? String() : str(prefix.front() == '/' ? prefix.substr(1) + ".glb" : (dir.empty() ? "" : dir + "/") + prefix + ".glb");
+    return out;
+}
+
+Dictionary SimBridge::property_info(const String& ids) const {
+    Dictionary out;
+    if (!data || !data->db) return out;
+    const corps::tgi::TgiDatabase& db = *data->db;
+    const auto* e = db.defs.find(db.symbols.find("property"), corps::asciiLowerCopy(utf8(ids)));
+    if (e == nullptr) return out;
+    const corps::tgi::Record& rec = db.records[e->record];
+    const auto field = [&](std::string_view key) -> std::string {
+        const corps::tgi::Symbol k = db.symbols.find(key);
+        const corps::tgi::ResolvedField* f = k != corps::tgi::kNoSymbol ? rec.tree.field(k) : nullptr;
+        return f != nullptr && f->hasValue() ? std::string(corps::trimAscii(f->text())) : std::string();
+    };
+    out["name"] = localize(str(field("name")));
+    out["description"] = localize(str(field("description")));
+    // action_button_icon is relative to the Property file's folder (Properties/TechIcons/...).
+    std::string icon = field("action_button_icon");
+    if (icon.empty()) icon = field("icon");
+    if (!icon.empty() && icon.front() != '/') {
+        const std::string dir = rec.file != nullptr ? dirOf(rec.file->path) : std::string();
+        if (!dir.empty() && data->vfs.find(dir + "/" + icon) != nullptr) icon = dir + "/" + icon;
+    }
+    out["icon"] = str(icon);
+    return out;
+}
+
+String SimBridge::localize(const String& key) const {
+    std::string k = utf8(key);
+    if (k.empty() || !data) return key;
+    if (k.front() == '#') k.erase(0, 1);
+    else if (k.find(' ') != std::string::npos) return key;  // already text
+    std::string lower = corps::asciiLowerCopy(k);
+    if (const std::size_t bar = lower.find('|'); bar != std::string::npos) lower.resize(bar);
+    const auto it = data->strings.find(lower);
+    if (it == data->strings.end()) return str(k);
+    std::string text = it->second;
+    if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
+    for (std::size_t p = text.find("\\n"); p != std::string::npos; p = text.find("\\n", p + 1)) text.replace(p, 2, "\n");
+    return str(text);
+}
+
+PackedByteArray SimBridge::read_file_for_nation(const String& path, const String& nation) const {
+    PackedByteArray out;
+    if (!data) return out;
+    std::string key = corps::asciiLowerCopy(utf8(path));
+    while (!key.empty() && key.front() == '/') key.erase(0, 1);
+    for (char& ch : key) if (ch == '\\') ch = '/';
+    const std::string skin = "skins/" + corps::asciiLowerCopy(utf8(nation)) + ".rwd";
+    const corps::vfs::Vfs& vfs = data->vfs;
+    for (std::size_t i = vfs.depotCount(); i-- > 0;) {
+        const corps::vfs::Depot& d = vfs.depot(i);
+        const std::string name = corps::asciiLowerCopy(d.name());
+        if (corps::istartsWith(name, "skins/") && name != skin) continue;
+        const std::vector<corps::vfs::DepotEntry>& es = d.entries();
+        const auto it = std::lower_bound(es.begin(), es.end(), key, [](const corps::vfs::DepotEntry& e, const std::string& k) { return e.key < k; });
+        if (it == es.end() || it->key != key) continue;
+        std::string bytes;
+        if (!d.read(static_cast<std::size_t>(it - es.begin()), bytes)) return out;
+        out.resize(static_cast<int64_t>(bytes.size()));
+        std::copy(bytes.begin(), bytes.end(), out.ptrw());
+        return out;
     }
     return out;
 }

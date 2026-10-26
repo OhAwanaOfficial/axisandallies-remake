@@ -102,6 +102,50 @@ public:
     // Raw bytes of a file in the game's VFS (sounds); empty if missing.
     PackedByteArray read_file(const String& path) const;
 
+    // --- bases, economy and the HUD (M6 part 3) -------------------------------------------------
+    void queue_start_player(const String& building_ids, const Vector2& pos, double facing, int64_t player);
+    void queue_recruit(int64_t building, const String& ids, int64_t player);
+    void queue_cancel_recruit(int64_t building, int64_t index, int64_t player);
+    void queue_unpack(int64_t regiment, const Vector2& pos, double facing, int64_t player);
+    void queue_pack(int64_t building, int64_t player);
+    void queue_research(int64_t building, const String& property_ids, int64_t player);
+    void queue_cancel_research(int64_t building, int64_t player);
+    // The map's start positions: [{player, placeholder, position, facing}], by player.
+    Array map_starts() const;
+    // A nation's thing for a map placeholder ("gbr", "placeholder_corpsunpacked" -> "gbr_corps").
+    String nation_thing(const String& nation, const String& placeholder) const;
+    // A player's stats bar: money, money_net, oil, ammo (per-minute balance), shortfall, unit_used /
+    // unit_limit, building_used / building_limit, bankrupt, started, eliminated, team, army_xp,
+    // technologies (GLOBAL research granted), and the match: match_over, winner, city_ratio.
+    Dictionary economy(int64_t player) const;
+    // Every Structure: id, ids, def, player (255: nobody), state, position, facing, health,
+    // health_max, rect (cells), city, in_supply, under_siege, capturer, capture (0..1).
+    Array structures() const;
+    // One Structure's panel: the structures() entry plus progress (unpack / pack, 0..1), queue
+    // [{ids, name, icon, paid}], recruit_progress (0..1 of the front regiment), research {ids, name,
+    // icon, progress}, production, supply_range.
+    Dictionary structure_info(int64_t building) const;
+    // A building's command buttons for `player`: [{kind: deploy | recruit | research | pack, ids,
+    // name, icon, description, cost, time, enabled, code, detail, detail_name}], in data order.
+    // `code` / `detail`: why it is greyed (systems/bases Blocker); detail_name: the missing thing's name.
+    Array building_commands(int64_t building, int64_t player) const;
+    // What a truck regiment unpacks into: {building, ids, name, icon}, or {}.
+    Dictionary unpack_info(int64_t regiment) const;
+    // Where building `building_ids` would stand at `at` / `facing` for `player`: {ok, why, center,
+    // facing, rect (cells)}. `ignore`: the truck regiment placing it.
+    Dictionary placement(const String& building_ids, const Vector2& at, double facing, int64_t player, int64_t ignore) const;
+    // Every supply zone: [{source, center, radius, team, active, besieged}].
+    Array supply_zones() const;
+    // A Thing's view data: name, description (localized), icon, minimap_icon, model (cache .glb path).
+    Dictionary thing_info(const String& ids) const;
+    // A Property's: name, description, icon (action_button_icon, resolved to a VFS path).
+    Dictionary property_info(const String& ids) const;
+    // The text of a localization key ("#key", "key" or "key|s"; "\n" becomes a newline). The key
+    // itself if missing.
+    String localize(const String& key) const;
+    // A file as `nation`'s skin sees it: skins/<NATION>.rwd first, other nations' skins ignored.
+    PackedByteArray read_file_for_nation(const String& path, const String& nation) const;
+
 private:
     struct Snap {
         uint32_t bits = 0;

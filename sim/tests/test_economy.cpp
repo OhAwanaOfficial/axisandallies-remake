@@ -614,6 +614,47 @@ TEST_CASE("bases save / load: mid-recruit, mid-research, mid-unpack states conti
     CHECK(copy.world().kingdoms[0].properties == r.kingdom().properties);
 }
 
+TEST_CASE("blockers: the reasons the HUD shows are the checks the commands make") {
+    const nav::MapDef m = openMap();
+    Run r(m);
+    const EntityId corps = r.start();
+    CHECK(recruitBlocker(r.sim, 0, corps, "reg_hq").ok());
+    CHECK(recruitBlocker(r.sim, 1, corps, "reg_hq").code == "unknown");   // not its building
+    CHECK(recruitBlocker(r.sim, 0, corps, "reg_inf").code == "unknown");  // not on its list
+    r.step({makeDebugSetMoney(0, 0, r.seq(0), 50_fx)});
+    const Blocker poor = recruitBlocker(r.sim, 0, corps, "reg_hq");
+    CHECK(poor.code == "money");
+    CHECK(poor.detail == "225");
+    r.step({makeRecruit(0, 0, r.seq(0), corps, "reg_hq")});
+    CHECK(r.rejected());
+    r.step({makeDebugSetMoney(0, 0, r.seq(0), 5000_fx)});
+    const EntityId hq = r.unpack(r.recruit(corps, "reg_hq"), {80_fx, 40_fx});
+    const Blocker heavy = recruitBlocker(r.sim, 0, hq, "reg_heavy");
+    CHECK(heavy.code == "requires_structure");
+    CHECK(heavy.detail == "pool");
+    // Unit limit 3 (the division HQ): the fourth infantry regiment doesn't fit, reservations included.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(recruitBlocker(r.sim, 0, hq, "reg_inf").ok());
+        r.step({makeRecruit(0, 0, r.seq(0), hq, "reg_inf")});
+    }
+    CHECK(recruitBlocker(r.sim, 0, hq, "reg_inf").code == "unit_limit");
+    CHECK(packBlocker(r.sim, 0, hq).code == "busy");
+    // Research: in progress, then done.
+    CHECK(researchBlocker(r.sim, 0, corps, "tech_mg").ok());
+    r.step({makeResearch(0, 0, r.seq(0), corps, "tech_mg")});
+    CHECK(researchBlocker(r.sim, 0, corps, "tech_mg").code == "researching");
+    CHECK(packBlocker(r.sim, 0, corps).code == "busy");
+    REQUIRE(r.until(SimEvent::Type::ResearchDone) != nullptr);
+    CHECK(researchBlocker(r.sim, 0, corps, "tech_mg").code == "researched");
+    CHECK(researchBlocker(r.sim, 0, corps, "tech_nothing").code == "unknown");
+    // Packing needs pack_health_min (50%).
+    CHECK(packBlocker(r.sim, 0, corps).ok());
+    r.sim.world().health.get(corps)->current = 1000_fx;  // as damage would leave it
+    CHECK(packBlocker(r.sim, 0, corps).code == "health");
+    r.step({makePack(0, 0, r.seq(0), corps)});
+    CHECK(r.rejected());
+}
+
 TEST_CASE("bases commands encode and decode") {
     const std::vector<Command> cmds = {
         makeStartPlayer(3, 1, 0, "gbr_corps", {12.5_fx, -3_fx}, Angle::fromUnits(1234)),
