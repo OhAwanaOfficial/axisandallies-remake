@@ -47,6 +47,14 @@ std::vector<std::uint8_t> encodeReplay(const Replay& r) {
         w.u32(h.tick);
         w.u64(h.hash);
     }
+    if (!r.keyframes.empty()) {
+        w.tag("KEYS");
+        w.u32(static_cast<std::uint32_t>(r.keyframes.size()));
+        for (const Keyframe& k : r.keyframes) {
+            w.u32(k.tick);
+            w.bytes(k.state);
+        }
+    }
     w.u64(hashBytes(w.buf));
     return std::move(w.buf);
 }
@@ -101,6 +109,17 @@ bool decodeReplay(const std::vector<std::uint8_t>& bytes, Replay& out, std::stri
         h.hash = r.u64();
         rep.hashes.push_back(h);
     }
+    if (r.ok && r.remaining() != 0) {
+        if (!r.expectTag("KEYS")) return fail("unknown trailing section");
+        const std::uint32_t nk = r.count(8);
+        for (std::uint32_t i = 0; i < nk && r.ok; ++i) {
+            Keyframe k;
+            k.tick = r.u32();
+            k.state = r.bytes();
+            if (!rep.keyframes.empty() && k.tick <= rep.keyframes.back().tick) return fail("keyframes out of order");
+            rep.keyframes.push_back(std::move(k));
+        }
+    }
     if (!r.ok || r.remaining() != 0) return fail("truncated or trailing bytes");
     out = std::move(rep);
     return true;
@@ -129,6 +148,7 @@ RunResult runReplay(const Replay& replay, const DefSet* defs, const RunOptions& 
         if (options.perStage) res.stageHashes.push_back(stages);
         const bool last = t + 1 == replay.header.tickCount;
         if (options.everyTick || t % interval == 0 || last) res.hashes.push_back({t, stateHash(sim)});
+        if (options.keyframeEvery > 0 && (t + 1) % options.keyframeEvery == 0) res.keyframes.push_back({t, saveState(sim)});
     }
     res.finalHash = stateHash(sim);
     return res;
@@ -326,6 +346,63 @@ Divergence divergenceFromRecorded(const Replay& replay, const RunResult& run) {
         }
     }
     return d;
+}
+
+// --- film playback ---
+
+ReplayPlayer::ReplayPlayer(const Replay& replay, const DefSet* defs, const nav::MapDef* map, std::unique_ptr<Sim>* slot)
+    : replay_(replay), defs_(defs), map_(map), sim_(slot != nullptr ? slot : &own_) {
+    std::string why;
+    parseCombatTuning(tuning_, replay_.header.tuning, why);
+    std::stable_sort(replay_.commands.begin(), replay_.commands.end(),
+                     [](const Command& a, const Command& b) { return a.tick < b.tick; });
+    restart(0, nullptr);
+}
+
+ReplayPlayer::~ReplayPlayer() = default;
+
+void ReplayPlayer::restart(std::uint32_t fromTick, const std::vector<std::uint8_t>* state) {
+    *sim_ = std::make_unique<Sim>(SimConfig{replay_.header.matchSeed, defs_, map_, &tuning_});
+    if (state != nullptr) {
+        std::string err;
+        if (!loadState(**sim_, *state, &err)) {  // a bad keyframe: play from the start instead
+            *sim_ = std::make_unique<Sim>(SimConfig{replay_.header.matchSeed, defs_, map_, &tuning_});
+            fromTick = 0;
+        }
+    }
+    nextCommand_ = 0;
+    while (nextCommand_ < replay_.commands.size() && replay_.commands[nextCommand_].tick < fromTick) ++nextCommand_;
+}
+
+std::uint32_t ReplayPlayer::tick() const {
+    return (*sim_)->tick();
+}
+
+std::vector<Command> ReplayPlayer::takeTickCommands() {
+    const std::uint32_t t = (*sim_)->tick();
+    std::vector<Command> cmds;
+    while (nextCommand_ < replay_.commands.size() && replay_.commands[nextCommand_].tick == t) cmds.push_back(replay_.commands[nextCommand_++]);
+    return cmds;
+}
+
+bool ReplayPlayer::step() {
+    if ((*sim_)->tick() >= replay_.header.tickCount) return false;
+    (*sim_)->step(takeTickCommands());
+    return true;
+}
+
+void ReplayPlayer::seek(std::uint32_t target) {
+    target = std::min(target, replay_.header.tickCount);
+    const std::uint32_t now = (*sim_)->tick();
+    // The latest keyframe at or before the target (its state is after tick k, so tick() == k + 1).
+    const Keyframe* key = nullptr;
+    for (const Keyframe& k : replay_.keyframes) {
+        if (k.tick + 1 <= target) key = &k;
+    }
+    const std::uint32_t keyTick = key != nullptr ? key->tick + 1 : 0;
+    if (target < now || keyTick > now) restart(keyTick, key != nullptr ? &key->state : nullptr);
+    lastSeekTicks_ = 0;
+    while ((*sim_)->tick() < target && step()) ++lastSeekTicks_;
 }
 
 }  // namespace corps

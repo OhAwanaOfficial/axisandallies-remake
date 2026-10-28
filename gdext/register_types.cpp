@@ -3,6 +3,7 @@
 #include <godot_cpp/godot.hpp>
 
 #include "sim_bridge.hpp"
+#include "net_session.hpp"
 
 using namespace godot;
 
@@ -11,6 +12,8 @@ static void initializeSimBridgeModule(ModuleInitializationLevel level) {
         return;
     }
     GDREGISTER_CLASS(SimBridge);
+    SimBridge::bind_net_methods();  // M8 (sim_bridge_net.cpp)
+    GDREGISTER_CLASS(NetSession);
 }
 
 static void uninitializeSimBridgeModule(ModuleInitializationLevel level) {

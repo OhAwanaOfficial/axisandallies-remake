@@ -10,6 +10,7 @@
 #include "core/sim.hpp"
 #include "math/rng.hpp"
 #include "net/lockstep.hpp"
+#include "session/replay.hpp"
 #include "session/state_io.hpp"
 
 using namespace corps;
@@ -350,4 +351,43 @@ TEST_CASE("State diff names the first differing entity and field (simcli diff)")
     CHECK(m.where.find("only in a") != std::string::npos);
     std::vector<std::uint8_t> junk = {1, 2, 3};
     CHECK(diffStates(saveState(a), junk).malformed);
+}
+
+TEST_CASE("Films: keyframes round-trip and seeking lands on the same state as playing through") {
+    const Replay base = recordSynthetic(61, 62, 400, 3, nullptr);
+    RunOptions opt;
+    opt.keyframeEvery = 100;
+    const RunResult run = runReplay(base, nullptr, opt);
+    REQUIRE(run.keyframes.size() == 4);
+    CHECK(run.keyframes[0].tick == 99);
+    Replay film = base;
+    film.keyframes = run.keyframes;
+    Replay back;
+    std::string err;
+    REQUIRE(decodeReplay(encodeReplay(film), back, &err));
+    CHECK(back.keyframes == film.keyframes);
+    CHECK(encodeReplay(base) != encodeReplay(film));
+    REQUIRE(decodeReplay(encodeReplay(base), back, &err));  // no keyframes: the old layout
+    CHECK(back.keyframes.empty());
+
+    RunOptions every;  // reference: the hash after every tick
+    every.everyTick = true;
+    const RunResult ref = runReplay(base, nullptr, every);
+    ReplayPlayer player(film, nullptr, nullptr);
+    CHECK(player.length() == 400);
+    for (int i = 0; i < 50; ++i) player.step();
+    CHECK(stateHash(player.sim()) == ref.hashes[49].hash);
+    player.seek(250);  // forward past two keyframes: from the one after tick 199
+    CHECK(player.tick() == 250);
+    CHECK(player.lastSeekTicks() == 50);
+    CHECK(stateHash(player.sim()) == ref.hashes[249].hash);
+    player.seek(120);  // backwards
+    CHECK(player.lastSeekTicks() == 20);
+    CHECK(stateHash(player.sim()) == ref.hashes[119].hash);
+    player.seek(30);  // before the first keyframe: from the start
+    CHECK(stateHash(player.sim()) == ref.hashes[29].hash);
+    player.seek(1000);  // clamped to the end
+    CHECK(player.tick() == 400);
+    CHECK(stateHash(player.sim()) == ref.finalHash);
+    CHECK_FALSE(player.step());
 }

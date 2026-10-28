@@ -1421,4 +1421,142 @@ PackedByteArray SimBridge::cost_grid(int64_t moveClass) const {
     return out;
 }
 
+// M8: defined here because Data is private to this file (the rest is in sim_bridge_net.cpp).
+int64_t SimBridge::data_hash() const {
+    return data ? static_cast<int64_t>(data->defs.dataHash) : 0;
+}
+
+// --- films (M8 B7) ---
+
+Dictionary SimBridge::save_film(const String& path, const PackedStringArray& players) const {
+    Dictionary out;
+    out["ok"] = false;
+    out["path"] = path;
+    if (!sim || !map || !data) {
+        out["error"] = "no match";
+        return out;
+    }
+    corps::Replay rep;
+    rep.header.simVersion = corps::simVersion();
+    rep.header.dataHash = data->defs.dataHash;
+    rep.header.mapSpec = map->name;
+    rep.header.mapHash = map->mapHash;
+    rep.header.matchSeed = seed_;
+    rep.header.tickCount = sim->tick();
+    for (int64_t i = 0; i < players.size(); ++i) rep.header.players.push_back(utf8(players[i]));
+    rep.commands = recorded;
+    rep.commands.erase(std::remove_if(rep.commands.begin(), rep.commands.end(), [&](const corps::Command& c) { return c.tick >= sim->tick(); }),
+                       rep.commands.end());
+    corps::RunOptions opt;
+    opt.map = map.get();
+    opt.keyframeEvery = corps::kFilmKeyframeTicks;
+    const corps::RunResult run = corps::runReplay(rep, &data->defs, opt);
+    rep.hashes = run.hashes;
+    rep.keyframes = run.keyframes;
+    const uint64_t live = corps::stateHash(*sim);
+    out["ticks"] = static_cast<int64_t>(rep.header.tickCount);
+    out["keyframes"] = static_cast<int64_t>(rep.keyframes.size());
+    out["hash"] = String::num_uint64(live, 16);
+    if (run.finalHash != live) {
+        out["error"] = "the film doesn't reproduce the live match";
+        return out;
+    }
+    const auto bytes = corps::encodeReplay(rep);
+    std::ofstream f(corps::vfs::pathFromUtf8(utf8(path)), std::ios::binary);
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!f) {
+        out["error"] = "cannot write " + path;
+        return out;
+    }
+    out["bytes"] = static_cast<int64_t>(bytes.size());
+    out["ok"] = true;
+    return out;
+}
+
+namespace {
+
+bool readFilm(const String& path, corps::Replay& rep, std::string& error) {
+    std::ifstream in(corps::vfs::pathFromUtf8(utf8(path)), std::ios::binary);
+    if (!in) {
+        error = "cannot read " + utf8(path);
+        return false;
+    }
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return corps::decodeReplay(bytes, rep, &error);
+}
+
+}  // namespace
+
+Dictionary SimBridge::film_info(const String& path) {
+    Dictionary out;
+    corps::Replay rep;
+    std::string err;
+    out["ok"] = readFilm(path, rep, err);
+    out["error"] = str(err);
+    if (!bool(out["ok"])) return out;
+    out["map_spec"] = str(rep.header.mapSpec);
+    out["seed"] = static_cast<int64_t>(rep.header.matchSeed);
+    out["ticks"] = static_cast<int64_t>(rep.header.tickCount);
+    out["keyframes"] = static_cast<int64_t>(rep.keyframes.size());
+    out["sim_version"] = str(rep.header.simVersion);
+    out["data_hash"] = static_cast<int64_t>(rep.header.dataHash);
+    PackedStringArray names;
+    for (const std::string& p : rep.header.players) names.push_back(str(p));
+    out["players"] = names;
+    return out;
+}
+
+bool SimBridge::film_load(const String& path) {
+    error.clear();
+    if (!sim || !map || !data) {
+        error = "start() the film's map first";
+        return false;
+    }
+    corps::Replay rep;
+    if (!readFilm(path, rep, error)) return false;
+    if (rep.header.dataHash != data->defs.dataHash) {
+        error = "the film was recorded with other game data (mods)";
+        return false;
+    }
+    if (rep.header.mapHash != map->mapHash) {
+        error = "the film was recorded on another map";
+        return false;
+    }
+    controllers.clear();
+    pending.clear();
+    recorded.clear();
+    film = std::make_unique<corps::ReplayPlayer>(rep, &data->defs, map.get(), &sim);
+    prev = capture();
+    return true;
+}
+
+bool SimBridge::film_step() {
+    if (!film || film->tick() >= film->length()) return false;
+    pending = film->takeTickCommands();
+    step();  // events for the view, like a live tick (no controllers: film_load removed them)
+    return true;
+}
+
+void SimBridge::film_seek(int64_t tick) {
+    if (!film) return;
+    film->seek(static_cast<uint32_t>(std::max<int64_t>(0, tick)));
+    pending.clear();
+    events = Array();
+    regimentHealthMax.clear();
+    prev = capture();
+}
+
+int64_t SimBridge::film_length() const {
+    return film ? static_cast<int64_t>(film->length()) : 0;
+}
+
+void SimBridge::bind_film_methods() {
+    ClassDB::bind_method(D_METHOD("save_film", "path", "players"), &SimBridge::save_film);
+    ClassDB::bind_static_method("SimBridge", D_METHOD("film_info", "path"), &SimBridge::film_info);
+    ClassDB::bind_method(D_METHOD("film_load", "path"), &SimBridge::film_load);
+    ClassDB::bind_method(D_METHOD("film_step"), &SimBridge::film_step);
+    ClassDB::bind_method(D_METHOD("film_seek", "tick"), &SimBridge::film_seek);
+    ClassDB::bind_method(D_METHOD("film_length"), &SimBridge::film_length);
+}
+
 }  // namespace godot

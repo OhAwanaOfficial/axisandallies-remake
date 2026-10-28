@@ -26,6 +26,7 @@
 #include "core/command.hpp"
 
 namespace corps {
+class ReplayPlayer;
 class Sim;
 namespace ai {
 class Controller;
@@ -169,6 +170,36 @@ public:
     // {ok, error, path, ticks, commands, hash}.
     Dictionary save_replay(const String& path) const;
 
+    // --- multiplayer (M8, NETCODE.md; gdext/sim_bridge_net.cpp) ----------------------------------
+    // Lockstep: the commands queued since the last call (the UI's, plus this tick's controller
+    // output) as a command list (net/packets.hpp), instead of letting step() apply them.
+    PackedByteArray take_commands();
+    // Runs one tick with exactly these commands (a TickBundle's), like step() but without the
+    // controllers; they're recorded for save_replay.
+    void step_commands(const PackedByteArray& commands);
+    // The state hash as a signed 64-bit integer (HashReport), and the canonical state (desync dumps).
+    int64_t state_hash_bits() const;
+    PackedByteArray save_state() const;
+    // The DefSet hash (the lobby refuses peers whose data differs) and the sim version.
+    int64_t data_hash() const;
+    String sim_version() const;
+    // Desync test (debug flag only): perturbs this machine's sim RNG outside the lockstep.
+    void debug_desync();
+    static void bind_net_methods();
+
+    // --- films (M8 B7; sim_bridge.cpp, end) ----------------------------------------------------
+    // save_replay with keyframes every 60 s of game time and the players' names (LastFilm.rpl).
+    Dictionary save_film(const String& path, const PackedStringArray& players) const;
+    // A film's header: {ok, error, map_spec, seed, ticks, players, keyframes, sim_version, data_hash}.
+    static Dictionary film_info(const String& path);
+    // After start() with the film's map and seed: plays the film in this bridge's sim (commands
+    // queued meanwhile are ignored). false + last_error() if the data or map differ.
+    bool film_load(const String& path);
+    bool film_step();             // the next tick (with its events); false at the end
+    void film_seek(int64_t tick);  // from the nearest keyframe; the view should resnapshot
+    int64_t film_length() const;
+    static void bind_film_methods();
+
 private:
     struct Snap {
         uint32_t bits = 0;
@@ -198,6 +229,7 @@ private:
     uint64_t seed_ = 0;
     std::string error;
     std::string biome;
+    std::unique_ptr<corps::ReplayPlayer> film;  // M8: a film being played (film_load)
 };
 
 }  // namespace godot

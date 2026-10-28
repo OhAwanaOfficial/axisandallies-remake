@@ -21,3 +21,6 @@ set_target_properties(simbridge PROPERTIES
 if(NOT WIN32)
   set_target_properties(simbridge PROPERTIES PREFIX "lib")
 endif()
+
+# M8 multiplayer (Session B): lockstep session and SimBridge's net methods.
+target_sources(simbridge PRIVATE net_session.cpp sim_bridge_net.cpp)

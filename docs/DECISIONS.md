@@ -5,3 +5,4 @@
 * 2026-10-28, B: Commands in a packet get seq = their index in it (re-stamped by the host), not a running per-player counter: a u16 counter would wrap mid-tick in a long match and break the (player, seq) order.
 * 2026-10-28, B: A peer puts at most 32 commands in one tick's packet and keeps the rest for the next (the host's rate limit trims anything over 32 anyway).
 * 2026-10-28, B: Tick 0 (match rules + every player's HQ) is not sent: it follows from the MatchConfig, so every peer queues it locally and steps it before the lockstep starts at tick 1.
+* 2026-10-28, B: The worktree links the GDExtension against the main folder's already built RelWithDebInfo godot-cpp library (same godot-cpp commit and patch; copied into this build folder, built with `BuildProjectReferences=false`): compiling godot-cpp again takes over an hour on the dev laptop. Build only; nothing in the repo changes.
