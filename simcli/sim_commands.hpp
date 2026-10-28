@@ -34,6 +34,9 @@ int cmdDuel(const SimArgs& a);
 int cmdEconomy(const SimArgs& a);
 int cmdSkirmish(const SimArgs& a);
 int cmdSlice(const SimArgs& a);
+// M8 desync tools: simcli diff a.state b.state, simcli bisect R.rpl
+int cmdDiff(const SimArgs& a);
+int cmdBisect(const SimArgs& a);
 
 // --map F.json (tools/rmp.py output) or --gen SEED [--size N]; out stays empty if neither is given.
 // false (after printing why) if the map can't be loaded.

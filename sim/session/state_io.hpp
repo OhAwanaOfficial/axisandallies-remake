@@ -44,4 +44,18 @@ std::uint64_t stateHash(const Sim& sim);
 // DefSet and map). On failure returns false, sets `error`, and leaves `sim` unchanged.
 bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* error);
 
+// The first difference between two canonical states (simcli diff, desync dumps; NETCODE §5). The
+// states are walked item by item in canonical order (header fields, registry slots, one item per
+// component per entity, kingdoms, match, nav); `where` names the first item that differs or exists
+// in only one of them, e.g. "XFRM #12.3 position.y", "header rng.state", "KING player 1".
+struct StateDiff {
+    bool equal = true;
+    bool malformed = false;  // a state didn't parse (format mismatch)
+    std::string where;
+    std::string a;  // that item's bytes in hex ("-": missing)
+    std::string b;
+    std::size_t differingItems = 0;  // items that differ in total
+};
+StateDiff diffStates(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b);
+
 }  // namespace corps

@@ -326,3 +326,28 @@ TEST_CASE("Lockstep: the host's stand-in takes over a dropped player's slot with
     CHECK(net.referenceHash(net.peers[0].nextTick()) == stateHash(*net.sims[0]));
 }
 
+TEST_CASE("State diff names the first differing entity and field (simcli diff)") {
+    SimConfig cfg;
+    cfg.matchSeed = 5;
+    Sim a(cfg);
+    a.step({makeDebugSpawn(0, 0, 0, {3_fx, 4_fx}, Angle{}), makeDebugSpawn(0, 0, 1, {7_fx, 8_fx}, Angle{})});
+    Sim b(cfg);
+    b.step({makeDebugSpawn(0, 0, 0, {3_fx, 4_fx}, Angle{}), makeDebugSpawn(0, 0, 1, {7_fx, 9_fx}, Angle{})});
+    CHECK(diffStates(saveState(a), saveState(a)).equal);
+    const StateDiff d = diffStates(saveState(a), saveState(b));
+    REQUIRE_FALSE(d.equal);
+    CHECK(d.where == "XFRM #1.1 position.y");  // index 1, generation 1
+    CHECK(d.differingItems == 1);
+    Sim c(cfg);
+    c.step({makeDebugSpawn(0, 0, 0, {3_fx, 4_fx}, Angle{}), makeDebugSpawn(0, 0, 1, {7_fx, 8_fx}, Angle{})});
+    c.rng().nextU32();  // a deliberate desync
+    const StateDiff r = diffStates(saveState(a), saveState(c));
+    CHECK(r.where == "header rng.state");
+    Sim e(cfg);
+    e.step({makeDebugSpawn(0, 0, 0, {3_fx, 4_fx}, Angle{})});
+    const StateDiff m = diffStates(saveState(a), saveState(e));
+    REQUIRE_FALSE(m.equal);
+    CHECK(m.where.find("only in a") != std::string::npos);
+    std::vector<std::uint8_t> junk = {1, 2, 3};
+    CHECK(diffStates(saveState(a), junk).malformed);
+}

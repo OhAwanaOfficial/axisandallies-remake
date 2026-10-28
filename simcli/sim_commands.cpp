@@ -4,12 +4,14 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <string>
 
 #include "core/ascii.hpp"
 #include "core/sim.hpp"
 #include "data/def_compiler.hpp"
 #include "data/tgi/pipeline.hpp"
 #include "data/tgi/value_parse.hpp"
+#include "session/bytes.hpp"
 #include "session/replay.hpp"
 #include "session/state_io.hpp"
 #include "vfs/path.hpp"
@@ -530,6 +532,145 @@ int cmdShowDef(const SimArgs& a) {
         return kFail;
     }
     return kOk;
+}
+
+// --- M8 desync tools (NETCODE §5) ---
+
+// simcli diff a.state b.state: the first differing item (entity and field) of two state dumps.
+int cmdDiff(const SimArgs& a) {
+    if (a.positional.size() != 2) {
+        std::fprintf(stderr, "usage: simcli diff a.state b.state\n");
+        return kUsage;
+    }
+    std::vector<std::uint8_t> sa;
+    std::vector<std::uint8_t> sb;
+    if (!readFile(a.positional[0], sa) || !readFile(a.positional[1], sb)) {
+        std::fprintf(stderr, "cannot read %s or %s\n", a.positional[0].c_str(), a.positional[1].c_str());
+        return kFail;
+    }
+    const StateDiff d = diffStates(sa, sb);
+    if (d.equal) {
+        std::printf("identical states (%zu bytes, hash %s)\n", sa.size(), hex(hashBytes(sa)).c_str());
+        return kOk;
+    }
+    if (d.malformed) {
+        std::printf("states differ and at least one doesn't parse (%zu vs %zu bytes)\n", sa.size(), sb.size());
+        return kFail;
+    }
+    std::printf("FIRST DIFFERENCE: %s\n  a: %s\n  b: %s\n%zu item(s) differ in total\n", d.where.c_str(), d.a.c_str(), d.b.c_str(),
+                d.differingItems);
+    return kFail;
+}
+
+namespace {
+
+// "tick stage hash" lines, one per stage of every tick.
+bool writeStageHashes(const std::string& path, const RunResult& run) {
+    std::ofstream out(vfs::pathFromUtf8(path), std::ios::binary);
+    for (std::size_t t = 0; t < run.stageHashes.size(); ++t) {
+        for (std::size_t s = 0; s < kStageCount; ++s) out << t << ' ' << s << ' ' << hex(run.stageHashes[t][s]) << '\n';
+    }
+    return static_cast<bool>(out);
+}
+
+bool readStageHashes(const std::string& path, RunResult& run) {
+    std::ifstream in(vfs::pathFromUtf8(path), std::ios::binary);
+    if (!in) return false;
+    std::size_t t = 0;
+    std::size_t s = 0;
+    std::string h;
+    while (in >> t >> s >> h) {
+        if (s >= kStageCount) return false;
+        if (run.stageHashes.size() <= t) run.stageHashes.resize(t + 1);
+        run.stageHashes[t][s] = std::stoull(h, nullptr, 16);
+    }
+    return true;
+}
+
+}  // namespace
+
+// simcli bisect R.rpl [--map F.json] [--write-stages F.txt] [--against F.txt] [--perturb TICK:STAGE]
+// Re-runs a replay hashing every stage of every tick. Finds the first divergent tick and stage
+// against the replay's recorded hashes (the recording machine's; a 10-tick window), a second local
+// run, and --against: another machine's --write-stages output. --perturb (debug) draws from the sim
+// RNG after that tick's stage, to stand in for a nondeterministic machine.
+int cmdBisect(const SimArgs& a) {
+    if (a.positional.empty()) {
+        std::fprintf(stderr, "usage: simcli bisect R.rpl [--map F.json] [--write-stages F] [--against F] [--perturb TICK:STAGE]\n");
+        return kUsage;
+    }
+    Replay rep;
+    if (!loadReplayFile(a.positional[0], rep)) return kFail;
+    std::unique_ptr<GameData> game;
+    const DefSet* defs = nullptr;
+    if (!dataForReplay(a, rep, game, defs)) return kFail;
+    std::optional<nav::MapDef> map;
+    if (!mapForReplay(a, rep, map)) return kFail;
+    RunOptions opt;
+    opt.map = map ? &*map : nullptr;
+    opt.everyTick = true;
+    opt.perStage = true;
+    if (a.has("perturb")) {
+        const std::string p = a.get("perturb");
+        const std::size_t colon = p.find(':');
+        const auto tick = static_cast<std::uint32_t>(parseU64(p.substr(0, colon), 0));
+        int stage = static_cast<int>(Stage::Cleanup);
+        if (colon != std::string::npos) {
+            const std::string name = asciiLowerCopy(p.substr(colon + 1));
+            for (std::size_t s = 0; s < kStageCount; ++s) {
+                if (asciiLowerCopy(stageName(static_cast<Stage>(s))) == name) stage = static_cast<int>(s);
+            }
+        }
+        opt.afterStage = [tick, stage](Sim& sim, Stage s) {
+            if (sim.tick() == tick && static_cast<int>(s) == stage) sim.rng().nextU32();
+        };
+        std::fprintf(stderr, "debug: perturbing after tick %u stage %s\n", tick, stageName(static_cast<Stage>(stage)));
+    }
+    const RunResult run = runReplay(rep, defs, opt);
+    std::printf("%u ticks re-run, %zu stage hashes, final %s\n", rep.header.tickCount, run.stageHashes.size() * kStageCount,
+                hex(run.finalHash).c_str());
+    if (a.has("write-stages")) {
+        if (!writeStageHashes(a.get("write-stages"), run)) {
+            std::fprintf(stderr, "cannot write %s\n", a.get("write-stages").c_str());
+            return kFail;
+        }
+        std::printf("stage hashes written to %s\n", a.get("write-stages").c_str());
+    }
+    int rc = kOk;
+    const Divergence rec = divergenceFromRecorded(rep, run);
+    if (rec.found) {
+        printDivergence("run vs recording", rec);
+        std::printf("  (recorded hashes are every %u ticks: the divergence began after tick %u)\n", rep.header.hashInterval,
+                    rec.tick >= rep.header.hashInterval ? rec.tick - rep.header.hashInterval : 0);
+        rc = kFail;
+    }
+    if (a.has("against")) {
+        RunResult other;
+        if (!readStageHashes(a.get("against"), other)) {
+            std::fprintf(stderr, "cannot read %s\n", a.get("against").c_str());
+            return kFail;
+        }
+        RunResult mine;  // stage hashes only: the other file has no per-tick list
+        mine.stageHashes = run.stageHashes;
+        const Divergence d = firstDivergence(mine, other);
+        if (d.found) {
+            printDivergence("this run vs --against", d);
+            rc = kFail;
+        } else {
+            std::printf("this run matches --against stage by stage\n");
+        }
+    } else {
+        RunOptions again = opt;
+        again.afterStage = nullptr;
+        const RunResult second = runReplay(rep, defs, again);
+        const Divergence d = firstDivergence(run, second);
+        if (d.found) {
+            printDivergence("run 1 vs run 2", d);
+            rc = kFail;
+        }
+    }
+    if (rc == kOk) std::printf("no divergence\n");
+    return rc;
 }
 
 }  // namespace simcli

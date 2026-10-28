@@ -23,6 +23,8 @@
 //   simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]
 //                   [--city-ratio R] [--seed S] [--out F.rpl]
 //   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace]
+//   simcli diff a.state b.state               first differing entity / field of two state dumps (M8)
+//   simcli bisect F.rpl [--map F.json] [--write-stages F] [--against F] [--perturb TICK:STAGE]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -83,7 +85,9 @@ void usage() {
                  "                 [--size N] [--seed S] [--out F.rpl]\n"
                  "  simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]\n"
                  "                  [--city-ratio R] [--seed S] [--out F.rpl]\n"
-                 "  simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl]\n");
+                 "  simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl]\n"
+                 "  simcli diff a.state b.state\n"
+                 "  simcli bisect F.rpl [--map F.json] [--write-stages F] [--against F] [--perturb TICK:STAGE]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -169,7 +173,8 @@ const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-se
                                              "map", "gen", "size", "queries", "class", "budget",
                                              "distance", "formation-a", "formation-b", "max-seconds", "tune",
                                              "xp-a", "xp-b", "retreat-a", "retreat-b", "minutes", "recruit", "research",
-                                             "city-ratio", "regiments-b", "money"};
+                                             "city-ratio", "regiments-b", "money",
+                                             "write-stages", "against", "perturb"};
 const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose", "trace",
                                             "until-wiped"};
 
@@ -371,6 +376,8 @@ int main(int argc, char** argv) {
     if (args->command == "economy") return simcli::cmdEconomy(sa);
     if (args->command == "skirmish") return simcli::cmdSkirmish(sa);
     if (args->command == "slice") return simcli::cmdSlice(sa);
+    if (args->command == "diff") return simcli::cmdDiff(sa);
+    if (args->command == "bisect") return simcli::cmdBisect(sa);
     usage();
     return kExitUsage;
 }

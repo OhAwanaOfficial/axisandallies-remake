@@ -1,5 +1,8 @@
 #include "session/state_io.hpp"
 
+#include <map>
+#include <string>
+
 #include "nav/nav_world.hpp"
 #include "session/bytes.hpp"
 
@@ -515,6 +518,189 @@ bool loadState(Sim& sim, const std::vector<std::uint8_t>& bytes, std::string* er
     sim.rng() = Rng::fromRaw(rngState, rngInc);
     sim.restoreTick(tick);
     return true;
+}
+
+// --- simcli diff ---
+
+namespace {
+
+struct StateItem {
+    std::string label;
+    std::size_t start = 0;
+    std::size_t end = 0;
+};
+
+std::string entityLabel(EntityId id) {
+    return "#" + std::to_string(id.index()) + "." + std::to_string(id.generation());
+}
+
+template <class T>
+void walkPool(ByteReader& r, const Pool<T>&, const char* tag, std::vector<StateItem>& out) {
+    const std::uint32_t n = r.count(5);
+    for (std::uint32_t i = 0; i < n && r.ok; ++i) {
+        const std::size_t start = r.position();
+        const EntityId id = r.entity();
+        T value{};
+        get(r, value);
+        out.push_back({std::string(tag) + " " + entityLabel(id), start, r.position()});
+    }
+}
+
+// Field names inside an entry (byte offsets; the u32 entity id comes first) for the common components.
+std::string fieldAt(const std::string& label, std::size_t offset) {
+    struct Field {
+        const char* tag;
+        std::size_t from;
+        const char* name;
+    };
+    static const Field kFields[] = {
+        {"XFRM", 0, "entity"}, {"XFRM", 4, "position.x"},   {"XFRM", 12, "position.y"}, {"XFRM", 20, "facing"},
+        {"HLTH", 0, "entity"}, {"HLTH", 4, "current"},      {"HLTH", 12, "max"},
+        {"MOVR", 0, "entity"}, {"MOVR", 4, "velocity.x"},   {"MOVR", 12, "velocity.y"},
+        {"MEMB", 0, "entity"}, {"MEMB", 4, "organization"}, {"MEMB", 8, "slot"},
+        {"DREF", 0, "entity"}, {"DREF", 4, "kind"},         {"DREF", 5, "index"},
+        {"ORDR", 0, "entity"}, {"ORDR", 4, "state"},        {"ORDR", 5, "flags"},      {"ORDR", 10, "facing"},
+        {"ORDR", 12, "goal"},  {"ORDR", 28, "waypoint"},    {"ORDR", 32, "stateTicks"}, {"ORDR", 36, "progress"},
+        {"ORDR", 44, "expected"},
+    };
+    const std::string tag = label.substr(0, 4);
+    const char* name = nullptr;
+    for (const Field& f : kFields) {
+        if (tag == f.tag && offset >= f.from) name = f.name;
+    }
+    return name != nullptr ? std::string(name) : "byte +" + std::to_string(offset);
+}
+
+bool walkState(const std::vector<std::uint8_t>& bytes, std::vector<StateItem>& out) {
+    ByteReader r(bytes);
+    const auto field = [&](const char* label, int n) {
+        const std::size_t start = r.position();
+        for (int i = 0; i < n; ++i) r.u8();
+        out.push_back({std::string("header ") + label, start, r.position()});
+    };
+    if (!r.expectTag("CSIM")) return false;
+    field("format", 4);
+    field("tick", 4);
+    field("matchSeed", 8);
+    field("dataHash", 8);
+    field("mapHash", 8);
+    field("tuningHash", 8);
+    field("rng.state", 8);
+    field("rng.inc", 8);
+    if (!r.expectTag("ENTS")) return false;
+    const std::uint32_t slots = r.count(3);
+    for (std::uint32_t i = 0; i < slots && r.ok; ++i) {
+        const std::size_t start = r.position();
+        r.u16();
+        r.u8();
+        out.push_back({"ENTS slot " + std::to_string(i) + " (generation, state)", start, r.position()});
+    }
+    std::size_t start = r.position();
+    const std::uint32_t nFree = r.count(4);
+    for (std::uint32_t i = 0; i < nFree && r.ok; ++i) r.u32();
+    out.push_back({"ENTS free list", start, r.position()});
+    start = r.position();
+    const std::uint32_t nPending = r.count(4);
+    for (std::uint32_t i = 0; i < nPending && r.ok; ++i) r.u32();
+    out.push_back({"ENTS pending destruction", start, r.position()});
+    World world;
+    int poolNo = 0;
+    bool ok = r.ok;
+    world.forEachPool([&](const auto& pool) {
+        if (!ok) return;
+        const char* tag = kPoolTags[poolNo++];
+        if (!r.expectTag(tag)) {
+            ok = false;
+            return;
+        }
+        out.push_back({std::string(tag) + " count", r.position(), r.position() + 4});
+        walkPool(r, pool, tag, out);
+        ok = r.ok;
+    });
+    if (!ok || !r.expectTag("KING")) return false;
+    for (std::size_t p = 0; p < kMaxPlayers; ++p) {
+        start = r.position();
+        r.boolean();
+        r.fixed();
+        r.boolean();
+        r.fixed();
+        r.boolean();
+        const std::uint32_t n = r.count(4);
+        for (std::uint32_t i = 0; i < n && r.ok; ++i) r.u32();
+        r.u8();
+        r.boolean();
+        out.push_back({"KING player " + std::to_string(p), start, r.position()});
+    }
+    start = r.position();
+    if (!r.expectTag("MTCH")) return false;
+    r.fixed();
+    r.boolean();
+    r.fixed();
+    r.boolean();
+    r.u8();
+    r.u32();
+    out.push_back({"MTCH", start, r.position()});
+    out.push_back({"NAVS (nav version, dirty clusters, path service)", r.position(), bytes.size()});
+    return r.ok;
+}
+
+std::string hexRange(const std::vector<std::uint8_t>& b, std::size_t from, std::size_t to) {
+    static const char* kHex = "0123456789abcdef";
+    std::string s;
+    for (std::size_t i = from; i < to && i < from + 48; ++i) {
+        s.push_back(kHex[b[i] >> 4]);
+        s.push_back(kHex[b[i] & 15]);
+    }
+    if (to - from > 48) s += "...";
+    return s;
+}
+
+}  // namespace
+
+StateDiff diffStates(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+    StateDiff d;
+    std::vector<StateItem> ia;
+    std::vector<StateItem> ib;
+    if (!walkState(a, ia) || !walkState(b, ib)) {
+        d.malformed = true;
+        d.equal = a == b;
+        d.where = "unparseable state (format version?)";
+        return d;
+    }
+    // Both lists are in canonical order. Items match by label: equal labels compare bytes, a label
+    // in one state only is a difference.
+    std::map<std::string, std::size_t> inA;
+    std::map<std::string, std::size_t> inB;
+    for (std::size_t i = 0; i < ia.size(); ++i) inA.emplace(ia[i].label, i);
+    for (std::size_t i = 0; i < ib.size(); ++i) inB.emplace(ib[i].label, i);
+    const auto note = [&](const std::string& where, const std::string& ha, const std::string& hb) {
+        if (d.differingItems++ == 0) {
+            d.equal = false;
+            d.where = where;
+            d.a = ha;
+            d.b = hb;
+        }
+    };
+    for (const StateItem& x : ia) {
+        const auto it = inB.find(x.label);
+        if (it == inB.end()) {
+            note(x.label + " (only in a)", hexRange(a, x.start, x.end), "-");
+            continue;
+        }
+        const StateItem& y = ib[it->second];
+        const std::size_t na = x.end - x.start;
+        const std::size_t nb = y.end - y.start;
+        std::size_t k = 0;
+        while (k < na && k < nb && a[x.start + k] == b[y.start + k]) ++k;
+        if (k == na && k == nb) continue;
+        const bool entity = x.label.size() > 5 && x.label[5] == '#';
+        note(entity ? x.label + " " + fieldAt(x.label, k) : x.label + (k > 0 ? " byte +" + std::to_string(k) : ""),
+             hexRange(a, x.start, x.end), hexRange(b, y.start, y.end));
+    }
+    for (const StateItem& y : ib) {
+        if (inA.count(y.label) == 0) note(y.label + " (only in b)", "-", hexRange(b, y.start, y.end));
+    }
+    return d;
 }
 
 }  // namespace corps
