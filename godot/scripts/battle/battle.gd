@@ -53,7 +53,7 @@ extends Node3D
 ##   when frames are slow on GL Compatibility; ARCHITECTURE §4.4).
 
 const TICK := 0.1
-const PLAYER := 0
+var PLAYER := 0  # your slot (M8: Net.slot in a network match)
 const FORMATIONS := {KEY_Q: "regiment_aggressive", KEY_W: "regiment_defensive", KEY_E: "regiment_column"}
 const FORMATION_LABELS := {"regiment_aggressive": "Assault", "regiment_defensive": "Normal", "regiment_column": "Column"}
 const DRAG_PX := 6.0
@@ -149,6 +149,9 @@ func _ready() -> void:
 	if not skirmish.is_empty():
 		nations = [str(skirmish.nation), str(skirmish.enemy)]
 		_fast = str(skirmish.slice_test) != ""
+		if skirmish.get("net", false):  # M8: a lockstep match through the Net autoload
+			PLAYER = Net.slot
+			nations = Net.slot_nations()
 	# Loading the TGI data and the map takes seconds: show that before blocking.
 	var loading_layer := CanvasLayer.new()
 	var loading := Label.new()
@@ -170,7 +173,9 @@ func _ready() -> void:
 	print("map %s (%dx%d cells, biome %s) loaded in %d ms" % [map.name, map.width, map.height, map.biome, Time.get_ticks_msec() - t0])
 
 	_build_scene(map)
-	if not skirmish.is_empty():
+	if skirmish.has("film"):  # M8: a film from the Films menu
+		_film_start()
+	elif not skirmish.is_empty():
 		_start_skirmish(map)
 	elif args.has("regiments"):
 		_spawn_many(int(args.regiments))
@@ -548,13 +553,27 @@ func _process(delta: float) -> void:
 	var step_us := 0
 	var snap_us := 0
 	var cap := FAST_TICKS if _fast else 8
+	var net: bool = skirmish.get("net", false)
+	if net:
+		_net_sync()
 	if not paused:
 		accum += delta * speed
 		if _fast:
 			accum = TICK * cap
+		if net and Net.queued() > 2:
+			accum += TICK  # catch-up tick (NETCODE §6)
 		while accum >= TICK and steps < cap:
 			var t0 := Time.get_ticks_usec()
-			bridge.step()
+			if net:
+				if not Net.step(bridge):
+					accum = minf(accum, TICK)
+					break
+			elif skirmish.has("film"):
+				if not bridge.film_step():
+					accum = 0.0
+					break
+			else:
+				bridge.step()
 			step_us += Time.get_ticks_usec() - t0
 			accum -= TICK
 			steps += 1
@@ -1374,7 +1393,8 @@ func _count(e: Dictionary) -> void:
 ## Rules (the starting money, the map's city ratio), both bases, the dummy AI on the enemy side
 ## (and the slice player on yours in the play-test), the camera on your Corps HQ.
 func _start_skirmish(map: Dictionary) -> void:
-	bridge.queue_match_rules(PackedInt32Array(), float(map.get("city_victory_ratio", 0.0)), true, float(skirmish.money), PLAYER)
+	var teams: PackedInt32Array = Net.slot_teams() if skirmish.get("net", false) else PackedInt32Array()
+	bridge.queue_match_rules(teams, float(map.get("city_victory_ratio", 0.0)), true, float(skirmish.money), 0)
 	var w := float(terrain.cells.x)
 	var h := float(terrain.cells.y)
 	_start_bases(Vector2(w * 0.25, h * 0.5), Vector2(w * 0.75, h * 0.5))
@@ -1385,6 +1405,8 @@ func _start_skirmish(map: Dictionary) -> void:
 		bridge.set_controller(PLAYER, str(skirmish.ai), nations[0])
 		bridge.set_controller(1, "slice", nations[1])
 	bridge.step()
+	if skirmish.get("net", false):
+		Net.begin_battle(bridge)  # tick 0 ran here on every machine; the lockstep starts at tick 1
 	_learn_regiments()
 	var home := Vector2(w * 0.25, h * 0.5)
 	for s in bridge.structures():
@@ -1981,3 +2003,50 @@ func _selftest() -> void:
 			fails += 1
 	print("SELFTEST %s: %d checks, %d failed" % ["PASSED" if fails == 0 else "FAILED", results.size(), fails])
 	get_tree().quit(1 if fails > 0 else 0)
+
+
+# ---------------------------------------------------------------- multiplayer (M8)
+
+var _net_label: Label
+var _net_want_paused := false
+var _net_want_speed := 1.0
+
+
+## Speed and pause belong to the host in a network match: its keys send SetSpeed / Pause controls
+## and every other machine follows the bundles. Also shows "Waiting for <player>...".
+func _net_sync() -> void:
+	if Net.is_host:
+		if paused != _net_want_paused:
+			Net.host_set_paused(paused)
+			_net_want_paused = paused
+		if speed != _net_want_speed:
+			Net.host_set_speed(int(speed * 100.0))
+			_net_want_speed = speed
+	else:
+		paused = Net.is_paused()
+		speed = Net.speed_percent() / 100.0
+	if _net_label == null:
+		var layer := CanvasLayer.new()
+		layer.layer = 9
+		add_child(layer)
+		_net_label = Label.new()
+		_net_label.position = Vector2(20, 60)
+		_net_label.add_theme_font_size_override("font_size", 22)
+		_net_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4))
+		layer.add_child(_net_label)
+	_net_label.text = Net.waiting_text
+
+
+## Films (M8 B7): play a recorded match instead of starting one; FilmControls seeks and switches views.
+func _film_start() -> void:
+	if not bridge.film_load(str(skirmish.film)):
+		_fatal("Cannot play the film: " + bridge.last_error())
+		return
+	var names: Array = skirmish.get("players", [])
+	cam.setup(terrain, Vector2(float(terrain.cells.x), float(terrain.cells.y)) * 0.5)
+	cam.distance = 90.0
+	var fc := FilmControls.new()
+	add_child(fc)
+	fc.setup(self, bridge, names)
+	print("FILM: playing %s (%d ticks)" % [skirmish.film, bridge.film_length()])
+

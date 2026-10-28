@@ -319,7 +319,7 @@ func _check_end() -> void:
 	print("NET MATCH OK slot %d tick %d hash %s (%.1f s, %.0f ticks/s, D=%d, left %d)" % [slot, bridge.tick(), bridge.state_hash(),
 		secs, (bridge.tick() - 1) / maxf(secs, 0.001), int(st.input_delay), int(st.left_mask)])
 	if args.has("replay"):
-		var r: Dictionary = bridge.save_replay(str(args.replay))
+		var r: Dictionary = bridge.save_film(ProjectSettings.globalize_path(str(args.replay)), PackedStringArray(["slot 0", "slot 1"]))
 		print("NET replay %s: %s" % [args.replay, "ok" if r.ok else str(r.get("error", ""))])
 	# Keep relaying a little longer so the other side gets its last bundles.
 	phase = "done"
@@ -329,7 +329,7 @@ func _check_end() -> void:
 
 
 func _on_desync(tick: int) -> void:
-	var out := str(args.get("out", "user://"))
+	var out := ProjectSettings.globalize_path(str(args.get("out", "user://")))
 	var state_path := out.path_join("desync_%d_%d.state" % [slot, tick])
 	var f := FileAccess.open(state_path, FileAccess.WRITE)
 	if f != null:

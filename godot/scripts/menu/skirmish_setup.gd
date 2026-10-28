@@ -138,6 +138,16 @@ func _build() -> void:
 	start_button.custom_minimum_size = Vector2(150, 40)
 	start_button.pressed.connect(_start)
 	buttons.add_child(start_button)
+	var multi := Button.new()  # M8
+	multi.text = "Multiplayer"
+	multi.custom_minimum_size = Vector2(150, 40)
+	multi.pressed.connect(func() -> void: get_tree().change_scene_to_file("res://scenes/lobby.tscn"))
+	buttons.add_child(multi)
+	var films := Button.new()  # M8
+	films.text = "Films"
+	films.custom_minimum_size = Vector2(150, 40)
+	films.pressed.connect(func() -> void: get_tree().change_scene_to_file("res://scenes/films.tscn"))
+	buttons.add_child(films)
 	var quit := Button.new()
 	quit.text = "Quit"
 	quit.custom_minimum_size = Vector2(150, 40)
