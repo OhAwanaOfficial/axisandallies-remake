@@ -76,3 +76,6 @@ if(MSVC)
 else()
   target_compile_options(sim PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# M8 multiplayer (Session B; NETCODE.md)
+include(${CMAKE_CURRENT_SOURCE_DIR}/net/sources.cmake)

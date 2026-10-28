@@ -23,3 +23,6 @@ if(MSVC)
   target_compile_options(sim_tests PRIVATE /W4 /permissive- /utf-8 /bigobj)
 endif()
 add_test(NAME sim_tests COMMAND sim_tests)
+
+# M8 multiplayer tests (Session B)
+include(${CMAKE_CURRENT_SOURCE_DIR}/net_tests.cmake)

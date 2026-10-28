@@ -1,0 +1,7 @@
+# Decisions (final sprint; one line each: date, session, decision, why)
+
+* 2026-10-28, B: Session control (SetInputDelay 400, PlayerLeft 401, SetSpeed 402, Pause 403, DesyncDetected 404) are bundle-level `net::Control` entries, not sim `CommandType`s: CommandType is a u8 (400+ doesn't fit) and none of them changes sim state; they still travel in every TickBundle.
+* 2026-10-28, B: Lockstep lives in `sim/net/` (transport-free, no floats, ordered containers) so it is unit-tested with the sim; the ENet transport is GDScript (`godot/net/`) over `NetSession` (gdext). New sources are added through `sim/net/sources.cmake` and `sim/tests/net_tests.cmake`, one include line each, to keep the shared CMakeLists append-only.
+* 2026-10-28, B: Commands in a packet get seq = their index in it (re-stamped by the host), not a running per-player counter: a u16 counter would wrap mid-tick in a long match and break the (player, seq) order.
+* 2026-10-28, B: A peer puts at most 32 commands in one tick's packet and keeps the rest for the next (the host's rate limit trims anything over 32 anyway).
+* 2026-10-28, B: Tick 0 (match rules + every player's HQ) is not sent: it follows from the MatchConfig, so every peer queues it locally and steps it before the lockstep starts at tick 1.

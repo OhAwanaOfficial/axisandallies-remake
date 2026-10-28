@@ -135,3 +135,17 @@ Replay file (.rpl; v1 is uncompressed with a trailing xxh3 integrity hash, zstd 
 
 ## 10. Bandwidth estimate
 8 players × 10 ticks/s × ~8 bytes (empty packet plus header) ≈ **0.7 KB/s upstream to the host** at idle. During heavy micro (5 commands/s/player × 16 B) it's < 2 KB/s total. The host's downstream to each peer is about the same. A 2004 modem could carry it, so a 2026 connection has no trouble.
+
+---
+
+## 11. Implementation (M8)
+
+* **`sim/net/lockstep`** (transport-free, deterministic code, no wall clock: the caller passes integer ms):
+  * `LockstepHost`: one slot per player (remote peers and the host's own slots alike). `onPacket` drops late, duplicate and unknown-slot packets, cuts a packet to 32 commands and re-stamps every command with the packet's tick, player and seq = its index. `poll` emits `TickBundle(T)` once every active slot's packet for T is in, commands sorted by (player, seq). `waitingOn` / `stalledForMs` drive "Waiting for player…".
+  * `LockstepPeer`: `takeOutgoing` sends a packet for every tick in (lastSent, next + D], local commands in the last one. When D grows, the gap is filled with empty packets; when it shrinks, nothing is sent until next + D passes lastSent (commands wait), so a delay change never stalls or loses a command. `onBundle` takes bundles in any order; `takeTick` applies the bundle's controls when that tick runs, so every peer switches on the same tick.
+  * Controls (codes 400–404, `net::Control`, not sim commands): SetInputDelay, PlayerLeft, SetSpeed, Pause, DesyncDetected.
+  * `dropPlayer` emits PlayerLeft and stops waiting for the slot; `addPlayer` + `LockstepPeer::startAt` let a host-side stand-in (the AI) send for it from the next bundle.
+  * Adaptive D = ceil((maxRTT/2 + 2×jitter + 10 ms) / 100 ms) + 1, clamped to 2–8.
+  * Hash reports: the first tick whose reports disagree queues one DesyncDetected(T).
+  * Tests (`test_lockstep.cpp`, a loopback transport with one Sim per peer): identical hashes on every peer and against a direct run; packets and bundles out of order (one peer receives bursts in reverse and runs catch-up ticks); a stalled peer freezes everyone and resumes; D 3 → 7 → 2 → 8 (clamped) with no stall and every issued command delivered; a player leaving; a stand-in taking over; rate limit; desync detection.
+* **`sim/net/packets`**: the wire format of §4 with one kind byte per message (1 CmdPacket, 2 TickBundle, 3 HashReport, 4 Ping, 5 Pong, 6 Chat; lobby JSON uses 16). Strict decoding: short input, trailing bytes, unknown kinds or control types, a player ≥ 8 or more than 32 commands in a CmdPacket are refused. An empty heartbeat is 9 bytes. Tests: 2,000 random messages round-trip byte-exactly; every truncation and random bit flips never crash and never decode to something that doesn't round-trip.
