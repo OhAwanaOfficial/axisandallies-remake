@@ -29,6 +29,7 @@ namespace corps {
 class Sim;
 namespace ai {
 class Controller;
+class View;
 }
 struct DefSet;
 namespace nav {
@@ -168,6 +169,13 @@ public:
     // hash, the seed): re-runs it to fill the hashes and checks it ends on the live state.
     // {ok, error, path, ticks, commands, hash}.
     Dictionary save_replay(const String& path) const;
+    // The AI read API (ai/view.hpp) for `player`: what its team sees, its last-seen memory (kept
+    // across calls: call it regularly), its kingdom, cities and supply. {player, team, tick, alive,
+    // money, army_xp, income {money, oil, ammo}, unit_limit [used, max], building_limit [used, max],
+    // research, buildings [{id, def, ids, pos, hq, corps, in_supply}], regiments [{id, def, ids, pos,
+    // units, health, idle, in_supply}], visible / remembered [{id, player, structure, def, ids, pos,
+    // units, health, hq, tick}], cities [{id, pos, owner, value}], supply [{pos, radius}], allies, enemies}.
+    Dictionary ai_view(int64_t player);
 
 private:
     struct Snap {
@@ -195,6 +203,7 @@ private:
     std::vector<corps::Command> recorded;      // every command queued since start (the replay)
     std::vector<std::unique_ptr<corps::ai::Controller>> controllers;
     PackedStringArray aiNotes;
+    std::map<uint8_t, std::unique_ptr<corps::ai::View>> aiViews;  // ai_view(): per player, keeps memory
     uint64_t seed_ = 0;
     std::string error;
     std::string biome;

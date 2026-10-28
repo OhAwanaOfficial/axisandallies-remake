@@ -15,6 +15,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "ai/controller.hpp"
+#include "ai/view.hpp"
 #include "core/ascii.hpp"
 #include "core/hello.hpp"
 #include "core/sim.hpp"
@@ -181,6 +182,7 @@ void SimBridge::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_controller", "player", "kind", "nation"), &SimBridge::set_controller);
     ClassDB::bind_method(D_METHOD("drain_ai_notes"), &SimBridge::drain_ai_notes);
     ClassDB::bind_method(D_METHOD("save_replay", "path"), &SimBridge::save_replay);
+    ClassDB::bind_method(D_METHOD("ai_view", "player"), &SimBridge::ai_view);
 }
 
 String SimBridge::hello() const {
@@ -1418,6 +1420,115 @@ PackedByteArray SimBridge::cost_grid(int64_t moveClass) const {
     const int64_t n = static_cast<int64_t>(g.width()) * g.height();
     out.resize(n);
     for (int64_t i = 0; i < n; ++i) out.set(i, g.cost(c, static_cast<uint32_t>(i)));
+    return out;
+}
+
+// ------------------------------------------------------------------------------ AI read API
+
+Dictionary SimBridge::ai_view(int64_t player) {
+    Dictionary out;
+    if (!sim || !data || player < 0 || player >= static_cast<int64_t>(corps::kMaxPlayers)) return out;
+    const auto p = static_cast<uint8_t>(player);
+    auto& slot = aiViews[p];
+    if (!slot) slot = std::make_unique<corps::ai::View>(p);
+    corps::ai::View& v = *slot;
+    v.update(*sim);
+    const corps::DefSet& defs = data->defs;
+    const auto pair = [](corps::Fixed used, corps::Fixed max) {
+        Array a;
+        a.push_back(toF(used));
+        a.push_back(toF(max));
+        return a;
+    };
+    const auto players = [](const std::vector<uint8_t>& ps) {
+        PackedInt32Array a;
+        for (const uint8_t q : ps) a.push_back(q);
+        return a;
+    };
+    const auto seen = [&](const std::vector<corps::ai::Seen>& list) {
+        Array a;
+        for (const corps::ai::Seen& s : list) {
+            Dictionary d;
+            d["id"] = static_cast<int64_t>(s.id.bits);
+            d["player"] = static_cast<int64_t>(s.player);
+            d["structure"] = s.structure;
+            d["def"] = static_cast<int64_t>(s.def);
+            d["ids"] = str(s.structure ? defs.buildings[s.def].ids : defs.regiments[s.def].ids);
+            d["pos"] = toV(s.at);
+            d["units"] = static_cast<int64_t>(s.units);
+            d["health"] = toF(s.health);
+            d["hq"] = s.hq;
+            d["tick"] = static_cast<int64_t>(s.tick);
+            a.push_back(d);
+        }
+        return a;
+    };
+    out["player"] = player;
+    out["team"] = static_cast<int64_t>(v.team());
+    out["tick"] = static_cast<int64_t>(v.tick());
+    out["alive"] = v.alive();
+    out["money"] = toF(v.money);
+    out["army_xp"] = toF(v.armyXp);
+    out["bankrupt"] = v.bankrupt;
+    Dictionary income;
+    income["money"] = toF(v.ledger.moneyNet());
+    income["oil"] = toF(v.ledger.oilNet());
+    income["ammo"] = toF(v.ledger.ammoNet());
+    out["income"] = income;
+    out["unit_limit"] = pair(v.ledger.upkeep.unitLimitConsumed, v.ledger.unitLimit);
+    out["building_limit"] = pair(v.ledger.upkeep.buildingLimitConsumed, v.ledger.buildingLimit);
+    PackedStringArray research;
+    for (const uint32_t r : v.research) research.push_back(str(defs.properties[r].ids));
+    out["research"] = research;
+    Array buildings;
+    for (const corps::ai::OwnBuilding& b : v.buildings) {
+        Dictionary d;
+        d["id"] = static_cast<int64_t>(b.id.bits);
+        d["def"] = static_cast<int64_t>(b.def);
+        d["ids"] = str(defs.buildings[b.def].ids);
+        d["pos"] = toV(b.at);
+        d["hq"] = b.hq;
+        d["corps"] = b.corps;
+        d["in_supply"] = b.inSupply;
+        buildings.push_back(d);
+    }
+    out["buildings"] = buildings;
+    Array regiments;
+    for (const corps::ai::OwnRegiment& r : v.regiments) {
+        Dictionary d;
+        d["id"] = static_cast<int64_t>(r.id.bits);
+        d["def"] = static_cast<int64_t>(r.def);
+        d["ids"] = str(defs.regiments[r.def].ids);
+        d["pos"] = toV(r.at);
+        d["units"] = static_cast<int64_t>(r.units);
+        d["health"] = toF(r.health);
+        d["idle"] = r.idle;
+        d["in_supply"] = r.inSupply;
+        regiments.push_back(d);
+    }
+    out["regiments"] = regiments;
+    out["visible"] = seen(v.visible());
+    out["remembered"] = seen(v.remembered());
+    Array cities;
+    for (const corps::ai::City& c : v.cities()) {
+        Dictionary d;
+        d["id"] = static_cast<int64_t>(c.id.bits);
+        d["pos"] = toV(c.at);
+        d["owner"] = static_cast<int64_t>(c.owner);
+        d["value"] = toF(c.value);
+        cities.push_back(d);
+    }
+    out["cities"] = cities;
+    Array supply;
+    for (const corps::SupplyZone& z : v.supply()) {
+        Dictionary d;
+        d["pos"] = toV(z.center);
+        d["radius"] = toF(z.radius);
+        supply.push_back(d);
+    }
+    out["supply"] = supply;
+    out["allies"] = players(v.allies);
+    out["enemies"] = players(v.enemies);
     return out;
 }
 

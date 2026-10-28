@@ -158,3 +158,8 @@ if(CORPS_BUILD_GDEXT)
     $<$<CONFIG:RelWithDebInfo>:DEBUG_ENABLED DEBUG_METHODS_ENABLED>)
   add_subdirectory(gdext)
 endif()
+
+# Host-side AI tests (M7; no game data needed).
+if(CORPS_BUILD_TESTS)
+  add_subdirectory(ai/tests)
+endif()

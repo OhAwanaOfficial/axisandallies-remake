@@ -154,3 +154,6 @@ One map, two players (you vs a scripted dummy), one nation each (GBR vs GER). Co
 2. Keep each PR small: one system plus its tests.
 3. After every sim change, run `simcli determinism-check` (from M3 onward).
 4. When a design changes, **update the doc in the same PR**, so the docs stay the source of truth.
+
+### M7 progress (sprint, branch `m7-ai`)
+* **A1 AI read API:** `ai/view.{hpp,cpp}` (`corps::ai::View`, AI.md §7b). Own kingdom (money, income, limits, research, army XP, buildings, regiments), hostile regiments and buildings the team sees (computed read-only from detection ranges until the sim has a Vision stage), a last-seen memory, cities with owners, the team's supply zones, passability. `SimBridge.ai_view(player)`, `simcli slice --view`. `ai_tests` (CTest) checks that a hidden enemy is invisible, memory, shared vision between allies, cities, supply and passability.

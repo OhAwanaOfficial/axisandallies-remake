@@ -150,8 +150,19 @@ Mission scripts (from `game_events` / triggers in campaign maps) can: lock egos,
 * **Waves** (dummy): from minute 6, every 4 minutes, all but two home regiments attack-move at the enemy Corps HQ; idle wave regiments go again.
 * **Push** (slice player): at 8 regiments, every non-city regiment goes for the enemy's HQs: the Corps HQ first (it deploys the others), then the nearest, keeping its target until it is gone. Far away (over 30 m) they attack-move to a walkable point near it, close by they Attack it. Reinforcements join in groups of four. Routing, retreating or exhausted regiments are never ordered (the sim refuses).
 * **Plans:** the dummy deploys an Infantry Division HQ and a Motor Pool and recruits rifle and AT infantry (5 regiments). The slice player deploys the Infantry HQ, the Motor Pool, the Mechanized HQ and the Armour HQ (the data's chain: AT infantry needs the motor pool, the Armour HQ the Mechanized one) and recruits rifle infantry, light tanks, AT infantry and medium tanks (12).
-* **Not yet:** fog (vision isn't implemented, so they see everything), difficulty, personalities, everything in §3–§6.
+* **Not yet:** fog (they read the World directly and see everything; the M7 AI reads the fog-filtered `View` of §7b instead), difficulty, personalities, everything in §3–§6.
 * **Play-tests:** `simcli slice` (scripted player against the dummy, headless, checks the slice path, records the match) and the Godot `--slice-test` / `--defeat-test` runs (setup screen, battle, end screen, replay), all in CTest with determinism checks. GBR against GER on Golden Fields wins in 19–38 minutes depending on the seed; USA, RUS and JPN pairings play through too. With 500 starting money the slice player doesn't finish within 45 minutes.
+
+## 7b. Implemented: the AI read API (M7)
+
+`ai/view.{hpp,cpp}`: `corps::ai::View` is everything an M7 AI may know, for one player, refreshed by `update(sim)` once per think. The AI reads it and never the World, so it can't map-hack at any difficulty (§2).
+
+* **Own kingdom:** money, army XP, bankrupt, the `Ledger` (net money / oil / ammo per minute, unit and building limits used and provided), GLOBAL research, own buildings (def, position, state, health, Corps / HQ, queue length, researching, in supply, under siege) and regiments (def, anchor, living units, health, HQ, truck and the building it unpacks into, still forming, idle, orderable, engagement state and mode, morale, efficiency, XP, in supply). Allied and hostile living kingdoms.
+* **Vision:** a hostile regiment shows when any of its units is within `detection_range` of a living unit of the team (the unit's, else its regiment's), a hostile building when its position is. The team's buildings see 40 m (`kStructureSight`: BuildingDef has no detection range yet). Allies share vision. A visible regiment shows its anchor, living units and their health. This is computed in the view, read-only, until the sim has a Vision stage (M9 fog); then the view reads the team's vision grid instead.
+* **Memory:** every hostile seen, with the tick and where. An entry goes when it's older than `memoryTicks` (default 3 minutes; difficulty will set it, §4) or when the team sees its last-seen spot again and it isn't there.
+* **Cities:** every city with its owner, capture radius and value (always shown, as under EXPLORED fog).
+* **Supply and terrain:** the team's active supply zones (`supplied(at)`), passability per move class (`passable(class, at)`), map size.
+* **Hosts:** `SimBridge.ai_view(player)` returns it as a Dictionary (one View per player kept between calls, so memory works). `simcli slice --view` prints both sides' views every minute. `ai_tests` (CTest, no game data) covers: a hidden enemy is invisible, an enemy in range shows with its units and health, memory after it walks away and its decay, forgetting what died in sight, shared vision between allies, own kingdom, cities, supply and passability.
 
 ## 8. Tooling & testing (as important as the AI itself)
 

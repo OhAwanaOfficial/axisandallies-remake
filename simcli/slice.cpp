@@ -7,7 +7,7 @@
 //   recruited; both cities taken; the enemy eliminated; victory.
 // Records the whole match as a replay (--out) for `simcli determinism-check --map F.json`.
 //
-//   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace]
+//   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace] [--view]
 //
 // NATION: gbr (default), ENEMY: ger (default). --money: starting money (default: the map's).
 // Exit 0 when the slice path was played through, 1 when not, 77 without the data or the map.
@@ -20,6 +20,7 @@
 #include <set>
 
 #include "ai/controller.hpp"
+#include "ai/view.hpp"
 #include "core/ascii.hpp"
 #include "core/sim.hpp"
 #include "data/def_compiler.hpp"
@@ -98,6 +99,7 @@ int cmdSlice(const SimArgs& a) {
         money = m.value;
     }
     const bool trace = a.has("trace");  // every minute: the enemy buildings' health and your regiments; Blocked events
+    const bool showView = a.has("view");  // every minute: what each side's AI read API (ai/view) shows it
     const auto seedOpt = tgi::parseInt(a.get("seed", "1"));
     const std::uint64_t seed = seedOpt && *seedOpt >= 0 ? static_cast<std::uint64_t>(*seedOpt) : 1;
 
@@ -128,6 +130,8 @@ int cmdSlice(const SimArgs& a) {
     std::uint32_t endAt = ticks;
     std::size_t rejected = 0;
     std::map<int, std::size_t> rejectedBy;  // command type * 16 + player
+    std::vector<ai::View> views;  // --view: updated every second, so last-seen memory works
+    if (showView) views = {ai::View(you), ai::View(enemy)};
     for (std::uint32_t t = 0; t < endAt; ++t) {
         for (auto& c : controllers) {
             std::vector<Command> out;
@@ -186,7 +190,21 @@ int cmdSlice(const SimArgs& a) {
             }
         }
         if (w.match.over && endAt == ticks) endAt = std::min(ticks, t + 1 + 10 * kTicksPerSecond);
+        if ((t + 1) % kTicksPerSecond == 0) {
+            for (ai::View& v : views) v.update(sim);
+        }
         if ((t + 1) % (60 * kTicksPerSecond) == 0 || t + 1 == endAt) {
+            for (const ai::View& v : views) {
+                std::size_t structures = 0, supplied = 0, cities = 0;
+                for (const ai::Seen& s : v.visible()) structures += s.structure;
+                for (const ai::OwnRegiment& r : v.regiments) supplied += r.inSupply;
+                for (const ai::City& c : v.cities()) cities += c.owner == v.player();
+                std::printf("  VIEW %s p%u sees %zu regiments %zu buildings, remembers %zu; own %zu regiments (%zu in supply) %zu buildings; "
+                            "cities %zu/%zu; money %lld\n",
+                            clock(t + 1).c_str(), v.player(), v.visible().size() - structures, structures, v.remembered().size(),
+                            v.regiments.size(), supplied, v.buildings.size(), cities, v.cities().size(),
+                            static_cast<long long>(v.money.floorInt()));
+            }
             std::printf("%6s", clock(t + 1).c_str());
             for (const std::uint8_t p : {you, enemy}) {
                 std::size_t regs = 0, cities = 0;

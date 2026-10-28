@@ -22,7 +22,7 @@
 //                  [--out F.rpl]
 //   simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]
 //                   [--city-ratio R] [--seed S] [--out F.rpl]
-//   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace]
+//   simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace] [--view]
 //
 // The game install comes from --game, else from config/game_path.cfg (searched upward from the
 // current directory and from the executable's directory).
@@ -83,7 +83,7 @@ void usage() {
                  "                 [--size N] [--seed S] [--out F.rpl]\n"
                  "  simcli skirmish --map F.json [NATION_A [NATION_B]] [--minutes M] [--regiments N] [--regiments-b N]\n"
                  "                  [--city-ratio R] [--seed S] [--out F.rpl]\n"
-                 "  simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl]\n");
+                 "  simcli slice --map F.json [NATION [ENEMY]] [--money M] [--minutes M] [--seed S] [--out F.rpl] [--trace] [--view]\n");
 }
 
 void writeOut(std::string_view s) {
@@ -170,7 +170,7 @@ const std::set<std::string> kValueOptions = {"out", "ticks", "seed", "command-se
                                              "distance", "formation-a", "formation-b", "max-seconds", "tune",
                                              "xp-a", "xp-b", "retreat-a", "retreat-b", "minutes", "recruit", "research",
                                              "city-ratio", "regiments-b", "money"};
-const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose", "trace",
+const std::set<std::string> kFlagOptions = {"every-tick", "per-stage", "optimal", "why", "entrench-a", "entrench-b", "verbose", "trace", "view",
                                             "until-wiped"};
 
 std::optional<Args> parseArgs(int argc, char** argv) {
