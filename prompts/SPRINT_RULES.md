@@ -4,6 +4,7 @@ Two Claude Code sessions run **in parallel** until the subscription ends:
 * **Session A** (`prompts/SESSION_A.md`): M7 Skirmish AI, then M9 gameplay content. Main folder, branch `m7-ai`.
 * **Session B** (`prompts/SESSION_B.md`): M8 Multiplayer, then M10 map objects. Worktree `../Remake-net`, branch `m8-net`.
 * At the end, Session A merges both branches (`prompts/MERGE.md`).
+* `docs/DECISIONS.md` doesn't exist yet: the first session that needs it creates it (a title line, then one line per decision).
 
 ## Time box
 * **STOP_NEW_WORK_AT = 14:15 local time (Asia/Karachi, UTC+5).** The user may edit this line.
@@ -27,7 +28,7 @@ Two Claude Code sessions run **in parallel** until the subscription ends:
 * Update the matching `docs/*.md` and the Progress table in `docs/MILESTONES.md` in the same commit as the feature.
 
 ## Avoiding merge conflicts between A and B
-* **Session A owns:** `godot/ai/`, `godot/scripts/` HUD/game files it needs, `sim/systems/` gameplay files, `sim/data/`, `docs/AI.md`, `docs/GAME_DESIGN.md`.
+* **Session A owns:** `ai/` (the C++ host-side AI library, `corps_ai`), `godot/scripts/` HUD/game files it needs, `sim/systems/` gameplay files, `sim/data/`, `docs/AI.md`, `docs/GAME_DESIGN.md`.
 * **Session B owns:** `sim/session/`, a new `sim/net/` or `godot/net/`, `gdext/` networking parts, lobby/menu scenes, `tools/rmp.py`, `sim/nav/map_def*`, `docs/NETCODE.md`, `docs/ASSET_PIPELINE.md`.
 * **Shared files** (`sim/core/command.*`, `gdext/sim_bridge.*`, `CMakeLists.txt`, `docs/MILESTONES.md`, `docs/ARCHITECTURE.md`): **append only**. Add new functions, commands and sections at the end, never reorder or reformat existing code. Session A uses command codes 300–399 for anything new, Session B uses 400–499.
 

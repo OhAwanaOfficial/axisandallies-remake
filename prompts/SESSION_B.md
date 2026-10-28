@@ -25,8 +25,9 @@ Work through the backlog in order. Each task = implement, test, update docs, com
 **B8. Soak test.** Two (or more) local instances, scripted inputs, 30 game-minutes at max speed with zero desyncs, run under Debug on one side and RelWithDebInfo on the other. Record results in NETCODE.md. Fix every desync found (B4 tools). Update MILESTONES.md, tag `v0.8` on the branch.
 
 ## If you finish everything (M10 map objects, in this order)
-1. Decode `DYNAMIC_THINGS` and `DYNAMIC_THINGS_INDEX` in `tools/rmp.py`: placed objects (forests, buildings, villages, bridges, roads) by IDS with position and rotation, and stamp their blocking/cost into the nav grid (integer float32→Fixed conversion, never the FPU in `sim/`).
-2. Decode `KINGDOMS`, `TEAMS` and `OBJECTIVES` enough for start positions and skirmish setup on all 6 boxed skirmish maps and the developer maps.
+Already done in M6 part 2 (ASSET_PIPELINE §2.1): `tools/rmp.py` decodes `DYNAMIC_THINGS` / `DYNAMIC_THINGS_INDEX` (IDS, position, facing, owner, name; translate.tgi renames), `KINGDOMS` and `RULES`; `MapDef` loads them; map cities are spawned in the sim and start positions come from `placeholder_corps*` things. Build on that.
+1. Stamp the other placed objects' blocking and cost into the nav grid (forests, buildings, villages, bridges): only cities are placed in the sim today. Integer float32→Fixed conversion in `tools/`, never the FPU in `sim/`.
+2. Decode `TEAMS` and `OBJECTIVES` enough for skirmish setup on all 6 boxed skirmish maps and the developer maps, and check start positions on every one of them.
 3. Load every boxed skirmish map in the setup screen with its original objects rendered from `cache/`.
 4. Roads: speed and cost bonus from the road objects/terrain.
 5. A full RMC random-map generator from `RandomMap/*.tgi` (terrain blobs, streaks, noise, villages, start corps), deterministic from the seed.

@@ -1,6 +1,8 @@
 # Session A: M7 Skirmish AI, then M9 gameplay content
 
-Read first: `CLAUDE.md`, `prompts/SPRINT_RULES.md` (binding), `docs/AI.md`, `docs/MILESTONES.md` (Progress, M6 close-out), `docs/GAME_DESIGN.md`, `docs/ARCHITECTURE.md` §4.5.
+Read first: `CLAUDE.md`, `prompts/SPRINT_RULES.md` (binding), `docs/AI.md` (§7a: what exists), `docs/MILESTONES.md` (Progress, M6 close-out), `docs/GAME_DESIGN.md`, `docs/ARCHITECTURE.md` §4.5.
+
+Where the AI lives: since v0.6 it's C++ in `ai/` (`ai/controller.{hpp,cpp}`, library `corps_ai`, linked by `simcli` and the GDExtension), not GDScript. `RuleAi` with a `Plan` is the scripted dummy and the slice player; `SimBridge.set_controller(player, kind, nation)` attaches one, and it thinks before each `step()`. Build the M7 AIController there too (a new controller class next to `RuleAi`, or new files in `ai/`), so `simcli` can run AI-vs-AI headless and determinism stays checkable. `simcli slice` and the Godot `--slice-test` / `--defeat-test` are the existing play-tests: keep them green.
 
 Setup (once): `git switch -c m7-ai` in the main project folder (or switch to it if it exists). Build Release + RelWithDebInfo, run all tests, and confirm the vertical slice still runs before changing anything.
 
@@ -24,7 +26,7 @@ Work through the backlog in order. Each task = implement, test, update docs, com
 
 **A8. Debug overlay.** Per-AI toggle: influence maps, objectives with scores, task forces with state and target, last 20 decisions with reason strings.
 
-**A9. Headless soak + regression gate.** `simcli soak --ai A --ai B --map ... --games N --seed S` (or a headless Godot runner if the AI is GDScript): win rates per personality, game length, average income, "stuck" incidents (task force with no progress for 60 s). Run at least 20 games on Golden Fields and the generated test map, fix the worst stuck cases, record the table in AI.md. Gate: the new AI must beat the scripted dummy ≥ 90% of games.
+**A9. Headless soak + regression gate.** `simcli soak --ai A --ai B --map ... --games N --seed S` (model it on `simcli slice`): win rates per personality, game length, average income, "stuck" incidents (task force with no progress for 60 s). Run at least 20 games on Golden Fields and the generated test map, fix the worst stuck cases, record the table in AI.md. Gate: the new AI must beat the scripted dummy ≥ 90% of games.
 
 **A10. M7 close-out.** Tune until Medium AI wins against the dummy and loses to a sensible scripted "good player" build. Update MILESTONES.md, tag `v0.7` on the branch.
 
